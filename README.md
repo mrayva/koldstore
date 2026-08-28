@@ -8,6 +8,14 @@ KoldStore includes a working experimental PostgreSQL extension, reproducible ben
 
 <p align="center">
   <img
+    src="image.png"
+    alt="KoldStore tiered storage architecture"
+    width="900"
+  />
+</p>
+
+<p align="center">
+  <img
     src="https://img.shields.io/badge/project-open%20research-6f42c1"
     alt="Project: Open Research"
   />
