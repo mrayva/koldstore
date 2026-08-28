@@ -1,6 +1,6 @@
 ---
 name: Data Branch CoW
-overview: "Implement issue #91 as durable CoW data branches. Shared __branch_base (one OLD per main mutation). Reads go through KoldMergeScan as stacked layers: this branch overlay, then freeze, then the existing hot+__cl+cold composite. Same custom scan, not a second winner and not Parquet for branches. Freeze GC on closer. Domain logic in koldstore-branching."
+overview: "Implement issue #91 as durable CoW data branches. Shared __branch_base. KoldMergeScan becomes an ordered source list with first-seen PK: main is [hot, cold+__cl mask]; branch is [overlay, freeze, hot, cold+__cl mask]. Same custom scan. HotChild unchanged on main. Freeze GC on closer."
 todos:
   - id: crate-layout
     content: "Scaffold crates/koldstore-branching (PostgreSQL-free) and pg_koldstore/src/branching/; wire workspace deps; crate-architecture.md + //! module docs"
@@ -18,7 +18,7 @@ todos:
     content: "Phase 3: __branch_rows + planner rewrite of managed INSERT/UPDATE/DELETE onto overlay; reject unsupported forms"
     status: pending
   - id: phase-4-preimage-reads
-    content: "Phase 4: shared freeze + wire branch/freeze as extra KoldMergeScan layers (main HotChild unchanged); overlay then freeze then existing hot+__cl+cold"
+    content: "Phase 4: generalize MergeRowStream to an ordered source list (main=[hot,cold]; branch=[overlay,freeze,hot,cold]); three branch-only gates; v1 skip OrderedProgressive on branch; main HotChild unchanged"
     status: pending
   - id: phase-5-flush-gc
     content: "Phase 5: flush postpone; overlay DELETE by branch_id; freeze GC (truncate if last branch, else delete rows no remaining snapshot needs); expiry"
@@ -145,7 +145,7 @@ Two branches, two snapshots, one freeze log: A sees the first freeze not visible
 
 **Good, not overbuilt.** The extra moving part versus “copy OLD into every overlay” is one shared heap plus a snapshot probe. That replaces an `O(branches)` write tax with an `O(1)` write. Overlay DML, merge, and `changes_since` stay simple. The snapshot lookup is the only PostgreSQL-hard piece; it is load-bearing (xid inequality is incorrect). Do not add WAL FULL, `__branch_cl`, or per-branch seeds on top.
 
-**Where complexity lives (keep it here):** freeze trigger, `base_snapshot`, freeze GC, planner “branch session always KoldMergeScan”. Scan reuse is stacked layers inside the existing custom scan, not a second merge engine.
+**Where complexity lives (keep it here):** freeze trigger, `base_snapshot`, freeze GC, ordered merge-scan **source list**, three branch-only HotChild/native gates. Do not extend OrderedProgressive in v1. Do not add a second custom scan.
 
 **Scale (100 branches):**
 
@@ -273,7 +273,7 @@ CREATE INDEX ON koldstore.<schema>_<table>__branch_base ("created_xid");
 
 One insert per main statement that changes a PK, regardless of branch count. `prior_cl_seq` is the seq a main subscriber already has for that PK.
 
-### Query path — one KoldMergeScan, stacked layers (not a second scanner)
+### Query path — one KoldMergeScan, ordered source list (not a second scanner)
 
 Do **not** store branch rows in Parquet or the cold catalog. Cold is published main history; `__branch_rows` is a heap that must take ordinary DML in the same snapshot. The thing in common is the **PK-keyed winner**, which [`KoldMergeScan`](docs/architecture/scanning-table.md) already is: hot heap + `__cl` tombstone mask + cold Parquet ([`NewestFirstWinnerResolver`](crates/koldstore-merge/src/core/resolver.rs), [`MirrorOverlay`](crates/koldstore-merge/src/core/overlay.rs), [`execute.rs`](crates/pg_koldstore/src/merge_scan/pg/execute.rs)).
 
@@ -307,22 +307,99 @@ flowchart TD
 **What is shared vs what is not**
 
 - Cold / `__cl` stay Parquet + mirror heap. Branch stays `__branch_rows` / `__branch_base` heaps. Do not unify storage.
-- Winner code to reuse: custom scan, native hot child, cold stream, `MirrorOverlay`, strategy portfolio, EXPLAIN. Do not clone [`execute.rs`](crates/pg_koldstore/src/merge_scan/pg/execute.rs).
-- Do not reuse `RowSource::{Hot,Cold}` seq compare across branch layers. Overlay seq and freeze `xid` are different spaces. Overlay/freeze **always beat** the main composite (same idea as `__cl` tombstones beating cold).
+- Winner protocol to reuse: `NewestFirstWinnerResolver` is **first-seen PK**, not a seq compare across unrelated timelines. Feed overlay, then freeze, then today’s hot, then today’s cold. Do not clone [`execute.rs`](crates/pg_koldstore/src/merge_scan/pg/execute.rs). Do not add `KoldBranchScan`.
 
-Freeze is not another cold segment. On the main timeline it is older than current heap; on the branch view it must win over hot.
+Freeze is not another cold segment. On the main timeline it is older than current heap; on the branch view it must win over hot — which is exactly “supply it before hot so `seen` already contains the PK.”
 
-**Main session:** layers 1–2 absent. Empty manifest, `cold_side_proven_empty`, and `EmitPath::HotChild` stay locked ([AGENTS.md](AGENTS.md)). Branches existing in the database must not tax this path.
+### Current KoldMergeScan — we can extend it without a rewrite
 
-**Branch session:** planner must not take the native-only early return. Overlay or freeze can hide or replace a heap row even when the cold manifest is empty. Always install `KoldMergeScan`. Never `HotChild` while `current_branch <> main`. `ResetPlanCache` on GUC assign covers prepared statements.
+Verified against the code (not the docs-only story).
 
-**Exact PK:** probe overlay, then freeze, then the existing hot child (skip Parquet on a hit). Miss all three, then cold as today. Analog of the locked hot PK hit before Parquet open.
+**Control flow today**
 
-**Strategies:** keep `ExactPrimaryKey`, `UnorderedHotFirst`, `OrderedProgressive`, `GeneralMerge`. Front layers are extra PK-ordered heap streams (indexes on `__branch_rows (branch_id, pk)` and `__branch_base (pk, created_xid)`), merged with the existing hot child and cold frontier. One custom-scan name.
+1. Planner [`set_rel_pathlist`](crates/pg_koldstore/src/merge_scan/pg.rs): unmanaged / not SELECT → native. **`segment_count == 0` → return (no CustomScan).** `cold_side_proven_empty` → return. Else install the KoldMergeScan portfolio.
+2. [`begin_custom_scan`](crates/pg_koldstore/src/merge_scan/pg.rs): exact-PK uninstrumented → `HotProbeState::Pending` (first `ExecProcNode` on the native child; **no overlay, no Parquet**). Runtime cold-empty + delegate-safe → `Delegate` (pure child). Else `initialize_fallback_scan`.
+3. [`execute_scan_sources_with_profile`](crates/pg_koldstore/src/merge_scan/pg/execute.rs): `probe_hot_point_hit` (SPI, before Parquet). If no cold + child exists → `EmitPath::HotChild`. Else `MergeRowStream`.
+4. [`MergeRowStream::next_materialized`](crates/pg_koldstore/src/merge_scan/pg/execute.rs): exhaust **hot** pages via `resolve_hot_batch` (PKs enter `seen`); then `__cl` `mask_older_pks`; then **cold** pages via `resolve_cold_batch` (skips `seen`). `MirrorOverlay` only masks cold.
 
-**Crate split:** `koldstore-merge` stays free of branch catalog types. Add a generic priority overlay (live image or tombstone; always beats Hot/Cold). `__cl` keeps tombstone-only `MirrorOverlay`. `koldstore-branching` plans overlay/freeze SQL. [`merge_scan`](crates/pg_koldstore/src/merge_scan) is the one executor: main unchanged; else attach two overlays then today’s `MergeRowStream`.
+`ScanEmitMode`: `HotChild` | `Buffer` | `Stream`. `EmitPath`: `HotChild`, `HotNative`, `ColdNative`, `MergeStream`, `OrderedMergeNative`, `UnorderedHotFirst`.
 
-v1 still postpones flush / refuses existing cold, so layer 5 is empty while branches are open. Still wire the composite so [#122](https://github.com/kalamdb/koldstore/issues/122) does not need a second merge later.
+**The seam that already matches branching**
+
+[`take_unseen_ordered`](crates/koldstore-merge/src/core/resolver.rs) drops a PK if it is already in `seen`, including deleted/tombstone identities. Hot-then-cold is “higher priority source first.” Overlay and freeze are the same shape (`HotRow` live or `deleted`). `__cl` stays a **mask on cold only**, not a source.
+
+### Suggested merge-scan design: ordered source list (not a phase enum)
+
+After reading `MergeRowStream`, I do **not** recommend a different winner or a second CustomScan. I **do** recommend not bolting `Overlay`/`Freeze` as copy-pasted arms next to `hot_phase_done`.
+
+Today the stream is a hardcoded pair of fields:
+
+```text
+struct MergeRowStream { hot: HotMergeSource, cold: ColdRowStream, overlay: MirrorOverlay, hot_phase_done, ... }
+```
+
+That is why adding branch looks like a fork. Make the **Stream path** (not HotChild) a list drained in priority order. Same loop for both products:
+
+```text
+main:    [ Hot, Cold+__cl mask ]
+branch:  [ Overlay, Freeze, Hot, Cold+__cl mask ]
+```
+
+```text
+loop:
+  emit queued winners from the current source
+  if that source is exhausted → advance
+  load one batch → resolve_hot_batch / resolve_cold_batch (first-seen PK)
+  cold batches run retain_unmasked(__cl) first, as today
+```
+
+`HotMergeSource` already abstracts SPI vs native child. Overlay and freeze are additional SPI sources (SQL from `koldstore-branching`), not new emit modes. Cold stays `ColdRowStream`; `__cl` stays attached to **that** source as a mask.
+
+**HotChild stays a bypass, not a source.** `EmitPath::HotChild` / `Pending` / `Delegate` never enter `MergeRowStream`. They remain valid iff the logical list would be `[Hot]` only: session is `main` and cold cannot contribute. A branch session always has Overlay/Freeze in the list, so it always uses Stream (or Exact PK probes) even when the cold manifest is empty.
+
+**Build the list in one place** (`execute_scan_sources` / `prepare_merged_stream`):
+
+1. If `current_branch <> main`: push Overlay, push Freeze.
+2. Push Hot (`HotMergeSource::NativeChild` or `SpiJson`, same as today).
+3. If cold stream present: push Cold with `MirrorOverlay`.
+
+No `if branch { overlay_phase } else { hot_phase }` in `next_materialized`.
+
+**Refactor order (so main does not regress)**
+
+1. Change `MergeRowStream` internals to `Vec<LogicalSource>` with **two** entries (hot, cold). Existing merge-scan tests must stay green. Do not change `begin_custom_scan` HotChild.
+2. Attach Overlay/Freeze when the session is a branch. Add the three gates below.
+3. Leave `OrderedProgressive` on the **two-source** (hot, cold) constructor only. Branch v1 does not call it.
+
+**v1 branch portfolio:** `ExactPrimaryKey` + `UnorderedHotFirst` + `GeneralMerge`. PostgreSQL `Sort` for `ORDER BY`. Revisit ordered-progressive-on-branch only after the source list is proven on unordered/exact-PK.
+
+**Three branch-only gates (do not touch these on main)**
+
+| Gate | File | Branch session | Main session |
+|---|---|---|---|
+| Empty manifest native return | `set_rel_pathlist` ~417 | Skip; always install KoldMergeScan | Unchanged |
+| `HotProbeState::Pending` / `Delegate` | `begin_custom_scan` ~666–701 | Skip; go to fallback | Unchanged |
+| `cold_stream None` → `HotChild` | `execute.rs` ~683–687 | Skip; Stream with `[Overlay, Freeze, Hot]` | Unchanged |
+
+Exact PK: probe overlay SPI, then freeze SPI, then existing `probe_hot_point_hit`. A heap child hit must not win if overlay/freeze has that PK.
+
+**What I am not suggesting**
+
+- A new CustomScan name, Parquet for branches, or treating freeze as another cold segment.
+- A new `RowSource` / priority-overlay trait in `koldstore-merge`.
+- Running overlay on HotChild.
+- Teaching OrderedProgressive N frontiers in v1.
+- Making `koldstore-merge` depend on branching.
+
+**Honest complexity**
+
+- **Right amount:** one `Vec` drain loop, two SPI loaders next to [`mirror.rs`](crates/pg_koldstore/src/merge_scan/pg/mirror.rs), three `if branch` gates, EXPLAIN counters per source.
+- **Too much:** `MergePhase` with four copy-pasted `next_materialized` arms; OrderedProgressive-on-branch in the first cut.
+- **Must not regress:** empty-manifest native plans and `EmitPath::HotChild` when the session is `main`, even if other sessions have branches open ([AGENTS.md](AGENTS.md)).
+
+**Crate split:** `koldstore-merge` stays free of branch catalog types. `koldstore-branching` plans overlay/freeze SQL. [`merge_scan`](crates/pg_koldstore/src/merge_scan) owns the source list. `LogicalSource` lives next to `HotMergeSource` in the adapter (PostgreSQL streams), not as branch types in the merge crate.
+
+v1 still postpones flush / refuses existing cold, so Cold may be absent from the list while branches are open. The same Stream path still accepts Cold later ([#122](https://github.com/kalamdb/koldstore/issues/122)) without a second merge.
 
 Overlay discard: `DELETE FROM __branch_rows WHERE branch_id = $1`. Freeze GC is §6: `TRUNCATE` when the last pin drops, else `DELETE` rows no remaining `creating`/`active`/`merging` snapshot still needs. Do not use “oldest snapshot” as the need test.
 
@@ -352,7 +429,7 @@ flowchart TD
     GUC[current_branch GUC]
     Planner[Planner rewrite DML]
     Overlay["__branch_rows this branch"]
-    Scan[KoldMergeScan stacked layers]
+    Scan[KoldMergeScan source list]
     GUC --> Planner --> Overlay
     GUC --> Scan
     Scan --> Overlay
@@ -370,13 +447,14 @@ flowchart TD
 
 **Main fast path:** if no open branches, freeze trigger returns immediately; heap DML and `__cl` apply unchanged (PK-only WAL). Freeze I/O only when `active_branch_count > 0`. Overlay I/O only for a non-main session (and only that `branch_id`).
 
-**Branch SELECT — stacked layers inside KoldMergeScan:**
+**Branch SELECT — ordered sources inside KoldMergeScan:**
 
-1. `__branch_rows` for **this** `branch_id` only (edits). Never scan other branches.
-2. Shared `__branch_base`: first freeze not visible in this fork snapshot (replaces hot for that PK).
-3. Else today’s MainComposite: native hot child, `__cl` tombstone mask, cold Parquet.
+1. Overlay (`__branch_rows` for this `branch_id`).
+2. Freeze (`__branch_base`, first not visible in fork snapshot).
+3. Hot native child.
+4. Cold Parquet, with `__cl` tombstone mask on that source only.
 
-Main session skips 1–2. Do not change `EmitPath::HotChild` on main. Branch session never uses `HotChild`.
+Main session list is `[Hot, Cold+mask]` or HotChild when cold cannot contribute.
 
 Name both branch heaps like `__cl` (hashed, OID in catalog). Reuse `bounded_identifier`; do not copy the hash.
 
@@ -384,7 +462,7 @@ Name both branch heaps like `__cl` (hashed, OID in catalog). Reuse `bounded_iden
 
 ## Crate and folder layout (maintainable split)
 
-Follow [crate-architecture.md](docs/architecture/crate-architecture.md): `pgrx` stays in `pg_koldstore`; domain logic in the lowest PostgreSQL-free layer. **Do not** put branch catalog/FSM/SQL in `koldstore-merge`. A generic priority overlay (live or tombstone, beats Hot/Cold) **does** belong in `koldstore-merge` next to `MirrorOverlay`. Do not put branch types in `koldstore-catalog` (cold bookkeeping).
+Follow [crate-architecture.md](docs/architecture/crate-architecture.md): `pgrx` stays in `pg_koldstore`; domain logic in the lowest PostgreSQL-free layer. **Do not** put branch catalog/FSM/SQL in `koldstore-merge`. Do **not** add a new winner type; feed overlay/freeze into `NewestFirstWinnerResolver` first. Do not put branch types in `koldstore-catalog`.
 
 ### New library: `crates/koldstore-branching`
 
@@ -397,8 +475,8 @@ crates/koldstore-branching/src/
   overlay.rs          plan __branch_rows DDL, branch UPSERT SQL
   freeze.rs           plan __branch_base DDL + AFTER STATEMENT freeze trigger SQL
   gc.rs               overlay-delete-by-branch + freeze need-predicate (TRUNCATE vs DELETE)
-  resolve.rs          layer priority: overlay then freeze then main composite
-  scan.rs             attach front layers to KoldMergeScan; no second custom scan
+  resolve.rs          source-list order: overlay, freeze, hot, cold
+  scan.rs             build the KoldMergeScan source list; no second custom scan
   diff.rs             net overlay vs BASE classification
   merge.rs            fail_on_conflict three-way rules (no SQL execution)
   dml.rs              which INSERT/UPDATE/DELETE forms are supported
@@ -422,7 +500,7 @@ crates/pg_koldstore/src/branching/
   hooks.rs            ExecutorStart guard + planner rewrite + utility rejects
   freeze.rs           execute freeze-trigger DDL (SPI); skip path for flush cleanup
   gc.rs               run overlay delete + freeze TRUNCATE/DELETE after closers
-  scan.rs             extra KoldMergeScan sources when branch <> main; HotChild forbidden
+  scan.rs             build source list when branch <> main; HotChild forbidden
   flush.rs            admission called from sql/flush
   events.rs           changes_since(branch) dispatch
 ```
@@ -438,7 +516,7 @@ These are capture/flush/scan infrastructure, not branch product code:
 - Freeze trigger install next to PK guard in manage/enable_branching.
 - [`pg_koldstore/src/merge_scan`](crates/pg_koldstore/src/merge_scan): main/unset `current_branch` unchanged, including `EmitPath::HotChild` and empty-manifest native paths. Branch session: always `KoldMergeScan`, attach overlay+freeze layers, never `HotChild`. One-line call into `branching::scan`. Do not clone `execute.rs`.
 - [`koldstore-setup`](crates/koldstore-setup): add `koldstore.branches` to `REQUIRED_CATALOG_TABLES`; DDL still in [`koldstore--0.1.0.sql`](crates/pg_koldstore/sql/koldstore--0.1.0.sql).
-- [`koldstore-merge`](crates/koldstore-merge): no branch catalog types. Generic **priority overlay** (live or tombstone, always beats Hot/Cold). Reuse `MirrorOverlay`, `NewestFirstWinnerResolver`, `changes_since` / `ChangeCursor`, `SimplePkPredicate`. Do not fold freeze SQL into this crate.
+- [`koldstore-merge`](crates/koldstore-merge): no branch catalog types and no new overlay trait in v1. Reuse `NewestFirstWinnerResolver` (first-seen PK), `MirrorOverlay`, `changes_since` / `ChangeCursor`, `SimplePkPredicate`. Overlay/freeze are extra sources on the adapter list. Do not fold freeze SQL into this crate.
 
 ```mermaid
 flowchart BT
@@ -470,7 +548,7 @@ If a planner, namer, fence, cursor, or GUC pattern already exists, call it. New 
 - **Decode:** production apply still ignores `Update.old`. Freeze does not use pgoutput. Keep the existing FULL probe as an optional fallback only.
 - **PK extract:** `pk_identity`, `primary_key_cells`, `PkBindColumn` from apply_row for overlay/freeze binds.
 - **DML form detection:** `simple_pk_delete_supported`, `extract_simple_pk_delete_predicate`, `plan_managed_*_effect` in `koldstore-merge`. Branch rewrite uses these to accept/reject statements.
-- **Merge scan:** `MirrorOverlay`, `NewestFirstWinnerResolver`, `MergeRowStream`, existing strategies. Add a generic priority overlay in `koldstore-merge`; attach it from `merge_scan` when the session is a branch. Do not clone `execute.rs`, do not add `KoldBranchScan`, do not put branch rows in Parquet. Do not change `EmitPath::HotChild` on main.
+- **Merge scan:** generalize `MergeRowStream` to an ordered source list (main `[hot, cold]`, branch `[overlay, freeze, hot, cold]`). Reuse `NewestFirstWinnerResolver`, `HotMergeSource`, `mirror.rs`. Do not clone `execute.rs`, do not add `KoldBranchScan`, do not put branch rows in Parquet, do not extend `OrderedProgressive` in v1. Do not change `EmitPath::HotChild` on main.
 - **Change feed:** `koldstore-merge` `changes_since` / `ChangeCursor` / `plan_mirror_changes_since`. Main `branch => main` stays [`sql/events/mod.rs`](crates/pg_koldstore/src/sql/events/mod.rs). Overlay feed reuses the exclusive-seq helper, not a new pagination algorithm.
 - **GUC / session:** copy the `koldstore.user_id` pattern in [`guc.rs`](crates/pg_koldstore/src/guc.rs) / [`sql/session.rs`](crates/pg_koldstore/src/sql/session.rs). Internal merge writes reuse `internal_system_write`, do not add a user-settable bypass.
 - **Catalog / managed OIDs:** [`catalog/cache.rs`](crates/pg_koldstore/src/catalog/cache.rs) `is_managed_relation` for fail-closed unmanaged DML.
@@ -487,11 +565,11 @@ Rule for implementers: before writing a helper, grep the workspace. If it exists
 
 Architecture docs must change with this feature ([AGENTS.md](AGENTS.md)). Every new `lib.rs` / module starts with `//!`. `#[pg_extern]` wrappers document the SQL contract and the library function they delegate to.
 
-New: [`docs/architecture/data-branches.md`](docs/architecture/data-branches.md) — product semantics, activation vs fork, why freeze is shared, KoldMergeScan stacked layers (not Parquet for branches, not a second custom scan), snapshot BASE resolution, freeze GC, DML rewrite, flush postpone, merge locking, `changes_since`, crate map.
+New: [`docs/architecture/data-branches.md`](docs/architecture/data-branches.md) — product semantics, activation vs fork, why freeze is shared, KoldMergeScan ordered source list (not Parquet for branches, not a second custom scan), snapshot BASE resolution, freeze GC, DML rewrite, flush postpone, merge locking, `changes_since`, crate map.
 
 Update in the same PRs that change the contract:
 
-- [`docs/architecture/crate-architecture.md`](docs/architecture/crate-architecture.md) — add `koldstore-branching`; “Where New Code Goes”: generic merge-layer types in `koldstore-merge`, branch SQL/FSM in `koldstore-branching`.
+- [`docs/architecture/crate-architecture.md`](docs/architecture/crate-architecture.md) — add `koldstore-branching`; “Where New Code Goes”: overlay/freeze SQL in `koldstore-branching`, merge executor phases in `pg_koldstore::merge_scan`.
 - [`docs/architecture/dml-table.md`](docs/architecture/dml-table.md), [`mirror-capture.md`](docs/architecture/mirror-capture.md), [`flushing-table.md`](docs/architecture/flushing-table.md), [`scanning-table.md`](docs/architecture/scanning-table.md), [`manage-table.md`](docs/architecture/manage-table.md)
 - [`docs/sql-api.md`](docs/sql-api.md) — branching SQL + `changes_since(..., branch)`
 - [`docs/limitations.md`](docs/limitations.md) — freeze-trigger cost while branches are open (O(main DML), not O(branches)); freeze storage is pinned until every needing branch is merged/discarded/expired; no cold-data branching until #122; unsupported DML forms; sequence/`nextval` leak
@@ -593,8 +671,10 @@ Scaffold `koldstore-branching` + `pg_koldstore/src/branching/` first. Prototype 
 
 - AFTER STATEMENT freeze triggers on the source heap; one `__branch_base` insert per mutated PK; `ON CONFLICT (pk, created_xid) DO NOTHING`; gated on open-branch count.
 - Fork: arm capture → take `base_snapshot` → fence `base_seq`/`base_lsn` → `active`.
-- Generic priority overlay in `koldstore-merge` (no branch types). Executor in `merge_scan`: if branch, attach overlay+freeze then existing `MergeRowStream`; if main, do not touch HotChild / empty-manifest native paths.
-- Planner: branch session always `KoldMergeScan` (even empty cold). Exact PK probes overlay → freeze → hot child.
+- Refactor `MergeRowStream` Stream path to an ordered `Vec` of sources with **two** entries (hot, cold+`__cl`). Existing merge-scan tests must stay green. Do not change HotChild.
+- Attach Overlay/Freeze SPI sources when `current_branch <> main`. Skip `HotProbeState::Pending`/`Delegate` and empty-manifest native return **only** then. Stream list is `[Overlay, Freeze, Hot]` (+ Cold if present).
+- Branch portfolio v1: `ExactPrimaryKey` + `UnorderedHotFirst` + `GeneralMerge` (PostgreSQL `Sort` for `ORDER BY`). Do not extend `OrderedProgressive`.
+- Exact PK probes overlay → freeze → existing `probe_hot_point_hit`.
 - E2E: two branches share freeze rows; in-flight-at-fork still freezes; N branches do not multiply freeze inserts; main `EXPLAIN` HotChild unchanged while a branch is open in another session.
 
 ### Phase 5 — Flush postpone + overlay GC + freeze GC + expiry
@@ -640,7 +720,7 @@ Existing (small call sites or shared capture fixes only):
 - [`crates/koldstore-wal-mirror/src/mirror/shared/relation.rs`](crates/koldstore-wal-mirror/src/mirror/shared/relation.rs) — export `bounded_identifier`
 - [`crates/koldstore-wal-mirror/src/mirror/async/pgoutput.rs`](crates/koldstore-wal-mirror/src/mirror/async/pgoutput.rs) / [`apply_row.rs`](crates/koldstore-wal-mirror/src/mirror/async/apply_row.rs) — toast fill, byte budget
 - [`crates/pg_koldstore/src/hooks/mod.rs`](crates/pg_koldstore/src/hooks/mod.rs) — register `branching::hooks`
-- [`crates/koldstore-merge/src/core/overlay.rs`](crates/koldstore-merge/src/core/overlay.rs) / [`resolver.rs`](crates/koldstore-merge/src/core/resolver.rs) — generic priority overlay; do not add branch types; do not change Hot/Cold seq winner for main
+- [`crates/koldstore-merge/src/core/resolver.rs`](crates/koldstore-merge/src/core/resolver.rs) — reuse first-seen PK; do not add branch types; do not change Hot/Cold seq winner for main
 - [`crates/pg_koldstore/src/merge_scan/pg.rs`](crates/pg_koldstore/src/merge_scan/pg.rs) / [`execute.rs`](crates/pg_koldstore/src/merge_scan/pg/execute.rs) — attach overlay+freeze layers; HotChild only when session is main
 - [`crates/pg_koldstore/src/sql/events/mod.rs`](crates/pg_koldstore/src/sql/events/mod.rs) — dispatch `branch => main` vs overlay
 - [`crates/pg_koldstore/src/sql/flush/`](crates/pg_koldstore/src/sql/flush/) — call `branching::flush` admission

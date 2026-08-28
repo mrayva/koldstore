@@ -9,6 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   PGRX_VERSION: "0.19.1"
   PG_VER: "16"
+  CARGO_ENCODED_RUSTFLAGS: ""
 
 jobs:
   benchmarks:

@@ -58,6 +58,54 @@ impl Default for SpikeBudget {
     }
 }
 
+/// Per-process startup and RSS bounds for WAL appliers and flush executors.
+///
+/// Cluster-wide spike gates in [`SpikeBudget`] still apply; these bounds are
+/// the lightweight-launcher contract: a quiet WAL backend looks like a client
+/// backend, and a default-size flush executor must not dominate the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerFootprintBudget {
+    /// Max time for the supervisor to replace a killed WAL applier.
+    pub wal_startup: std::time::Duration,
+    /// Max idle WAL-applier RSS (includes mapped `shared_buffers` in RSS).
+    pub wal_idle_rss_max_bytes: u64,
+    /// Idle WAL RSS may exceed a sibling client backend by this slack.
+    pub wal_idle_rss_slack_bytes: u64,
+    /// Max time from queue `flush_table` until a flush executor PID is visible
+    /// (or the job has already finished).
+    pub flush_startup: std::time::Duration,
+    /// Max RSS of one flush executor during a default-size encode (`max_rows_per_file` 1000).
+    pub flush_executor_rss_max_bytes: u64,
+    /// Max PK `SELECT` / `SELECT 1` latency on a concurrent session while flush runs.
+    pub concurrent_select_max: std::time::Duration,
+    /// Max small `INSERT` latency on a concurrent session while flush runs.
+    pub concurrent_insert_max: std::time::Duration,
+}
+
+impl Default for WorkerFootprintBudget {
+    fn default() -> Self {
+        Self {
+            // Supervisor child-lifecycle grace is 1s; fork + SPI connect adds more.
+            wal_startup: std::time::Duration::from_secs(5),
+            wal_idle_rss_max_bytes: 256 * 1024 * 1024,
+            wal_idle_rss_slack_bytes: 64 * 1024 * 1024,
+            flush_startup: std::time::Duration::from_secs(5),
+            flush_executor_rss_max_bytes: 256 * 1024 * 1024,
+            concurrent_select_max: std::time::Duration::from_millis(2_000),
+            concurrent_insert_max: std::time::Duration::from_millis(2_000),
+        }
+    }
+}
+
+/// Reads RSS for one PID (`/proc` on Linux, `ps` on macOS).
+///
+/// # Errors
+///
+/// Returns an error when the process cannot be sampled.
+pub fn pid_rss_bytes(pid: i32) -> Result<u64> {
+    process_rss_bytes(pid).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
 /// Captures PostgreSQL memory-context totals and RSS for the current backend
 /// plus workers whose command line contains the cluster port.
 ///
@@ -186,6 +234,34 @@ pub fn spike_budget_from_env() -> SpikeBudget {
     }
     if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_RETAINED_BYTES") {
         budget.max_context_retained_bytes = value;
+    }
+    budget
+}
+
+/// Loads per-process WAL/flush footprint budgets from the environment when set.
+#[must_use]
+pub fn worker_footprint_budget_from_env() -> WorkerFootprintBudget {
+    let mut budget = WorkerFootprintBudget::default();
+    if let Some(value) = env_u64("KOLDSTORE_WAL_STARTUP_MS") {
+        budget.wal_startup = std::time::Duration::from_millis(value);
+    }
+    if let Some(value) = env_u64("KOLDSTORE_WAL_IDLE_RSS_MAX_BYTES") {
+        budget.wal_idle_rss_max_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_WAL_IDLE_RSS_SLACK_BYTES") {
+        budget.wal_idle_rss_slack_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_FLUSH_STARTUP_MS") {
+        budget.flush_startup = std::time::Duration::from_millis(value);
+    }
+    if let Some(value) = env_u64("KOLDSTORE_FLUSH_EXECUTOR_RSS_MAX_BYTES") {
+        budget.flush_executor_rss_max_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_FLUSH_CONCURRENT_SELECT_MAX_MS") {
+        budget.concurrent_select_max = std::time::Duration::from_millis(value);
+    }
+    if let Some(value) = env_u64("KOLDSTORE_FLUSH_CONCURRENT_INSERT_MAX_MS") {
+        budget.concurrent_insert_max = std::time::Duration::from_millis(value);
     }
     budget
 }

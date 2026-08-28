@@ -1,0 +1,15 @@
+# Faster local `cargo build` on nightly:
+# - Cranelift instead of LLVM for the dev profile
+# - Parallel rustc frontend (`-Z threads=8`)
+#
+# rust-toolchain.toml selects nightly so these flags are valid for `cargo`.
+# CI and Docker stay on rustc 1.96.0 and set `CARGO_ENCODED_RUSTFLAGS` empty
+# so stable rustc never receives `-Z`.
+[unstable]
+codegen-backend = true
+
+[build]
+rustflags = ["-Z", "threads=8"]
+
+[profile.dev]
+codegen-backend = "cranelift"

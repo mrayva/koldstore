@@ -31,6 +31,11 @@ boundaries at each step:
 | `INSERT` / `UPDATE` / `DELETE` capture | [dml-table](architecture/dml-table.md) |
 | Jobs, worker, and automatic flush | [jobs-and-scheduler](architecture/jobs-and-scheduler.md) |
 
+Worker **process lifecycle** (postmaster-forked backends: persistent WAL
+applier, ephemeral maintenance, one-shot flush executors, and the 30-second
+intervals) is in
+[jobs-and-scheduler — Process lifecycle](architecture/jobs-and-scheduler.md#process-lifecycle).
+
 ## Contributor layout
 
 See [crate architecture](architecture/crate-architecture.md) for the layered

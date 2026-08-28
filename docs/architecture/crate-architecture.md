@@ -188,7 +188,9 @@ PostgreSQL postmaster
 The WAL process holds no transaction, snapshot, apply lock, or slot ownership
 while sleeping. Commit generations are coalesced; latches are latency hints;
 the logical slot and `async_mirror_state` remain durable truth. The 30-second
-watchdog is recovery insurance, not the normal polling mechanism.
+`WaitLatch` timeout is recovery insurance, not the normal polling mechanism.
+Fork, lifetime, and interval semantics are in
+[jobs-and-scheduler.md](jobs-and-scheduler.md#process-lifecycle).
 
 ## Cleanup Policy
 

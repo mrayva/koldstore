@@ -23,17 +23,27 @@ pub fn flush_executor_backend_type(database_oid: u32) -> String {
 
 /// Returns live flush executor PIDs for the current database.
 ///
+/// Matches `backend_type` (which embeds the database OID) rather than
+/// `datname`, because PostgreSQL 18 can report NULL `datid` until
+/// `pgstat_bestart`.
+///
 /// # Errors
 ///
 /// Returns an error when the activity probe fails.
 pub async fn flush_executor_pids(client: &Client) -> Result<Vec<i32>> {
+    let oid: i64 = client
+        .query_one(
+            "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .context("resolve database oid for flush executor probe")?
+        .get(0);
+    let backend_type = flush_executor_backend_type(u32::try_from(oid).unwrap_or(0));
     let rows = client
         .query(
-            "SELECT a.pid::int4 \
-             FROM pg_catalog.pg_stat_activity a \
-             WHERE a.datname = current_database() \
-               AND a.backend_type LIKE $1",
-            &[&format!("{FLUSH_EXECUTOR_BACKEND_PREFIX}%")],
+            "SELECT a.pid::int4 FROM pg_catalog.pg_stat_activity a WHERE a.backend_type = $1",
+            &[&backend_type],
         )
         .await
         .context("list flush executor pids")?;

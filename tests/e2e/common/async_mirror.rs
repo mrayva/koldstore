@@ -326,6 +326,18 @@ pub async fn wait_for_async_worker_auto_restart(
     }
 }
 
+/// Published WAL-applier PID for the current database.
+///
+/// # Errors
+///
+/// Returns an error when status probing fails or no live PID is published.
+pub async fn wal_applier_pid(client: &tokio_postgres::Client) -> Result<i32> {
+    wal_process_pid(client)
+        .await?
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| anyhow::anyhow!("persistent WAL applier has no published PID"))
+}
+
 /// Returns whether the persistent WAL-applier service is running or starting for
 /// the current database.
 ///

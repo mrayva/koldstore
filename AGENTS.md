@@ -7,6 +7,10 @@
 - Do not commit merely to park WIP. Before ending after a branch switch, confirm
   with `git status` that no work was stranded.
 
+## Local compile
+
+Use the default dev profile for check/test/run. No `--release` unless packaging.
+
 ## Catalog, Formatting, and Tests
 
 - Edit `crates/pg_koldstore/sql/koldstore--0.1.0.sql` directly for catalog DDL.

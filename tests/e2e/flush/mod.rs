@@ -7,6 +7,7 @@ mod flush_complex_and_multi;
 mod flush_concurrent_barrier;
 mod flush_concurrent_load;
 mod flush_contract;
+mod flush_executor_footprint;
 mod flush_fence_failures;
 mod flush_hot_mirror_cleanup;
 mod flush_jobs_lock_and_faults;

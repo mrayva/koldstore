@@ -28,7 +28,9 @@ COPY . .
 
 ENV CARGO_BUILD_JOBS=1 \
     CARGO_PROFILE_RELEASE_PG_LTO=false \
-    CARGO_PROFILE_RELEASE_PG_CODEGEN_UNITS=16
+    CARGO_PROFILE_RELEASE_PG_CODEGEN_UNITS=16 \
+    RUSTUP_TOOLCHAIN=1.96.0 \
+    CARGO_ENCODED_RUSTFLAGS=
 
 RUN cargo pgrx init --pg"${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" \
     && cargo pgrx package \

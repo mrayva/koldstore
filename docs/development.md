@@ -14,6 +14,13 @@ defaults match CI (`2000` / `10000` rows).
 
 ## Local Build
 
+Debug builds use `debug = "line-tables-only"` (file/line backtraces, no full
+DWARF). The repo `rust-toolchain.toml` is nightly so `.cargo/config.toml` can
+use Cranelift for `profile.dev` and `-Z threads=8` for the parallel frontend.
+Release / `release-pg` profiles stay on LLVM. CI and the `rust:1.96` Docker
+image pin rustc 1.96.0 and clear `CARGO_ENCODED_RUSTFLAGS` so those jobs never
+pass `-Z` to stable rustc.
+
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
@@ -231,7 +238,8 @@ tests/memory/run_memory_checks.sh
 
 Runs probe unit tests, then the deep E2E leak gates in
 `tests/e2e/suite/memory_leak.rs` (flush + hot DML + merge-scan SELECT loops;
-MinIO parquet reads when `KOLDSTORE_MINIO=1`). Also prints a plain-Postgres vs
+MinIO parquet reads when `KOLDSTORE_MINIO=1`), peak-spike gates, and
+per-process WAL/flush footprint gates. Also prints a plain-Postgres vs
 koldstore comparison table (idle / DML / hot-only / flush / hot+cold) with
 context+RSS before/after/Δ/spike columns. Snapshots use
 `pg_backend_memory_contexts` plus process RSS. Set

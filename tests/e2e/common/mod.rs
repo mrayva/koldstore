@@ -30,7 +30,8 @@ pub use async_mirror::{
     terminate_async_worker, wait_for_async_mirror, wait_for_async_worker,
     wait_for_async_worker_auto_restart, wait_for_confirmed_flush_at_least,
     wait_for_confirmed_flush_past, wait_for_mirror_op_count, wait_for_passive_convergence,
-    wait_for_wal_applier_passively, wal_lsn_diff_bytes, AsyncMirrorProgress, PassiveKoldStoreState,
+    wait_for_wal_applier_passively, wal_applier_pid, wal_lsn_diff_bytes, AsyncMirrorProgress,
+    PassiveKoldStoreState,
 };
 
 pub use catalog::{

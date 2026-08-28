@@ -34,7 +34,9 @@ On each `flush_check_interval_seconds` tick ephemeral maintenance:
    excess with `max_rows_per_file = 1000`) are skipped — no job row is created.
 
 WAL application is not part of this tick: the persistent WAL applier runs as a
-separate latch-driven service. See [mirror-capture.md](../architecture/mirror-capture.md).
+separate latch-driven service. Process fork vs interval semantics are in
+[jobs-and-scheduler — Process lifecycle](../architecture/jobs-and-scheduler.md#process-lifecycle).
+See also [mirror-capture.md](../architecture/mirror-capture.md).
 
 ## Built-in scheduler
 
@@ -66,25 +68,18 @@ generation instead of queueing one job per transaction. Each apply tick runs in
 `async_mirror_state.applied_lsn` commit together (or roll back together on
 ERROR). While idle, the applier holds no open transaction.
 
-The applier does not periodically decode on a short poll interval. A safety
-watchdog controlled by `koldstore.async_apply_watchdog_interval_ms` (default
-`30000`, clamped to `1000..=300000`) catches a lost notification or a two-phase
-commit that cannot carry the originating backend's in-memory hint.
+The applier does not periodically decode on a short poll interval. Idle wait is
+`WaitLatch` with a 30-second timeout (`WAL_APPLIER_WATCHDOG`) so a missed
+notification or two-phase commit still recovers. Managed commits `SetLatch`
+immediately; that timeout is not the normal apply cadence.
 
-```sql
--- Per-database (preferred for the bgworker):
-ALTER DATABASE mydb SET koldstore.async_apply_watchdog_interval_ms = 30000;
--- Restart the WAL applier (or terminate + ensure) so it reconnects with
--- the new database default. SIGHUP also reloads ALTER SYSTEM values.
-
--- Or persist cluster-wide:
-ALTER SYSTEM SET koldstore.async_apply_watchdog_interval_ms = 30000;
-SELECT pg_reload_conf();
-```
+`koldstore.async_apply_watchdog_interval_ms` is registered (default `30000`,
+clamped to `1000..=300000`) but the applier loop does not read it today. Changing
+it does not change the idle wait until that wiring exists.
 
 Session `SET` does not affect background workers. Prefer `ALTER DATABASE`
-or `ALTER SYSTEM` + reload / worker restart, matching
-`flush_check_interval_seconds`.
+or `ALTER SYSTEM` + reload / worker restart for GUCs the workers do read,
+matching `flush_check_interval_seconds`.
 
 ### Async retained-WAL health threshold
 

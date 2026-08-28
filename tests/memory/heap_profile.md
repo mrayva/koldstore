@@ -33,12 +33,26 @@ It fails when absolute or per-cycle retained growth exceeds
 | `KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_SPIKE_BYTES` | peak context above baseline |
 | `KOLDSTORE_MEMORY_MAX_FLUSH_RSS_RETAINED_BYTES` | retained RSS after cool-down |
 | `KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_RETAINED_BYTES` | retained context after cool-down |
+| `KOLDSTORE_WAL_STARTUP_MS` | WAL applier restart SLO (default 5000; includes 1s supervisor grace) |
+| `KOLDSTORE_WAL_IDLE_RSS_MAX_BYTES` | idle WAL applier RSS cap (default 256 MiB, includes mapped `shared_buffers`) |
+| `KOLDSTORE_WAL_IDLE_RSS_SLACK_BYTES` | idle WAL RSS may exceed a sibling client backend by this much (default 64 MiB) |
+| `KOLDSTORE_FLUSH_STARTUP_MS` | queue flush executor appear SLO (default 5000) |
+| `KOLDSTORE_FLUSH_EXECUTOR_RSS_MAX_BYTES` | one flush executor RSS cap at default `max_rows_per_file` (default 256 MiB) |
+| `KOLDSTORE_FLUSH_CONCURRENT_SELECT_MAX_MS` | max PK/`SELECT 1` latency on another session during flush (default 2000) |
+| `KOLDSTORE_FLUSH_CONCURRENT_INSERT_MAX_MS` | max small INSERT latency on another session during flush (default 2000) |
 | `KOLDSTORE_MEMORY_LARGE_QUERY_ROWS` | rows for large merge-scan memory gate (default 20000) |
 | `KOLDSTORE_MINIO=1` | enable MinIO flush + parquet GET path |
 | `KOLDSTORE_MEMORY_SKIP_E2E=1` | unit probes only |
 
 Peak-during-operation gates live in `suite::flush_memory_spike` and poll cluster
 RSS while flush / large SELECTs run (not only post-cycle retained growth).
+
+Per-process launcher gates:
+
+- `dml::wal_applier_footprint` — idle WAL applier RSS vs a sibling client
+  backend, no idle RSS growth, restart within the startup SLO
+- `flush::flush_executor_footprint` — queue executor startup + process RSS, and
+  concurrent hot PK `SELECT` / `INSERT` latency while encode runs
 
 ## Plain Postgres vs koldstore comparison table
 

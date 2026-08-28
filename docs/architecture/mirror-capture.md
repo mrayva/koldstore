@@ -45,6 +45,10 @@ koldstore supervisor                         persistent, one per cluster
 └── koldstore flush executor <database oid>  bounded ephemeral pool
 ```
 
+Each line is a postmaster-forked PostgreSQL backend (own PID), not a thread.
+Lifetimes, dispatch, and the 30-second intervals are in
+[jobs and scheduler — Process lifecycle](jobs-and-scheduler.md#process-lifecycle).
+
 WAL application is a latency-sensitive service. Scheduled maintenance, policy
 reconciliation, Parquet encoding, and object-store I/O are jobs and remain
 outside the always-on applier.

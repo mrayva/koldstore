@@ -65,11 +65,13 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 | `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush enqueue cadence |
 | `koldstore.flush_execution` | `queue` (default) | Production enqueue-and-return; `inline` is SPI tests only |
 | `koldstore.max_parallel_flush_jobs` | `2` (default) or tuned | Concurrent one-shot flush executors per database |
-| `koldstore.async_apply_watchdog_interval_ms` | `30000` (default) | Safety recovery for missed commit wakeups |
+| `koldstore.async_apply_watchdog_interval_ms` | `30000` (default) | Registered; the applier's idle `WaitLatch` timeout is currently hardcoded 30 s, not this GUC |
 
 `koldstore.async_apply_poll_interval_ms` was removed. Managed commits wake the
-worker directly; keep only the watchdog GUC above and drop any leftover
-`async_apply_poll_interval_ms` lines from `postgresql.conf` / `ALTER DATABASE`.
+worker directly. Drop any leftover `async_apply_poll_interval_ms` lines from
+`postgresql.conf` / `ALTER DATABASE`. The idle `WaitLatch` timeout is 30 s in
+the applier; `koldstore.async_apply_watchdog_interval_ms` is registered at that
+default but is not read by the loop.
 
 Also alert on `koldstore.async_mirror_status()` (`healthy`, retained bytes,
 `updated_at` age). See [scheduling.md](scheduling.md) and

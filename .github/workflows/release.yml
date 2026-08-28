@@ -47,6 +47,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.96.0"
   PGRX_VERSION: "0.19.1"
+  CARGO_ENCODED_RUSTFLAGS: ""
   CARGO_PROFILE: release-pg-dist
   DOCKER_PG_DISTRO: "ubuntu24.04"
   # Try-it image majors published when docker_push=true. `latest` tracks PG18.

@@ -21,6 +21,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   PGRX_VERSION: "0.19.1"
+  # Ignore repo `.cargo/config.toml` `-Z threads=8` (nightly-only).
+  CARGO_ENCODED_RUSTFLAGS: ""
 
 # Needed so EnricoMi can publish check runs + PR comments from JUnit.
 permissions:
