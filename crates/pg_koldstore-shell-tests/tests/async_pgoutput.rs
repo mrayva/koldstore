@@ -113,7 +113,7 @@ fn rejects_truncated_and_unknown_messages() {
 
 #[test]
 fn handles_truncate_origin_type_and_message_tags() {
-    for tag in [b'T', b'Y', b'M'] {
+    for tag in *b"TYM" {
         let message = decode_message(&[tag]).unwrap();
         assert_eq!(message, PgOutputMessage::Ignored { tag });
     }

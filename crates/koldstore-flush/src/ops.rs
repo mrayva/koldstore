@@ -496,9 +496,7 @@ fn plan_mirror_flush_selection_inner(
 
     let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
     let mut param_types = vec![SqlParamType::BigInt];
-    let limit_param;
-    let order_by;
-    if sort_by_order_key {
+    let (limit_param, order_by) = if sort_by_order_key {
         // $2 = first page; $3 = after order_key; $4.. = after PK; then after seq + limit.
         let after_order_key_param = 3_usize;
         let mut keyset_left = vec!["mirror.\"order_key\"".to_string()];
@@ -524,21 +522,19 @@ fn plan_mirror_flush_selection_inner(
             left = keyset_left.join(", "),
             right = keyset_right.join(", "),
         ));
-        limit_param = after_seq_param + 1;
         param_types.push(SqlParamType::BigInt);
         let mut order_parts = vec!["mirror.\"order_key\" ASC NULLS LAST".to_string()];
         for pk_column in &pk_columns {
             order_parts.push(format!("mirror.{pk_column} ASC"));
         }
         order_parts.push("mirror.\"seq\" ASC".to_string());
-        order_by = order_parts.join(", ");
+        (after_seq_param + 1, order_parts.join(", "))
     } else {
         where_clauses.push("mirror.\"seq\" > $2::bigint".to_string());
         param_types.push(SqlParamType::BigInt);
-        limit_param = 3_usize;
         param_types.push(SqlParamType::BigInt);
-        order_by = "mirror.\"seq\" ASC".to_string();
-    }
+        (3_usize, "mirror.\"seq\" ASC".to_string())
+    };
     if let Some(ops) = mirror_ops {
         if !ops.is_empty() {
             where_clauses

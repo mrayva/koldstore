@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn type_and_logical_message_tags_are_ignored() {
-        for tag in [b'Y', b'M'] {
+        for tag in *b"YM" {
             assert_eq!(
                 decode_message(&[tag, 0x01, 0x02, 0x03]),
                 Ok(PgOutputMessage::Ignored { tag })

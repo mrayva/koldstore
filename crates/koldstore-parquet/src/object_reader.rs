@@ -81,11 +81,8 @@ impl ObjectStoreReadStats {
         if let Some(started) = started {
             let elapsed = started.elapsed();
             let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-            let _ = self
-                .read_nanos
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_add(elapsed_nanos))
-                });
+            // Wrapping is fine: u64 nanos overflow after ~584 years.
+            self.read_nanos.fetch_add(elapsed_nanos, Ordering::Relaxed);
         }
     }
 }

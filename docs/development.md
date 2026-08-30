@@ -16,9 +16,17 @@ defaults match CI (`2000` / `10000` rows).
 
 Debug builds use `debug = "line-tables-only"` (file/line backtraces, no full
 DWARF). The repo `rust-toolchain.toml` is nightly so `.cargo/config.toml` can
-use Cranelift for `profile.dev` and `-Z threads=8` for the parallel frontend.
+use `-Z threads=8` for the parallel frontend. Optional Cranelift for local
+`profile.dev` (nightly only; not committed, because Cargo 1.96 rejects that
+unstable profile key):
+
+```bash
+export CARGO_PROFILE_DEV_CODEGEN_BACKEND=cranelift
+```
+
 Release / `release-pg` profiles stay on LLVM. CI and the `rust:1.96` Docker
-image pin rustc 1.96.0 and clear `CARGO_ENCODED_RUSTFLAGS` so those jobs never
+image set `RUSTUP_TOOLCHAIN=1.96.0` (so they ignore the nightly
+`rust-toolchain.toml`) and clear `CARGO_ENCODED_RUSTFLAGS` so those jobs never
 pass `-Z` to stable rustc.
 
 ```bash
