@@ -57,9 +57,20 @@ background WAL applier keeps writing `__cl` while that work runs, so
 tables.
 
 The slot/apply lock is acquired only inside finalize via try-lock + bounded
-retry (`with_slot_lock_retry`): pre-lock catch-up, then the prune fence. That
-short exclusive window is required so prune cannot race concurrent apply on the
-same mirror keys. See [mirror-capture.md](mirror-capture.md) and
+retry (`with_slot_lock_retry`, ~10s). That lock serializes **mirror apply vs
+flush prune**, not heap DML: user `INSERT`/`UPDATE`/`DELETE`/`SELECT` on the
+source table do not take it. Encode and object upload hold neither the slot
+lock nor a table lock, so concurrent sessions keep committing under MVCC.
+
+The WAL applier also try-locks. If finalize already holds the slot lock, the
+applier yields and retries instead of blocking heap-unrelated apply behind a
+re-taken lock. Per-tick GUC budgets are unchanged (`0` = drain the current
+fence in one apply transaction).
+
+The only source-table lock on the flush path is a **short** `SHARE ROW
+EXCLUSIVE` during the prune fence after Parquet is already durable — in-flight
+writers finish, new writers wait for that fence, ordinary `SELECT` continues.
+See [mirror-capture.md](mirror-capture.md) and
 [async-flush-prune-race](../cases/async-flush-prune-race.md).
 
 Manual vs automatic: `auto_flush => false` disables scheduler-driven enqueue;

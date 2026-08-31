@@ -153,8 +153,9 @@ impl ApplyBatch {
 /// Applies committed WAL under an explicit fence request.
 ///
 /// Acquires the database slot lock for the current transaction, then applies.
-/// Flush finalize should prefer [`try_lock_slot`] + [`apply_bounded_locked`] so
-/// encode/upload never wait on a blocked slot lock.
+/// The WAL applier uses [`super::lifecycle::try_lock_slot`] +
+/// [`apply_bounded_locked`] so a waiting flush finalize is not starved.
+/// Encode/upload never hold this lock, and heap DML does not take it.
 ///
 /// Scheduling is deliberately not coupled to synchronous fence calls. Durable
 /// WAL and supervisor generations own background progress; this function only

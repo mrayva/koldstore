@@ -574,7 +574,7 @@ pub(super) fn finalize_flush(
     outcome: &TableFlushBatchOutcome,
     client: &koldstore_storage::ObjectStoreClient,
 ) -> Result<(), String> {
-    // One critical section under try-lock slot ownership: prelock catch-up,
+    // One critical section under slot-lock ownership: prelock catch-up,
     // manifest write, activate, source fence, prune. Encode/upload already
     // finished without the slot lock.
     with_slot_lock_retry(|| {
@@ -646,25 +646,25 @@ pub(super) fn finalize_flush(
 ///
 /// Callers run finalize fence work while the lock is held. Nested apply uses
 /// [`apply_bounded_locked`] so we do not depend on re-entrant blocking lock.
+/// The WAL applier also try-locks and yields when this waiter holds the lock.
 fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    use crate::mirror::lifecycle::try_lock_slot;
+    use crate::mirror::lifecycle::{try_lock_slot, SLOT_LOCK_WAIT};
 
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    // Bound wait so finalize never blocks forever on a stuck applier, but allow
-    // several seconds under parallel E2E / busy apply (former ~0.8s budget flaked).
-    const MAX_ATTEMPTS: u32 = 200;
+    let deadline = std::time::Instant::now() + SLOT_LOCK_WAIT;
     const SLEEP_MS: u64 = 50;
-    for attempt in 1..=MAX_ATTEMPTS {
-        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSlotLock)?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSlotLock)?;
+    loop {
         if try_lock_slot(database_oid)? {
             crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSlotLock)?;
             return body();
         }
-        if attempt == MAX_ATTEMPTS {
+        if std::time::Instant::now() >= deadline {
             break;
         }
-        pgrx::log!("koldstore flush: slot lock busy (attempt {attempt}/{MAX_ATTEMPTS}); retrying");
+        pgrx::log!("koldstore flush: slot lock busy; retrying");
         std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+        pgrx::check_for_interrupts!();
     }
     Err("flush finalize could not acquire slot lock before deadline".to_string())
 }

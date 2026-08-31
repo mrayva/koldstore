@@ -276,12 +276,13 @@ fn validate_slot(slot: &str) -> Result<(), String> {
 ///
 /// Transaction-scoped advisory lock. Flush must not hold this during Parquet
 /// encode/upload — only during claim-time watermark reads (optional) and the
-/// finalize fence. Prefer [`try_lock_slot`] from flush finalize paths.
+/// finalize fence. Flush finalize and the WAL applier both [`try_lock_slot`] so
+/// a waiting finalize is not starved by the next apply tick.
 pub(crate) fn lock_slot(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
-/// Non-blocking variant of [`lock_slot`] for fail-fast flush finalize.
+/// Non-blocking variant of [`lock_slot`].
 ///
 /// Returns `true` when this transaction now holds the lock (including when the
 /// same backend already held it). Returns `false` when another backend holds it.
@@ -292,6 +293,9 @@ pub(crate) fn lock_slot(database_oid: u32) -> Result<(), String> {
 pub(crate) fn try_lock_slot(database_oid: u32) -> Result<bool, String> {
     try_lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
+
+/// How long flush finalize polls [`try_lock_slot`] before failing the job.
+pub(crate) const SLOT_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Poll interval while waiting for another backend to release the logical slot.
 const SLOT_INACTIVE_POLL: Duration = Duration::from_millis(10);

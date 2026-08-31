@@ -900,8 +900,8 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
 
         let flush_b = connect_peer(&db).await?;
         let relation_b = table_b.relation.clone();
-        // Product slot-lock budget is ~10s (200 × 50ms). Bound the client wait
-        // so a regression that blocks forever fails this suite quickly.
+        // Product slot-lock budget is ~10s of try-lock polling. Bound the client
+        // wait so a regression that blocks forever fails this suite quickly.
         let started = std::time::Instant::now();
         let job_b: String = tokio::time::timeout(Duration::from_secs(15), async {
             flush_b

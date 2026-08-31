@@ -15,12 +15,15 @@ use koldstore_wal_mirror::{
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
-use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedApplyRequest};
+use crate::mirror::apply::{apply_bounded_locked, capture_durable_wal_fence, BoundedApplyRequest};
+use crate::mirror::lifecycle::try_lock_slot;
 
 const WAL_APPLIER_FUNCTION: &str = "koldstore_wal_applier_main";
 const WAL_APPLIER_WATCHDOG: Duration = Duration::from_secs(30);
 const APPLY_RETRY_MIN: Duration = Duration::from_millis(100);
 const APPLY_RETRY_MAX: Duration = Duration::from_secs(5);
+/// Pause when flush finalize holds the slot lock so try-lock waiters can run.
+const APPLIER_LOCK_YIELD: Duration = Duration::from_millis(10);
 
 type SharedWalApplierRegistry =
     AssertPGRXSharedMemory<WalApplierRegistry<WAL_APPLIER_REGISTRY_CAPACITY>>;
@@ -277,16 +280,28 @@ fn process_sighup() {
 /// worker performs XLogFlush, not the application backend.
 fn drain_wal_through_fixed_fence() -> Result<(), String> {
     let fence = capture_durable_wal_fence()?;
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     loop {
         let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
         let outcome = super::txn::run_recoverable("WAL applier", || {
+            if !try_lock_slot(database_oid)? {
+                return Ok(None);
+            }
             let mut request = BoundedApplyRequest::available();
             request.upper_bound = Some(fence);
             request.advance_slot_on_empty = true;
-            apply_bounded(request)
+            apply_bounded_locked(request).map(Some)
         });
         drop(decoding_log_guard);
         let outcome = outcome?;
+        let Some(outcome) = outcome else {
+            // Flush finalize holds the slot lock (not a heap lock). Yield so
+            // prune can finish; do not mark this generation processed.
+            if !wait_until(Instant::now() + APPLIER_LOCK_YIELD) {
+                return Err("WAL applier stopping while slot lock is held".to_string());
+            }
+            continue;
+        };
         crate::observability::record_async_apply_tick(outcome.row_changes, 0);
         if outcome.budget_exhausted {
             continue;

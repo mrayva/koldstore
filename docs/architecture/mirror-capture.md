@@ -112,6 +112,11 @@ insert-missing fallback. A batch, its row-counter delta, policy hints, and its
 durable `applied_lsn` checkpoint commit together. The slot advances to a
 checkpoint only on a later pass, making replay after a crash safe.
 
+Each apply tick holds the database slot lock only for that transaction. That
+lock is not a heap lock: application DML on the source table does not take it.
+The applier try-locks and yields when flush finalize holds the slot lock, so
+finalize can prune without the applier immediately re-taking the lock.
+
 Sequence allocation is always above the durable high watermark and any flush
 prune floor. This prevents a post-restart or concurrent flush apply from
 reusing a sequence range that was already published to cold storage.
