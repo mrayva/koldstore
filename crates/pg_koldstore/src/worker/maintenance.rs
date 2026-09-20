@@ -111,7 +111,41 @@ fn run_maintenance_worker(database_oid: u32) {
                     pgrx::warning!(
                         "koldstore maintenance worker db={database_oid} scheduling/recovery deferred: {error}"
                     );
-                    super::wake::request_recovery(database_oid);
+                    // BUGFIX (2026-09-14): request_recovery() alone re-arms
+                    // EVENT_RECOVERY_REQUIRED with no backoff, and this branch
+                    // never advanced maintenance_processed_generation, so
+                    // maintenance_due() (which gates the supervisor's registration
+                    // backoff) stayed true immediately again. For a PERMANENT
+                    // error (e.g. this database never had `CREATE EXTENSION
+                    // koldstore` run, so koldstore.jobs/koldstore.schemas don't
+                    // exist -- which will never become true on its own), this
+                    // produced an unbounded busy-loop: confirmed live, >1000
+                    // maintenance-worker register/start/exit cycles per second,
+                    // pegging the postmaster's CPU, since RegistrationBackoff in
+                    // supervisor.rs only tracks REGISTRATION failures (no free
+                    // worker slot), not "the worker ran fine but its own job
+                    // failed" -- registration itself always succeeds here, so
+                    // that backoff never engages either.
+                    //
+                    // Mark this generation reconciled (same call the success
+                    // path already makes) so the supervisor stops seeing this
+                    // attempt as still-due, and schedule the next attempt after
+                    // flush_check_interval_seconds via the same
+                    // schedule_maintenance_at_ms() primitive
+                    // update_timed_policy_deadline() already uses below for the
+                    // success path, instead of retrying instantly. This is
+                    // correct for a genuinely transient error too (still
+                    // retried, just on a bounded cadence instead of a busy-loop)
+                    // and turns a permanent one into a fixed, sane background
+                    // retry rate instead of unbounded CPU/worker-slot churn.
+                    super::wake::mark_maintenance_reconciled(
+                        database_oid,
+                        target_maintenance_generation,
+                    );
+                    let cadence_ms = crate::guc::flush_check_interval_seconds().saturating_mul(1000);
+                    let retry_at_ms =
+                        koldstore_common::unix_now_ms().saturating_add(cadence_ms.max(1000));
+                    super::wake::schedule_maintenance_at_ms(database_oid, retry_at_ms);
                     return;
                 }
             }
