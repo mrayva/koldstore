@@ -549,7 +549,7 @@ unsafe fn var_column<'a>(
     catalog.column_by_attnum(attno)
 }
 
-unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {
+pub(crate) unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {
     // Windows bindgen may already type this as i32; keep the cast for Linux/macOS.
     #[allow(clippy::unnecessary_cast)]
     let cache_id = pg_sys::SysCacheIdentifier::OPEROID as i32;

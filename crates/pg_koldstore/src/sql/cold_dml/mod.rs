@@ -58,6 +58,8 @@ use koldstore_common::QualifiedTableName;
 #[cfg(feature = "pg")]
 use pgrx::datum::DatumWithOid;
 
+pub(crate) mod guard;
+
 /// Resolves `table_oid` to a safely quotable schema-qualified name.
 #[cfg(feature = "pg")]
 fn qualified_relation(table_oid: pgrx::pg_sys::Oid) -> Result<QualifiedTableName, String> {
@@ -68,7 +70,7 @@ fn qualified_relation(table_oid: pgrx::pg_sys::Oid) -> Result<QualifiedTableName
 
 /// Returns the current-schema primary-key column names for a managed table.
 #[cfg(feature = "pg")]
-fn primary_key_columns(table_oid: pgrx::pg_sys::Oid) -> Result<Vec<String>, String> {
+pub(crate) fn primary_key_columns(table_oid: pgrx::pg_sys::Oid) -> Result<Vec<String>, String> {
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "relation is not managed by KoldStore".to_string())?;
@@ -109,6 +111,45 @@ fn pk_join_predicate(pk_columns: &[String]) -> String {
         .join(" AND ")
 }
 
+/// Locates `pk` (hot or cold) as a full-row jsonb value via a *standalone*
+/// `SELECT`, so `KoldMergeScan` actually fires on the source scan -- see the
+/// module doc comment for why this must never be combined with a write
+/// statement against the same table in one statement.
+///
+/// Shared by [`hydrate_pk_impl`] (its materialization source) and
+/// [`guard::cold_pk_exists`] (the write-guard's existence probe) -- both
+/// need exactly this "does this key exist, and if so what's the full row"
+/// lookup.
+#[cfg(feature = "pg")]
+fn locate_row_json(
+    table_oid: pgrx::pg_sys::Oid,
+    pk_json: &serde_json::Value,
+) -> Result<Option<pgrx::JsonB>, String> {
+    let relation = qualified_relation(table_oid)?;
+    let pk_columns = primary_key_columns(table_oid)?;
+    let quoted = relation.quoted();
+    let predicate = pk_join_predicate(&pk_columns);
+
+    let locate_sql = format!(
+        "WITH pk AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)) \
+         SELECT to_jsonb(t) FROM {quoted} AS t, pk \
+         WHERE {predicate}"
+    );
+    let locate_args = [DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
+    // `get_one_with_args` positions its cursor at row 0 unconditionally
+    // (pgrx's `SpiTupleTable::first()` does this even when the result set
+    // is empty), so a genuinely zero-row result -- the key does not exist
+    // hot or cold -- surfaces as `Err(SpiError::InvalidPosition)` rather
+    // than `Ok(None)`. Confirmed live: hydrate_pk on a nonexistent key
+    // raised exactly this error before this match was added. Map it to
+    // "not found" explicitly instead of propagating it as a real failure.
+    match pgrx::Spi::get_one_with_args::<pgrx::JsonB>(&locate_sql, &locate_args) {
+        Ok(row_json) => Ok(row_json),
+        Err(pgrx::spi::Error::InvalidPosition) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Materializes `pk` into the heap from cold storage if it is not already a
 /// live heap row. Returns the number of rows inserted (0 or 1).
 ///
@@ -126,30 +167,11 @@ fn hydrate_pk_impl(
     pk_json: &serde_json::Value,
 ) -> Result<u64, String> {
     let relation = qualified_relation(table_oid)?;
-    let pk_columns = primary_key_columns(table_oid)?;
     let quoted = relation.quoted();
-    let predicate = pk_join_predicate(&pk_columns);
 
-    // Step 1: locate the row (hot or cold) as jsonb via a *standalone*
-    // SELECT, so KoldMergeScan actually fires on the source scan.
-    let locate_sql = format!(
-        "WITH pk AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)) \
-         SELECT to_jsonb(t) FROM {quoted} AS t, pk \
-         WHERE {predicate}"
-    );
-    let locate_args = [DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
-    // `get_one_with_args` positions its cursor at row 0 unconditionally
-    // (pgrx's `SpiTupleTable::first()` does this even when the result set
-    // is empty), so a genuinely zero-row result -- the key does not exist
-    // hot or cold -- surfaces as `Err(SpiError::InvalidPosition)` rather
-    // than `Ok(None)`. Confirmed live: hydrate_pk on a nonexistent key
-    // raised exactly this error before this match was added. Map it to
-    // "not found" explicitly instead of propagating it as a real failure.
-    let row_json = match pgrx::Spi::get_one_with_args::<pgrx::JsonB>(&locate_sql, &locate_args) {
-        Ok(Some(row_json)) => row_json,
-        Ok(None) => return Ok(0),
-        Err(pgrx::spi::Error::InvalidPosition) => return Ok(0),
-        Err(error) => return Err(error.to_string()),
+    // Step 1: locate the row (hot or cold).
+    let Some(row_json) = locate_row_json(table_oid, pk_json)? else {
+        return Ok(0);
     };
 
     // Step 2: insert it. The sole FROM source here is
@@ -189,8 +211,14 @@ pub fn hydrate_pk_pg(table_name: pgrx::PgRelation, pk: pgrx::JsonB) -> pgrx::Jso
     drop(table_name);
     let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
         .unwrap_or_else(|error| pgrx::error!("hydrate_pk failed to acquire table lock: {error}"));
-    let affected =
-        hydrate_pk_impl(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("hydrate_pk failed: {error}"));
+    // The materializing INSERT below would otherwise trip this table's own
+    // BEFORE INSERT cold-DML write guard (see `guard::plan_insert_guard`) --
+    // that guard exists to catch *callers* duplicating a cold PK via plain
+    // SQL, not this function's own, deliberate, correctness-preserving
+    // materialization of the same PK.
+    let affected = guard::with_guard_suspended(|| {
+        hydrate_pk_impl(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("hydrate_pk failed: {error}"))
+    });
     pgrx::JsonB(serde_json::json!({
         "affected_rows": affected,
         "hydrated": affected > 0,
@@ -292,8 +320,12 @@ pub fn update_row_pg(
     drop(table_name);
     let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
         .unwrap_or_else(|error| pgrx::error!("update_row failed to acquire table lock: {error}"));
-    let (affected, hydrated) = update_row_impl(table_oid, &pk.0, &patch.0, lookup_cold)
-        .unwrap_or_else(|error| pgrx::error!("update_row failed: {error}"));
+    // Suspend the write guard for this call's own native statements --
+    // see the identical comment on `hydrate_pk_pg`.
+    let (affected, hydrated) = guard::with_guard_suspended(|| {
+        update_row_impl(table_oid, &pk.0, &patch.0, lookup_cold)
+            .unwrap_or_else(|error| pgrx::error!("update_row failed: {error}"))
+    });
     pgrx::JsonB(serde_json::json!({
         "affected_rows": affected,
         "updated": affected > 0,
@@ -375,8 +407,12 @@ pub fn delete_row_pg(
     drop(table_name);
     let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
         .unwrap_or_else(|error| pgrx::error!("delete_row failed to acquire table lock: {error}"));
-    let (affected, hydrated) = delete_row_impl(table_oid, &pk.0, lookup_cold)
-        .unwrap_or_else(|error| pgrx::error!("delete_row failed: {error}"));
+    // Suspend the write guard for this call's own native statements --
+    // see the identical comment on `hydrate_pk_pg`.
+    let (affected, hydrated) = guard::with_guard_suspended(|| {
+        delete_row_impl(table_oid, &pk.0, lookup_cold)
+            .unwrap_or_else(|error| pgrx::error!("delete_row failed: {error}"))
+    });
     pgrx::JsonB(serde_json::json!({
         "affected_rows": affected,
         "deleted": affected > 0,

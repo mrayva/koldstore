@@ -24,12 +24,12 @@ mod execute;
 mod hot;
 mod hot_cursor;
 mod keyset;
-mod literals;
+pub(crate) mod literals;
 mod mirror;
 mod path_strategy;
 mod pg_list;
 mod profile;
-mod qual;
+pub(crate) mod qual;
 mod spi_query;
 mod tuple;
 

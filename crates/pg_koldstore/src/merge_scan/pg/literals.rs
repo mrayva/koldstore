@@ -35,7 +35,7 @@ pub(super) unsafe fn literal_sort_key_value(
     datum_to_sort_key_value(datum, column)
 }
 
-unsafe fn const_or_param_datum(
+pub(crate) unsafe fn const_or_param_datum(
     expr: *mut pg_sys::Expr,
     params: pg_sys::ParamListInfo,
 ) -> Option<(pg_sys::Datum, bool, pg_sys::Oid)> {
@@ -244,7 +244,7 @@ unsafe fn datum_json_value_via_output(
 }
 
 /// Copies a PostgreSQL C string into a Rust `String`, then always `pfree`s it.
-pub(super) unsafe fn cstr_owned_pfree(ptr: *mut std::os::raw::c_char) -> Option<String> {
+pub(crate) unsafe fn cstr_owned_pfree(ptr: *mut std::os::raw::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
@@ -257,7 +257,7 @@ fn column_type_oid(pg_type: PgType) -> pg_sys::Oid {
     pg_sys::Oid::from(pg_type.type_oid())
 }
 
-pub(super) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
+pub(crate) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
     if expr.is_null() {
         return expr;
     }
@@ -269,7 +269,7 @@ pub(super) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Exp
     }
 }
 
-pub(super) unsafe fn list_node_pointers(list: *mut pg_sys::List) -> Vec<*mut std::ffi::c_void> {
+pub(crate) unsafe fn list_node_pointers(list: *mut pg_sys::List) -> Vec<*mut std::ffi::c_void> {
     if list.is_null() {
         return Vec::new();
     }

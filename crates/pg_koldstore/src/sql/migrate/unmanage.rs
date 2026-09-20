@@ -33,7 +33,20 @@ pub(super) fn unmanage_table_pg_impl(
     let plan = plan_demigration(context, options).map_err(|error| error.to_string())?;
 
     execute_demigration_locks(&plan)?;
-    let deactivated = execute_demigration_statements(&plan, table_oid)?;
+    // Rehydrate's own final step re-INSERTs every row (hot or cold) back
+    // into the real heap via `plan_rehydrate_heap` -- a legitimate internal
+    // write that must not trip this table's own cold-DML insert guard (see
+    // `guard::with_guard_suspended`'s doc comment; the same class of
+    // exemption `AllowManagedTruncateGuard` a few lines below already
+    // grants that step's TRUNCATE against koldstore's own ProcessUtility
+    // guard).
+    let deactivated =
+        crate::sql::cold_dml::guard::with_guard_suspended(|| execute_demigration_statements(&plan, table_oid))?;
+
+    let source = koldstore_common::QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+    for statement in crate::sql::cold_dml::guard::plan_insert_guard_teardown(&source) {
+        pgrx::Spi::run(&statement).map_err(|error| error.to_string())?;
+    }
 
     crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();

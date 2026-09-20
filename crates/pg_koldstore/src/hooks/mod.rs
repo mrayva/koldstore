@@ -4,6 +4,8 @@ pub mod ddl;
 #[cfg(feature = "pg")]
 pub(crate) mod drop_cleanup;
 pub mod executor;
+#[cfg(feature = "pg")]
+pub(crate) mod pk_predicate;
 pub mod planner;
 
 /// Registers PostgreSQL hooks.

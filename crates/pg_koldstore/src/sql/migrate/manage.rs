@@ -160,6 +160,10 @@ pub(crate) fn manage_table_pg_impl(
             pgrx::Spi::run(&statement.sql)
                 .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         }
+        for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
+            pgrx::Spi::run(&statement)
+                .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        }
         register_schema_version(SchemaRegistrationInput {
             table_oid: koldstore_common::TableOid::from_raw(table_oid_u32),
             table_type,
@@ -223,6 +227,10 @@ pub(crate) fn manage_table_pg_impl(
 
     for statement in mirror_plan.create_statements() {
         pgrx::Spi::run(&statement.sql)
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    }
+    for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
+        pgrx::Spi::run(&statement)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     }
     // Hold the apply lock for the whole publish → backfill → catch-up window so
