@@ -83,8 +83,8 @@ mod live {
             }
             crate::memory::release_process_heap_if_pending();
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.
-            if let Some((table_oid, raw_predicate)) = cold_guard_candidate {
-                enforce_cold_only_update_delete_guard(table_oid, &raw_predicate);
+            if let Some((table_oid, raw_predicate, es_processed)) = cold_guard_candidate {
+                enforce_cold_only_update_delete_guard(table_oid, &raw_predicate, es_processed);
             }
         }
     }
@@ -121,7 +121,7 @@ mod live {
     /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
-    ) -> Option<(pg_sys::Oid, Vec<crate::hooks::pk_predicate::RawLeaf>)> {
+    ) -> Option<(pg_sys::Oid, Vec<crate::hooks::pk_predicate::RawLeaf>, u64)> {
         unsafe {
             if crate::sql::cold_dml::guard::suspended() {
                 return None;
@@ -174,38 +174,33 @@ mod live {
             // Every distinct PK candidate this predicate could name is at
             // most one row (PK columns are unique), so `es_processed`
             // (the statement's total affected-row count) can never exceed
-            // the candidate count -- and it equals the candidate count
-            // exactly iff the native statement found every single one.
-            // `es_processed < candidate_count` is therefore precisely
-            // "at least one candidate was not found natively" -- for a
-            // plain equality predicate (candidate_count == 1) this is the
-            // same `es_processed == 0` check as before (zero added cost on
-            // the common hot-and-found path); for an `IN (...)` predicate
-            // it correctly also catches a PARTIAL match. Confirmed live,
-            // `DELETE ... WHERE id IN (1,2)` with id=1 hot and id=2
-            // cold-only reported `es_processed = 1` (not 0) and silently
-            // deleted only the hot row, leaving id=2's cold duplicate
-            // untouched with no error -- exactly the silent-wrong-answer
-            // #122 exists to prevent, just hiding behind a nonzero count.
-            //
-            // Checking every candidate whenever *any* mismatch exists
-            // (rather than gating on "no candidate found at all") was
-            // tried first and found unsafe: confirmed live, re-checking a
-            // candidate that the native statement itself had *just*
-            // deleted (as part of this same, not-yet-committed statement)
-            // could still show as "exists" via a stale cold Parquet copy
-            // predating a later `hydrate_pk` -- the async process that
-            // normally suppresses that stale copy after a hot delete
-            // hasn't run yet within the same uncommitted transaction,
-            // producing a false rejection of an otherwise fully correct,
-            // fully-matched IN-list DELETE. Comparing against
-            // candidate_count avoids ever re-checking a candidate the
-            // native statement already handled.
-            let candidate_count: usize = raw.iter().map(crate::hooks::pk_predicate::RawLeaf::value_count).product();
-            if (*estate).es_processed as usize >= candidate_count {
+            // the *true* PK candidate count -- and equals it exactly iff
+            // the native statement found every single one. That is the
+            // real skip condition (see `enforce_cold_only_update_delete_
+            // guard`, where it is applied once phase 2's catalog lookup
+            // can tell PK leaves apart from residual ones). Phase 1 can
+            // only take the shortcut itself when EVERY leaf has exactly
+            // one value, PK or residual alike -- then the true PK
+            // candidate count is trivially 1 regardless of classification,
+            // and "found >= 1" is unambiguous. Confirmed live this
+            // distinction is required, not just tidy: computing a
+            // candidate estimate from *all* leaves' value counts (PK and
+            // residual together) inflates the count whenever a residual
+            // `IN (...)` is present, e.g. `id = 1 AND status IN
+            // ('a','b')` against a genuinely hot, genuinely matching row
+            // produced `es_processed = 1` but an inflated estimate of 2,
+            // so the "already fully handled" skip never fired and a
+            // completely correct, already-successful UPDATE was wrongly
+            // re-examined (and, per the residual-check reasoning, wrongly
+            // rejected -- it re-found the same row via the cold-or-hot
+            // probe and incorrectly treated that as unsafe). Residual
+            // leaves must not count toward this early estimate at all.
+            let single_valued = raw.iter().all(|leaf| leaf.value_count() == 1);
+            let es_processed = (*estate).es_processed;
+            if single_valued && es_processed != 0 {
                 return None;
             }
-            Some((table_oid, raw))
+            Some((table_oid, raw, es_processed))
         }
     }
 
@@ -223,7 +218,11 @@ mod live {
     /// doesn't match `'x'` is a legitimate zero-row result unrelated to
     /// #122, not something to reject -- see the module doc comment on
     /// `hooks::pk_predicate` for the full reasoning.
-    unsafe fn enforce_cold_only_update_delete_guard(table_oid: pg_sys::Oid, raw: &[crate::hooks::pk_predicate::RawLeaf]) {
+    unsafe fn enforce_cold_only_update_delete_guard(
+        table_oid: pg_sys::Oid,
+        raw: &[crate::hooks::pk_predicate::RawLeaf],
+        es_processed: u64,
+    ) {
         let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
             return;
         };
@@ -235,6 +234,14 @@ mod live {
         else {
             return;
         };
+        // The real "already fully handled natively" skip -- see phase 1's
+        // comment on why it can only be computed here, once PK leaves are
+        // known apart from residual ones. `candidates.len()` is the true
+        // count of distinct rows this predicate's PK portion alone could
+        // name; a residual `IN (...)` never multiplies into it.
+        if es_processed as usize >= candidates.len() {
+            return;
+        }
         for pk_json in candidates {
             let Ok(Some(row_json)) = crate::sql::cold_dml::guard::locate_row(table_oid, &pk_json) else {
                 continue; // genuinely doesn't exist anywhere -- a legitimate zero-row result
@@ -260,6 +267,30 @@ mod live {
                 // unspecified), which "exists in cold storage" would have
                 // misdescribed. The wording below is deliberately accurate
                 // for both cases rather than presuming cold.
+                //
+                // Known, accepted imprecision: when a PK `IN (...)` is
+                // combined with a residual condition, and one candidate
+                // was already hot-and-handled by the native statement
+                // while a sibling candidate is genuinely cold, this loop
+                // can name the ALREADY-HANDLED candidate in the error
+                // instead of (or as well as) the truly offending one --
+                // confirmed live, `DELETE ... WHERE id IN (1,3) AND
+                // status='open'` with id=1 hot+matched+already-deleted-
+                // this-transaction and id=3 genuinely cold+matching named
+                // id=1. Root cause: `es_processed >= candidates.len()`
+                // (the real skip check, above) can't be satisfied when
+                // ANY candidate is missing, so every candidate is
+                // re-checked including ones the native statement already
+                // handled -- and an already-hydrated-then-deleted
+                // candidate can still resolve via a stale cold copy
+                // predating the hydrate, the same root cause documented
+                // on the skip check for the PK-only IN-list case, just
+                // not fully closed here since there is no cheap way to
+                // know which specific candidates the native statement
+                // already covered. The overall reject decision stays
+                // correct either way (confirmed: id=3 alone reproduces
+                // the same rejection on its own), so this is a diagnostic
+                // imprecision only, never a false accept.
                 let table_name =
                     crate::catalog::resolve::qualified_relation_name(table_oid).unwrap_or_else(|_| "?".to_string());
                 pgrx::error!(

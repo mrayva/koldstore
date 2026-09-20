@@ -100,11 +100,13 @@ impl RawLeaf {
 }
 
 /// A residual (non-primary-key) condition to re-check against a located
-/// row's actual values, per [`resolve_predicate`].
+/// row's actual values, per [`resolve_predicate`]. `values` holds more
+/// than one entry only for `Eq` (an `IN (...)` on this column); every
+/// other operator always has exactly one.
 pub(crate) struct ResidualLeaf {
     pub(crate) column: String,
     pub(crate) operator: ComparisonOp,
-    pub(crate) value: serde_json::Value,
+    pub(crate) values: Vec<serde_json::Value>,
 }
 
 /// Phase 1 (plan-tree walking only, **no SPI**): extracts every
@@ -163,6 +165,10 @@ pub(crate) unsafe fn extract_raw_predicate_leaves(
 /// doc comment.
 const MAX_CANDIDATE_COMBINATIONS: usize = 64;
 
+/// Above this many values, a residual `IN (...)` (a non-PK column) is
+/// left unguarded rather than re-checked -- see [`resolve_predicate`].
+const MAX_RESIDUAL_IN_VALUES: usize = 64;
+
 /// Phase 2 (SPI-safe, no plan-tree pointers involved): classifies
 /// [`extract_raw_predicate_leaves`]'s output against the table's real
 /// primary-key columns (`column_attnums` filtered to `pk_columns`) into
@@ -172,10 +178,13 @@ const MAX_CANDIDATE_COMBINATIONS: usize = 64;
 /// candidate-combination cross-product (see [`MAX_CANDIDATE_COMBINATIONS`]
 /// and the `IN (...)` handling this mirrors), and (b) every other leaf as
 /// a residual condition to re-check against each candidate's actual row
-/// (see [`ResidualLeaf`] and the module doc comment on why). A residual
-/// leaf with more than one value (an `IN (...)` on a *non*-PK column) is
-/// out of scope for now and fails the whole extraction, same
-/// conservative-by-default posture as everywhere else in this module.
+/// (see [`ResidualLeaf`] and the module doc comment on why) -- including
+/// an `IN (...)` on a non-PK column (more than one value, always `Eq`),
+/// re-checked as membership rather than equality; capped at
+/// [`MAX_RESIDUAL_IN_VALUES`] for the same reason PK candidates are capped
+/// at [`MAX_CANDIDATE_COMBINATIONS`] -- each residual `IN` value adds one
+/// more coercion to the re-check query, so an unbounded list must not
+/// turn into unbounded guard work.
 #[must_use]
 pub(crate) fn resolve_predicate(
     raw: &[RawLeaf],
@@ -201,13 +210,13 @@ pub(crate) fn resolve_predicate(
             pk_values.entry(leaf.attnum).or_default().extend(leaf.values.iter().cloned());
         } else {
             let name = column_attnums.get(&leaf.attnum)?;
-            if leaf.values.len() != 1 {
-                return None; // IN (...) on a non-PK residual column -- deferred scope
+            if leaf.values.is_empty() || leaf.values.len() > MAX_RESIDUAL_IN_VALUES {
+                return None;
             }
             residual.push(ResidualLeaf {
                 column: name.clone(),
                 operator: leaf.operator,
-                value: leaf.values[0].clone(),
+                values: leaf.values.clone(),
             });
         }
     }

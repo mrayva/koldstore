@@ -84,14 +84,18 @@ pub(crate) fn locate_row(
 ///
 /// Reuses `jsonb_populate_record`'s own type coercion instead of tracking
 /// each residual column's real type: `row_json` is coerced through the
-/// table's row type once (`loc`), and a second, small jsonb object built
-/// purely from the residual leaves' own literal values is coerced the
-/// same way (`extra`) -- comparing `loc.col OP extra.col` per leaf lets
-/// PostgreSQL's own operators do a type-correct comparison (numeric,
-/// text collation, ...) rather than a lossy textual one. `operator`'s SQL
-/// text is safe to interpolate directly: it only ever comes from
-/// `ComparisonOp::sql_symbol`'s fixed six-entry allowlist, never from
-/// arbitrary input.
+/// table's row type once (`loc`), and for each leaf, its own literal
+/// value(s) are coerced the same way, one candidate row per value (via
+/// `jsonb_array_elements` over that leaf's own bind parameter, even for a
+/// plain single-value leaf -- uniform handling, one shape covers both
+/// `col OP value` and `col IN (...)`). Comparing `loc.col` against those
+/// coerced candidates with the real SQL operator lets PostgreSQL's own
+/// type-correct comparison (numeric, text collation, ...) decide, never a
+/// lossy textual one. `operator`'s SQL text is safe to interpolate
+/// directly: it only ever comes from `ComparisonOp::sql_symbol`'s fixed
+/// six-entry allowlist, never from arbitrary input; each column name is
+/// still identifier-quoted, and each key/value crosses as a bind
+/// parameter, not interpolated text.
 #[cfg(feature = "pg")]
 pub(crate) fn residual_conditions_match(
     table_oid: pgrx::pg_sys::Oid,
@@ -104,23 +108,32 @@ pub(crate) fn residual_conditions_match(
     let relation = super::qualified_relation(table_oid)?;
     let quoted = relation.quoted();
 
-    let mut extra = serde_json::Map::with_capacity(residual.len());
+    let mut ctes = Vec::with_capacity(residual.len());
     let mut clauses = Vec::with_capacity(residual.len());
-    for leaf in residual {
+    let mut args: Vec<DatumWithOid> = vec![DatumWithOid::from(pgrx::JsonB(row_json.clone()))];
+    for (index, leaf) in residual.iter().enumerate() {
         let column = koldstore_common::sql::ident::quote_ident(&leaf.column);
-        clauses.push(format!("(loc.{column} {} extra.{column})", leaf.operator.sql_symbol()));
-        extra.insert(leaf.column.clone(), leaf.value.clone());
+        let column_key = quote_sql_literal(&leaf.column);
+        let cte_name = format!("leaf{index}");
+        let param_index = args.len() + 1;
+        ctes.push(format!(
+            "{cte_name} AS (SELECT (jsonb_populate_record(NULL::{quoted}, jsonb_build_object({column_key}, v))).{column} \
+             AS val FROM jsonb_array_elements(${param_index}) AS v)"
+        ));
+        clauses.push(match leaf.operator {
+            crate::hooks::pk_predicate::ComparisonOp::Eq => {
+                format!("(loc.{column} IN (SELECT val FROM {cte_name}))")
+            }
+            other => format!("(loc.{column} {} (SELECT val FROM {cte_name}))", other.sql_symbol()),
+        });
+        args.push(DatumWithOid::from(pgrx::JsonB(serde_json::Value::Array(leaf.values.clone()))));
     }
     let sql = format!(
-        "WITH loc AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)), \
-         extra AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $2)) \
-         SELECT ({}) FROM loc, extra",
+        "WITH loc AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)), {} \
+         SELECT ({}) FROM loc",
+        ctes.join(", "),
         clauses.join(" AND ")
     );
-    let args = [
-        DatumWithOid::from(pgrx::JsonB(row_json.clone())),
-        DatumWithOid::from(pgrx::JsonB(serde_json::Value::Object(extra))),
-    ];
     match pgrx::Spi::get_one_with_args::<bool>(&sql, &args) {
         Ok(result) => Ok(result.unwrap_or(false)),
         Err(pgrx::spi::Error::InvalidPosition) => Ok(false),
