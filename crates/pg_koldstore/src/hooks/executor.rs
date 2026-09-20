@@ -121,7 +121,7 @@ mod live {
     /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
-    ) -> Option<(pg_sys::Oid, std::collections::HashMap<i16, Vec<serde_json::Value>>)> {
+    ) -> Option<(pg_sys::Oid, Vec<crate::hooks::pk_predicate::RawLeaf>)> {
         unsafe {
             if crate::sql::cold_dml::guard::suspended() {
                 return None;
@@ -170,7 +170,7 @@ mod live {
                 return None;
             }
             let raw =
-                crate::hooks::pk_predicate::extract_raw_attnum_equality((*planned).planTree, (*query_desc).params)?;
+                crate::hooks::pk_predicate::extract_raw_predicate_leaves((*planned).planTree, (*query_desc).params)?;
             // Every distinct PK candidate this predicate could name is at
             // most one row (PK columns are unique), so `es_processed`
             // (the statement's total affected-row count) can never exceed
@@ -201,7 +201,7 @@ mod live {
             // fully-matched IN-list DELETE. Comparing against
             // candidate_count avoids ever re-checking a candidate the
             // native statement already handled.
-            let candidate_count: usize = raw.values().map(Vec::len).product();
+            let candidate_count: usize = raw.iter().map(crate::hooks::pk_predicate::RawLeaf::value_count).product();
             if (*estate).es_processed as usize >= candidate_count {
                 return None;
             }
@@ -209,47 +209,57 @@ mod live {
         }
     }
 
-    /// Phase 2 of the cold-DML write guard: resolves `raw_predicate`
-    /// against the table's actual primary-key columns (a catalog lookup,
-    /// safe now that `standard_ExecutorEnd` has already run) into every
-    /// candidate PK combination (plain equality contributes one; an
-    /// `IN (...)` contributes each element -- see `resolve_pk_predicate`),
-    /// and raises the same error `koldstore.update_row`/`delete_row`'s own
-    /// docs point callers at for the first candidate confirmed to exist
-    /// hot-or-cold.
-    unsafe fn enforce_cold_only_update_delete_guard(
-        table_oid: pg_sys::Oid,
-        raw_predicate: &std::collections::HashMap<i16, Vec<serde_json::Value>>,
-    ) {
+    /// Phase 2 of the cold-DML write guard: resolves `raw` against the
+    /// table's actual primary-key columns (a catalog lookup, safe now that
+    /// `standard_ExecutorEnd` has already run) into every candidate PK
+    /// combination (plain equality contributes one; an `IN (...)`
+    /// contributes each element) plus any residual (non-PK) conditions --
+    /// see `resolve_predicate` -- and raises the same error
+    /// `koldstore.update_row`/`delete_row`'s own docs point callers at for
+    /// the first candidate confirmed to (a) exist hot-or-cold and (b) still
+    /// satisfy every residual condition against its actual located row.
+    /// (b) is what makes an extra condition (`WHERE id = 5 AND status =
+    /// 'x'`) safe to guard at all: a hot row whose `status` genuinely
+    /// doesn't match `'x'` is a legitimate zero-row result unrelated to
+    /// #122, not something to reject -- see the module doc comment on
+    /// `hooks::pk_predicate` for the full reasoning.
+    unsafe fn enforce_cold_only_update_delete_guard(table_oid: pg_sys::Oid, raw: &[crate::hooks::pk_predicate::RawLeaf]) {
         let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
             return;
         };
         let Ok(column_attnums) = crate::sql::cold_dml::guard::column_attnum_map(table_oid) else {
             return;
         };
-        let Some(candidates) =
-            crate::hooks::pk_predicate::resolve_pk_predicate(raw_predicate, &pk_columns, &column_attnums)
+        let Some((candidates, residual)) =
+            crate::hooks::pk_predicate::resolve_predicate(raw, &pk_columns, &column_attnums)
         else {
             return;
         };
         for pk_json in candidates {
-            let Ok(exists) = crate::sql::cold_dml::guard::cold_pk_exists(table_oid, &pk_json) else {
+            let Ok(Some(row_json)) = crate::sql::cold_dml::guard::locate_row(table_oid, &pk_json) else {
+                continue; // genuinely doesn't exist anywhere -- a legitimate zero-row result
+            };
+            let Ok(residual_matches) = crate::sql::cold_dml::guard::residual_conditions_match(
+                table_oid,
+                &row_json,
+                &residual,
+            ) else {
                 continue;
             };
-            if exists {
-                // `cold_pk_exists` reports hot-or-cold, not specifically
-                // cold: for a single-candidate predicate this only ever
-                // runs when the native statement already found nothing
-                // (see the es_processed check at the call site), so
-                // "exists" there can only mean cold. For a multi-candidate
-                // `IN (...)` predicate that is not guaranteed -- some
-                // candidates may be genuinely hot and already part of what
-                // the statement affected. Confirmed live: an `IN` list
-                // mixing one hot and one cold key reported the HOT key
-                // here first (HashMap/Vec iteration order is unspecified),
-                // which "exists in cold storage" would have misdescribed.
-                // The wording below is deliberately accurate for both
-                // cases rather than presuming cold.
+            if residual_matches {
+                // `locate_row` reports hot-or-cold, not specifically cold:
+                // for a single-candidate predicate with no residual
+                // conditions this only ever runs when the native statement
+                // already found nothing (see the es_processed check at the
+                // call site), so "exists and matches" there can only mean
+                // cold. For a multi-candidate `IN (...)` predicate that is
+                // not guaranteed -- some candidates may be genuinely hot
+                // and already part of what the statement affected.
+                // Confirmed live: an `IN` list mixing one hot and one cold
+                // key reported the HOT key here first (iteration order is
+                // unspecified), which "exists in cold storage" would have
+                // misdescribed. The wording below is deliberately accurate
+                // for both cases rather than presuming cold.
                 let table_name =
                     crate::catalog::resolve::qualified_relation_name(table_oid).unwrap_or_else(|_| "?".to_string());
                 pgrx::error!(

@@ -66,6 +66,68 @@ pub(crate) fn cold_pk_exists(
     Ok(super::locate_row_json(table_oid, pk_json)?.is_some())
 }
 
+/// Locates `pk_json` (hot or cold) and returns its full row as jsonb, for
+/// [`residual_conditions_match`] to re-check extra WHERE conditions
+/// against.
+#[cfg(feature = "pg")]
+pub(crate) fn locate_row(
+    table_oid: pgrx::pg_sys::Oid,
+    pk_json: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    Ok(super::locate_row_json(table_oid, pk_json)?.map(|row| row.0))
+}
+
+/// Re-checks `residual` (every non-primary-key condition from the
+/// original WHERE clause, see `hooks::pk_predicate::ResidualLeaf`) against
+/// `row_json` (the row [`locate_row`] found for one PK candidate),
+/// returning `true` only if *all* of them would also have matched.
+///
+/// Reuses `jsonb_populate_record`'s own type coercion instead of tracking
+/// each residual column's real type: `row_json` is coerced through the
+/// table's row type once (`loc`), and a second, small jsonb object built
+/// purely from the residual leaves' own literal values is coerced the
+/// same way (`extra`) -- comparing `loc.col OP extra.col` per leaf lets
+/// PostgreSQL's own operators do a type-correct comparison (numeric,
+/// text collation, ...) rather than a lossy textual one. `operator`'s SQL
+/// text is safe to interpolate directly: it only ever comes from
+/// `ComparisonOp::sql_symbol`'s fixed six-entry allowlist, never from
+/// arbitrary input.
+#[cfg(feature = "pg")]
+pub(crate) fn residual_conditions_match(
+    table_oid: pgrx::pg_sys::Oid,
+    row_json: &serde_json::Value,
+    residual: &[crate::hooks::pk_predicate::ResidualLeaf],
+) -> Result<bool, String> {
+    if residual.is_empty() {
+        return Ok(true);
+    }
+    let relation = super::qualified_relation(table_oid)?;
+    let quoted = relation.quoted();
+
+    let mut extra = serde_json::Map::with_capacity(residual.len());
+    let mut clauses = Vec::with_capacity(residual.len());
+    for leaf in residual {
+        let column = koldstore_common::sql::ident::quote_ident(&leaf.column);
+        clauses.push(format!("(loc.{column} {} extra.{column})", leaf.operator.sql_symbol()));
+        extra.insert(leaf.column.clone(), leaf.value.clone());
+    }
+    let sql = format!(
+        "WITH loc AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)), \
+         extra AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $2)) \
+         SELECT ({}) FROM loc, extra",
+        clauses.join(" AND ")
+    );
+    let args = [
+        DatumWithOid::from(pgrx::JsonB(row_json.clone())),
+        DatumWithOid::from(pgrx::JsonB(serde_json::Value::Object(extra))),
+    ];
+    match pgrx::Spi::get_one_with_args::<bool>(&sql, &args) {
+        Ok(result) => Ok(result.unwrap_or(false)),
+        Err(pgrx::spi::Error::InvalidPosition) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Maps every live column's `attnum` to its name, for
 /// `hooks::pk_predicate::extract_pk_equality`'s `Var.varattno` lookups.
 #[cfg(feature = "pg")]

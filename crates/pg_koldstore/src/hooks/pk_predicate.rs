@@ -1,6 +1,7 @@
-//! Extracts a "WHERE is exactly an equality match on every primary-key
-//! column, nothing else" predicate from a planned UPDATE/DELETE, for the
-//! cold-DML write guard (`sql::cold_dml::guard`, upstream #122 Option B).
+//! Extracts a structured predicate -- a primary-key match plus any extra
+//! ("residual") comparison conditions -- from a planned UPDATE/DELETE, for
+//! the cold-DML write guard (`sql::cold_dml::guard`, upstream #122 Option
+//! B).
 //!
 //! Deliberately conservative: any WHERE shape this cannot recognize with
 //! full confidence returns `None`, which means "skip the guard for this
@@ -11,17 +12,20 @@
 //! *positive* (rejecting or misjudging a statement this can't actually
 //! analyze correctly) is not.
 //!
-//! Correctness note on why "exactly the PK columns, nothing else" is
-//! required rather than "PK columns present, extra conditions allowed":
-//! this extraction only matters when the native statement already
-//! affected zero rows. If the true WHERE clause were `id = 5 AND status =
-//! 'x'` and the real reason for zero rows was a hot row's `status`
-//! mismatch (not cold-ness), a check that only looked at `id = 5` would
-//! find that key via the hot-or-cold merge-scan existence probe and
-//! wrongly report it as unsafe. Requiring an exact match on solely the PK
-//! columns sidesteps this: if there is truly no other condition, "found
-//! via merge-scan" can only mean the key exists and is cold (a hot match
-//! would already have been the 0-row statement's result).
+//! Correctness note on why an extra ("residual") condition alongside the
+//! PK match must be *evaluated*, not merely tolerated or rejected
+//! outright: this extraction only matters when the native statement
+//! already affected zero rows. If the true WHERE clause were `id = 5 AND
+//! status = 'x'` and the real reason for zero rows was a hot row's
+//! `status` mismatch (not cold-ness), treating `id = 5`'s mere existence
+//! (hot or cold, via the merge-scan probe) as "unsafe" would wrongly
+//! reject a statement that was already completely correct. The guard must
+//! instead fetch the located row (see `sql::cold_dml::guard::locate_row`)
+//! and re-check the residual condition against its *actual* values before
+//! deciding: if the residual condition would also have matched, the zero
+//! rows really is unexplained except by cold-ness, and rejecting is
+//! correct; if not, the zero-row result was already legitimate and
+//! unrelated to #122 at all.
 
 use std::collections::HashMap;
 
@@ -29,26 +33,98 @@ use pgrx::pg_sys;
 
 use crate::merge_scan::pg::{literals, qual};
 
+/// One of the six ordinary scalar comparison operators this module
+/// recognizes on a bare `Var`. Anything else (`LIKE`, `IS [NOT] NULL`,
+/// function calls, ...) is out of scope -- the whole predicate extraction
+/// fails rather than guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComparisonOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+impl ComparisonOp {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "=" => Some(Self::Eq),
+            "<>" | "!=" => Some(Self::Ne),
+            "<" => Some(Self::Lt),
+            ">" => Some(Self::Gt),
+            "<=" => Some(Self::Le),
+            ">=" => Some(Self::Ge),
+            _ => None,
+        }
+    }
+
+    /// The operator's own SQL text -- safe to interpolate directly into
+    /// generated SQL since it only ever comes from [`Self::from_name`]'s
+    /// fixed, exhaustively-matched allowlist above, never from arbitrary
+    /// input.
+    pub(crate) fn sql_symbol(self) -> &'static str {
+        match self {
+            Self::Eq => "=",
+            Self::Ne => "<>",
+            Self::Lt => "<",
+            Self::Gt => ">",
+            Self::Le => "<=",
+            Self::Ge => ">=",
+        }
+    }
+}
+
+/// One `Var OP <literal-or-list>` leaf from a WHERE clause, extracted
+/// during the pointer-safe plan-tree walk but not yet classified as a
+/// primary-key match or a residual condition -- that classification needs
+/// a catalog lookup this phase must not perform (see the module doc
+/// comment and `executor.rs`'s call site for why the walk and the
+/// classification are two separate phases).
+pub(crate) struct RawLeaf {
+    attnum: i16,
+    operator: ComparisonOp,
+    /// More than one value only ever occurs for `Eq` via an `IN (...)`
+    /// (`ScalarArrayOpExpr`) on a primary-key column.
+    values: Vec<serde_json::Value>,
+}
+
+impl RawLeaf {
+    /// Cost-estimate contribution for `executor.rs`'s `candidate_count`
+    /// (an upper bound is fine even before phase 2's PK/residual split --
+    /// see that call site's comment).
+    pub(crate) fn value_count(&self) -> usize {
+        self.values.len()
+    }
+}
+
+/// A residual (non-primary-key) condition to re-check against a located
+/// row's actual values, per [`resolve_predicate`].
+pub(crate) struct ResidualLeaf {
+    pub(crate) column: String,
+    pub(crate) operator: ComparisonOp,
+    pub(crate) value: serde_json::Value,
+}
+
 /// Phase 1 (plan-tree walking only, **no SPI**): extracts every
-/// `attnum = <literal-or-bound-param>` equality this UPDATE/DELETE's WHERE
-/// clause is built from, keyed by raw column `attnum` -- deliberately
-/// unaware of which columns are actually the primary key, since resolving
-/// that requires a catalog/SPI lookup this phase must not perform (see the
-/// call site in `executor.rs`: the plan tree these pointers reference may
-/// not survive past `standard_ExecutorEnd`, while SPI must not run
-/// *before* it -- this phase runs first, while the pointers are still
-/// live, and hands its pointer-free `HashMap<i16, Value>` result to
-/// [`resolve_pk_predicate`] afterward).
+/// `Var OP <literal-or-bound-param>` leaf this UPDATE/DELETE/MERGE's WHERE
+/// clause is built from -- deliberately unaware of which columns are
+/// actually the primary key, since resolving that requires a catalog/SPI
+/// lookup this phase must not perform (see the call site in
+/// `executor.rs`: the plan tree these pointers reference may not survive
+/// past `standard_ExecutorEnd`, while SPI must not run *before* it -- this
+/// phase runs first, while the pointers are still live, and hands its
+/// pointer-free `Vec<RawLeaf>` result to [`resolve_predicate`] afterward).
 ///
-/// Returns `None` when the WHERE clause is not cleanly a single
-/// `Var = <literal>` or an `AND`-chain of them (any `OR`, non-equality
-/// operator, non-literal operand, or unrecognized plan shape) -- see the
-/// module doc comment for why this must be exact rather than best-effort.
+/// Returns `None` when the WHERE clause is not cleanly a single leaf or an
+/// `AND`-chain of them (any `OR`, unrecognized operator, non-literal
+/// operand, or unrecognized plan shape).
 #[must_use]
-pub(crate) unsafe fn extract_raw_attnum_equality(
+pub(crate) unsafe fn extract_raw_predicate_leaves(
     modify_table_plan: *mut pg_sys::Plan,
     params: pg_sys::ParamListInfo,
-) -> Option<HashMap<i16, Vec<serde_json::Value>>> {
+) -> Option<Vec<RawLeaf>> {
     unsafe {
         if modify_table_plan.is_null() {
             return None;
@@ -62,30 +138,24 @@ pub(crate) unsafe fn extract_raw_attnum_equality(
         // Every qual source that applies to this scan must walk cleanly --
         // an IndexScan's index condition (`indexqualorig`) covers only
         // what the index itself can evaluate; anything else in the WHERE
-        // clause that couldn't be pushed into the index (e.g. a non-PK
-        // column) lands in the *residual* filter (`.plan.qual`) instead,
-        // a completely separate list. Reading only one of the two would
-        // miss extra conditions there -- confirmed live: `WHERE id = 30
-        // AND name = 'x'` on a genuinely *hot* row put `id = 30` in
-        // `indexqualorig` and `name = 'x'` in the residual `qual`, so
-        // reading `indexqualorig` alone made a legitimately-0-row
-        // (name mismatch) UPDATE look identical to a cold-only key and
-        // wrongly rejected it.
-        let mut matched: HashMap<i16, Vec<serde_json::Value>> = HashMap::new();
+        // clause that couldn't be pushed into the index lands in the
+        // *residual* filter (`.plan.qual`) instead, a completely separate
+        // list. Reading only one of the two would miss conditions there.
+        let mut leaves: Vec<RawLeaf> = Vec::new();
         for qual_list in qual_lists {
             if qual_list.is_null() {
                 continue;
             }
-            if !walk_and_equality(qual_list, scanrelid, params, &mut matched) {
+            if !walk_leaves(qual_list, scanrelid, params, &mut leaves) {
                 return None;
             }
         }
-        Some(matched)
+        Some(leaves)
     }
 }
 
-/// Above this many candidate PK combinations, [`resolve_pk_predicate`]
-/// gives up rather than expanding the full cross-product -- each candidate
+/// Above this many candidate PK combinations, [`resolve_predicate`] gives
+/// up rather than expanding the full cross-product -- each candidate
 /// costs one `cold_pk_exists` merge-scan lookup, so an unbounded `IN`
 /// list (or several on different composite-PK columns at once) could
 /// otherwise turn one rejected statement into an unbounded amount of
@@ -93,21 +163,25 @@ pub(crate) unsafe fn extract_raw_attnum_equality(
 /// doc comment.
 const MAX_CANDIDATE_COMBINATIONS: usize = 64;
 
-/// Phase 2 (SPI-safe, no plan-tree pointers involved): validates that
-/// `raw` -- [`extract_raw_attnum_equality`]'s output -- covers *exactly*
-/// every primary-key column's `attnum` (from `column_attnums`, filtered to
-/// `pk_columns`) and nothing else, and if so expands each column's
-/// candidate value list (a plain equality contributes one; an `IN (...)`
-/// contributes each list element) into the full cross-product of
-/// `{column: value}` jsonb objects [`super::super::cold_pk_exists`]
-/// expects -- one candidate PK per combination, e.g. `id IN (1,2,3)`
-/// yields 3 candidates, `tenant_id = 5 AND id IN (1,2)` yields 2.
+/// Phase 2 (SPI-safe, no plan-tree pointers involved): classifies
+/// [`extract_raw_predicate_leaves`]'s output against the table's real
+/// primary-key columns (`column_attnums` filtered to `pk_columns`) into
+/// (a) the primary-key match -- every PK column must appear as an `Eq`
+/// leaf (a non-`Eq` operator on a PK column, e.g. a range condition, is
+/// out of scope and fails the whole extraction), expanded into the full
+/// candidate-combination cross-product (see [`MAX_CANDIDATE_COMBINATIONS`]
+/// and the `IN (...)` handling this mirrors), and (b) every other leaf as
+/// a residual condition to re-check against each candidate's actual row
+/// (see [`ResidualLeaf`] and the module doc comment on why). A residual
+/// leaf with more than one value (an `IN (...)` on a *non*-PK column) is
+/// out of scope for now and fails the whole extraction, same
+/// conservative-by-default posture as everywhere else in this module.
 #[must_use]
-pub(crate) fn resolve_pk_predicate(
-    raw: &HashMap<i16, Vec<serde_json::Value>>,
+pub(crate) fn resolve_predicate(
+    raw: &[RawLeaf],
     pk_columns: &[String],
     column_attnums: &HashMap<i16, String>,
-) -> Option<Vec<serde_json::Value>> {
+) -> Option<(Vec<serde_json::Value>, Vec<ResidualLeaf>)> {
     if pk_columns.is_empty() {
         return None;
     }
@@ -116,14 +190,35 @@ pub(crate) fn resolve_pk_predicate(
         .filter(|(_, name)| pk_columns.iter().any(|pk| pk == *name))
         .map(|(attnum, name)| (*attnum, name.as_str()))
         .collect();
-    if pk_attnums.len() != pk_columns.len() || raw.len() != pk_attnums.len() {
+
+    let mut pk_values: HashMap<i16, Vec<serde_json::Value>> = HashMap::new();
+    let mut residual: Vec<ResidualLeaf> = Vec::new();
+    for leaf in raw {
+        if pk_attnums.contains_key(&leaf.attnum) {
+            if leaf.operator != ComparisonOp::Eq {
+                return None; // a range/inequality condition on a PK column -- deferred scope
+            }
+            pk_values.entry(leaf.attnum).or_default().extend(leaf.values.iter().cloned());
+        } else {
+            let name = column_attnums.get(&leaf.attnum)?;
+            if leaf.values.len() != 1 {
+                return None; // IN (...) on a non-PK residual column -- deferred scope
+            }
+            residual.push(ResidualLeaf {
+                column: name.clone(),
+                operator: leaf.operator,
+                value: leaf.values[0].clone(),
+            });
+        }
+    }
+    if pk_attnums.len() != pk_columns.len() || pk_values.len() != pk_attnums.len() {
         return None;
     }
 
     // Cross-product of each PK column's candidate list, e.g.
     // [("id", [1,2,3])] -> [{"id":1}, {"id":2}, {"id":3}].
     let mut combinations: Vec<serde_json::Map<String, serde_json::Value>> = vec![serde_json::Map::new()];
-    for (attnum, values) in raw {
+    for (attnum, values) in &pk_values {
         let name = pk_attnums.get(attnum)?;
         if values.is_empty() {
             return None;
@@ -142,7 +237,8 @@ pub(crate) fn resolve_pk_predicate(
         }
         combinations = next;
     }
-    Some(combinations.into_iter().map(serde_json::Value::Object).collect())
+    let candidates = combinations.into_iter().map(serde_json::Value::Object).collect();
+    Some((candidates, residual))
 }
 
 /// Locates every qual list a simple point-lookup UPDATE/DELETE subplan's
@@ -186,38 +282,38 @@ unsafe fn scan_qual_sources(plan: *mut pg_sys::Plan) -> Option<(pg_sys::Index, V
 }
 
 /// Walks `qual` (a `List` of ANDed quals) plus any nested `AND`-only
-/// `BoolExpr`, requiring every leaf to be a `Var = <literal>` equality or
-/// `Var = ANY(<literal array>)` (`IN (...)`) on this scan's own relation.
-/// Returns `false` the moment anything else is seen (OR, a non-equality
-/// operator, a non-literal operand, ...) -- which column each `Var`
-/// belongs to a PK is validated later, in [`resolve_pk_predicate`], once a
-/// catalog lookup can safely happen.
-unsafe fn walk_and_equality(
+/// `BoolExpr`, requiring every leaf to be a `Var OP <literal>` comparison
+/// or `Var = ANY(<literal array>)` (`IN (...)`) on this scan's own
+/// relation. Returns `false` the moment anything else is seen (`OR`, an
+/// unrecognized operator, a non-literal operand, ...) -- which leaves are
+/// primary-key matches versus residual conditions is decided later, in
+/// [`resolve_predicate`], once a catalog lookup can safely happen.
+unsafe fn walk_leaves(
     qual: *mut pg_sys::List,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+    leaves: &mut Vec<RawLeaf>,
 ) -> bool {
     unsafe {
         literals::list_node_pointers(qual)
             .into_iter()
-            .all(|node| walk_and_equality_node(node.cast::<pg_sys::Expr>(), scanrelid, params, matched))
+            .all(|node| walk_leaf_node(node.cast::<pg_sys::Expr>(), scanrelid, params, leaves))
     }
 }
 
-unsafe fn walk_and_equality_node(
+unsafe fn walk_leaf_node(
     expr: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+    leaves: &mut Vec<RawLeaf>,
 ) -> bool {
     unsafe {
         if expr.is_null() {
             return false;
         }
         match (*expr).type_ {
-            pg_sys::NodeTag::T_OpExpr => equality_predicate(expr, scanrelid, params, matched),
-            pg_sys::NodeTag::T_ScalarArrayOpExpr => in_list_predicate(expr, scanrelid, params, matched),
+            pg_sys::NodeTag::T_OpExpr => comparison_leaf(expr, scanrelid, params, leaves),
+            pg_sys::NodeTag::T_ScalarArrayOpExpr => in_list_leaf(expr, scanrelid, params, leaves),
             pg_sys::NodeTag::T_BoolExpr => {
                 let bool_expr = expr.cast::<pg_sys::BoolExpr>();
                 if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
@@ -225,32 +321,35 @@ unsafe fn walk_and_equality_node(
                 }
                 literals::list_node_pointers((*bool_expr).args)
                     .into_iter()
-                    .all(|node| walk_and_equality_node(node.cast::<pg_sys::Expr>(), scanrelid, params, matched))
+                    .all(|node| walk_leaf_node(node.cast::<pg_sys::Expr>(), scanrelid, params, leaves))
             }
             _ => false,
         }
     }
 }
 
-unsafe fn equality_predicate(
+unsafe fn comparison_leaf(
     expr: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+    leaves: &mut Vec<RawLeaf>,
 ) -> bool {
     unsafe {
         let op_expr = expr.cast::<pg_sys::OpExpr>();
-        if !qual::operator_is_pg_catalog((*op_expr).opno) || !is_equality_operator((*op_expr).opno) {
+        if !qual::operator_is_pg_catalog((*op_expr).opno) {
             return false;
         }
+        let Some(operator) = comparison_operator((*op_expr).opno) else {
+            return false;
+        };
         let args = literals::list_node_pointers((*op_expr).args);
         if args.len() != 2 {
             return false;
         }
         let (left, right) = (args[0].cast::<pg_sys::Expr>(), args[1].cast::<pg_sys::Expr>());
 
-        record_if_column_match(left, right, scanrelid, params, matched)
-            || record_if_column_match(right, left, scanrelid, params, matched)
+        record_leaf(left, right, operator, scanrelid, params, leaves)
+            || record_leaf(right, left, operator.flip(), scanrelid, params, leaves)
     }
 }
 
@@ -259,17 +358,20 @@ unsafe fn equality_predicate(
 /// candidate set the same way, and is out of scope here. Only a `Var` on
 /// the left (the PostgreSQL-canonical form for `ScalarArrayOpExpr`) is
 /// accepted -- an array on the left never occurs for `x IN (...)`.
-unsafe fn in_list_predicate(
+unsafe fn in_list_leaf(
     expr: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+    leaves: &mut Vec<RawLeaf>,
 ) -> bool {
     unsafe {
         let saop = expr.cast::<pg_sys::ScalarArrayOpExpr>();
-        if !(*saop).useOr || !qual::operator_is_pg_catalog((*saop).opno) || !is_equality_operator((*saop).opno) {
+        if !(*saop).useOr || !qual::operator_is_pg_catalog((*saop).opno) {
             return false;
         }
+        let Some(ComparisonOp::Eq) = comparison_operator((*saop).opno) else {
+            return false;
+        };
         let args = literals::list_node_pointers((*saop).args);
         if args.len() != 2 {
             return false;
@@ -283,21 +385,24 @@ unsafe fn in_list_predicate(
         if values.is_empty() {
             return false;
         }
-        matched.insert(attnum, values).is_none()
+        leaves.push(RawLeaf { attnum, operator: ComparisonOp::Eq, values });
+        true
     }
 }
 
 /// If `column_side` is a bare `Var` on `scanrelid` and `value_side` is a
-/// literal-or-bound-param, records `attnum -> [value]` into `matched` and
-/// returns `true`. A partial match (a `Var` paired with a non-literal, or
-/// a NULL literal) is treated as a failure, not a skip -- see the module
-/// doc comment on why "no extra/ambiguous conditions" must hold exactly.
-unsafe fn record_if_column_match(
+/// literal-or-bound-param, records the leaf and returns `true`. A partial
+/// match (a `Var` paired with a non-literal, or a NULL literal) is treated
+/// as a failure, not a skip -- see the module doc comment on why an
+/// unrecognized shape must abort the whole extraction rather than being
+/// silently dropped.
+unsafe fn record_leaf(
     column_side: *mut pg_sys::Expr,
     value_side: *mut pg_sys::Expr,
+    operator: ComparisonOp,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+    leaves: &mut Vec<RawLeaf>,
 ) -> bool {
     unsafe {
         let Some(attnum) = var_attnum(column_side, scanrelid) else {
@@ -312,7 +417,24 @@ unsafe fn record_if_column_match(
         let Some(value) = datum_to_json_text(datum, type_oid) else {
             return false;
         };
-        matched.insert(attnum, vec![value]).is_none()
+        leaves.push(RawLeaf { attnum, operator, values: vec![value] });
+        true
+    }
+}
+
+impl ComparisonOp {
+    /// The operator to use when a leaf's `Var` and literal are swapped
+    /// (`5 = id` instead of `id = 5`): only order-sensitive operators
+    /// change (`<` becomes `>` and so on); `=`/`<>` are unaffected.
+    const fn flip(self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::Ne => Self::Ne,
+            Self::Lt => Self::Gt,
+            Self::Gt => Self::Lt,
+            Self::Le => Self::Ge,
+            Self::Ge => Self::Le,
+        }
     }
 }
 
@@ -330,13 +452,13 @@ unsafe fn var_attnum(expr: *mut pg_sys::Expr, scanrelid: pg_sys::Index) -> Optio
     }
 }
 
-unsafe fn is_equality_operator(operator: pg_sys::Oid) -> bool {
+unsafe fn comparison_operator(operator: pg_sys::Oid) -> Option<ComparisonOp> {
     unsafe {
         let name_ptr = pg_sys::get_opname(operator);
         if name_ptr.is_null() {
-            return false;
+            return None;
         }
-        std::ffi::CStr::from_ptr(name_ptr).to_str() == Ok("=")
+        ComparisonOp::from_name(std::ffi::CStr::from_ptr(name_ptr).to_str().ok()?)
     }
 }
 
