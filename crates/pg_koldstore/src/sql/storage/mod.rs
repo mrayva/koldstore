@@ -32,6 +32,7 @@ pub fn register_storage_pg(
     scoped_path_tmpl: &str,
     check: pgrx::default!(bool, true),
 ) -> String {
+    crate::security::require_superuser("register a storage backend");
     register_storage_pg_impl(
         name,
         storage_type,
@@ -66,6 +67,7 @@ pub fn register_storage_pg_with_default_templates(
     config: pgrx::JsonB,
     check: pgrx::default!(bool, true),
 ) -> String {
+    crate::security::require_superuser("register a storage backend");
     register_storage_pg_impl(
         name,
         storage_type,
@@ -162,6 +164,7 @@ fn ensure_storage_check(
 pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
     use pgrx::datum::DatumWithOid;
 
+    crate::security::require_superuser("alter storage credentials");
     let plan = alter_storage_credentials_plan(name, credentials.0)
         .unwrap_or_else(|error| pgrx::error!("{error}"));
     let args = [
@@ -195,6 +198,7 @@ pub fn alter_storage_location_pg(
 ) -> String {
     use pgrx::datum::DatumWithOid;
 
+    crate::security::require_superuser("alter a storage location");
     let plan = alter_storage_location_plan(name, base_path, config.0)
         .unwrap_or_else(|error| pgrx::error!("{error}"));
     if check {

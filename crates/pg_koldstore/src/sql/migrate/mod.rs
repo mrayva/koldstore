@@ -92,6 +92,7 @@ pub fn manage_table_pg(
     parquet_data_page_row_count_limit: pgrx::default!(Option<i64>, "NULL"),
     parquet_bloom_filter_fpp: pgrx::default!(Option<f64>, "NULL"),
 ) -> pgrx::Uuid {
+    crate::security::require_relation_owner_or_superuser(table_name.0, "manage this table");
     manage::manage_table_pg_impl(
         table_name.0,
         table_type,
@@ -120,6 +121,10 @@ pub fn manage_table_pg(
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "set_table_auto_flush", schema = "koldstore", security_definer)]
 pub fn set_table_auto_flush_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    crate::security::require_relation_owner_or_superuser(
+        table_name.oid(),
+        "change this table's auto-flush setting",
+    );
     set_table_auto_flush_pg_impl(table_name.oid(), enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
 }
@@ -136,6 +141,7 @@ pub fn unmanage_table_pg(
     drop_cold: pgrx::default!(Option<bool>, "NULL"),
 ) -> i64 {
     let table_oid = table_name.oid();
+    crate::security::require_relation_owner_or_superuser(table_oid, "unmanage this table");
     drop(table_name);
     let options = DemigrateOptions {
         rehydrate: rehydrate.unwrap_or(true),

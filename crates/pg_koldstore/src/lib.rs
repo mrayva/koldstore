@@ -17,6 +17,9 @@ pub mod observability;
 #[cfg(feature = "pg")]
 pub mod preload;
 pub mod row_counter_cache;
+/// Caller-authorization helpers for `SECURITY DEFINER` SQL entrypoints.
+#[cfg(feature = "pg")]
+pub(crate) mod security;
 pub mod settings;
 pub mod spi;
 pub mod sql;

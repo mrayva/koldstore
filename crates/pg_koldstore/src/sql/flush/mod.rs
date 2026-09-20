@@ -31,6 +31,7 @@ pub fn enqueue_flush_job_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> Option<pgrx::Uuid> {
+    crate::security::require_relation_owner_or_superuser(table_name.oid(), "flush this table");
     enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
@@ -56,6 +57,10 @@ pub fn recover_segments_pg(
     table_name: pgrx::PgRelation,
     dry_run: pgrx::default!(bool, false),
 ) -> i64 {
+    crate::security::require_relation_owner_or_superuser(
+        table_name.oid(),
+        "recover segments for this table",
+    );
     recover_segments_pg_impl(table_name.oid(), dry_run)
         .unwrap_or_else(|error| pgrx::error!("recover segments failed: {error}"))
 }
@@ -213,6 +218,7 @@ pub fn flush_table_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> pgrx::JsonB {
+    crate::security::require_relation_owner_or_superuser(table_name.oid(), "flush this table");
     match execute::flush_table_pg_impl(table_name.oid(), force) {
         Ok(response) => {
             if !response.ok {
@@ -274,6 +280,10 @@ pub fn cancel_job_pg(job_id: pgrx::Uuid) -> bool {
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "cancel_table_jobs", schema = "koldstore", security_definer)]
 pub fn cancel_table_jobs_pg(table_name: pgrx::PgRelation) -> i64 {
+    crate::security::require_relation_owner_or_superuser(
+        table_name.oid(),
+        "cancel jobs for this table",
+    );
     jobs::request_cancel_table_jobs(table_name.oid())
         .unwrap_or_else(|error| pgrx::error!("cancel table jobs failed: {error}"))
 }
