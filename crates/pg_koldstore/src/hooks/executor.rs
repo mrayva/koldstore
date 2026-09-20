@@ -89,15 +89,33 @@ mod live {
         }
     }
 
-    /// Phase 1 of the cold-DML write guard for UPDATE/DELETE (see the
-    /// `executor_end` call site and `hooks::pk_predicate`'s module doc
+    /// Phase 1 of the cold-DML write guard for UPDATE/DELETE/MERGE (see
+    /// the `executor_end` call site and `hooks::pk_predicate`'s module doc
     /// comment). Returns the target relation OID and the raw
-    /// `attnum -> value` equalities extracted from its WHERE clause, but
-    /// only when this statement is a plausible guard candidate at all:
-    /// `CMD_UPDATE`/`CMD_DELETE`, a single managed target relation, the
-    /// native statement already affected zero rows (the only case the
-    /// guard exists for), and the write guard is not currently suspended
-    /// for this session (`sql::cold_dml::guard::suspended`).
+    /// `attnum -> value` equalities extracted from its WHERE/ON clause,
+    /// but only when this statement is a plausible guard candidate at
+    /// all: `CMD_UPDATE`/`CMD_DELETE`/`CMD_MERGE`, a single managed target
+    /// relation, the native statement already affected zero rows (the
+    /// only case the guard exists for), and the write guard is not
+    /// currently suspended for this session
+    /// (`sql::cold_dml::guard::suspended`).
+    ///
+    /// `CMD_MERGE` reuses the exact same `extract_raw_attnum_equality`
+    /// extraction as UPDATE/DELETE, not a MERGE-specific path -- confirmed
+    /// live via a temporary plan-tree dump that a single-row `USING (...)`
+    /// source (by far the common "upsert one row" shape, and the one that
+    /// matters most: it is what silently created a duplicate before this
+    /// fix) makes PostgreSQL's own planner collapse the join away entirely
+    /// into a plain parameterized `IndexScan` on the target -- structurally
+    /// identical to plain UPDATE/DELETE's shape, `Var = Const`. A genuine
+    /// multi-row join source instead produces a `NestLoop` over the
+    /// source with the target's `IndexScan` condition as a `PARAM_EXEC`
+    /// (executor-internal, rebound per source row, no single fixed value
+    /// to report at statement end) -- `const_or_param_datum` already only
+    /// resolves `PARAM_EXTERN`, so this shape is safely skipped rather
+    /// than mishandled, falling into the same deferred "bulk/complex
+    /// statement" bucket as multi-row INSERT and compound-predicate
+    /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
     ) -> Option<(pg_sys::Oid, std::collections::HashMap<i16, serde_json::Value>)> {
@@ -110,7 +128,7 @@ mod live {
             }
             if !matches!(
                 (*query_desc).operation,
-                pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
+                pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE | pg_sys::CmdType::CMD_MERGE
             ) {
                 return None;
             }
@@ -185,8 +203,8 @@ mod live {
             let table_name =
                 crate::catalog::resolve::qualified_relation_name(table_oid).unwrap_or_else(|_| "?".to_string());
             pgrx::error!(
-                "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- it affected zero rows, \
-                 but primary key {pk_json} exists in cold storage; use koldstore.update_row()/delete_row() \
+                "koldstore: refusing this UPDATE/DELETE/MERGE on managed table {table_name} -- it affected zero \
+                 rows, but primary key {pk_json} exists in cold storage; use koldstore.update_row()/delete_row() \
                  instead (upstream issue #122)"
             );
         }
