@@ -92,13 +92,16 @@ mod live {
     /// Phase 1 of the cold-DML write guard for UPDATE/DELETE/MERGE (see
     /// the `executor_end` call site and `hooks::pk_predicate`'s module doc
     /// comment). Returns the target relation OID and the raw
-    /// `attnum -> value` equalities extracted from its WHERE/ON clause,
-    /// but only when this statement is a plausible guard candidate at
-    /// all: `CMD_UPDATE`/`CMD_DELETE`/`CMD_MERGE`, a single managed target
-    /// relation, the native statement already affected zero rows (the
-    /// only case the guard exists for), and the write guard is not
-    /// currently suspended for this session
-    /// (`sql::cold_dml::guard::suspended`).
+    /// `attnum -> [value, ...]` equalities extracted from its WHERE/ON
+    /// clause, but only when this statement is a plausible guard
+    /// candidate at all: `CMD_UPDATE`/`CMD_DELETE`/`CMD_MERGE`, a single
+    /// managed target relation, the write guard not currently suspended
+    /// for this session (`sql::cold_dml::guard::suspended`), and -- for a
+    /// plain equality-only predicate, where "zero rows affected" and "the
+    /// one candidate wasn't hot" are the same fact -- the native statement
+    /// already affected zero rows. A predicate with an `IN (...)` column
+    /// is checked regardless of rows affected; see the comment at this
+    /// function's `es_processed` check for why.
     ///
     /// `CMD_MERGE` reuses the exact same `extract_raw_attnum_equality`
     /// extraction as UPDATE/DELETE, not a MERGE-specific path -- confirmed
@@ -118,7 +121,7 @@ mod live {
     /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
-    ) -> Option<(pg_sys::Oid, std::collections::HashMap<i16, serde_json::Value>)> {
+    ) -> Option<(pg_sys::Oid, std::collections::HashMap<i16, Vec<serde_json::Value>>)> {
         unsafe {
             if crate::sql::cold_dml::guard::suspended() {
                 return None;
@@ -141,9 +144,6 @@ mod live {
             // attempted. `es_top_eflags` carries EXEC_FLAG_EXPLAIN_ONLY
             // for exactly this case.
             if (*estate).es_top_eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int) != 0 {
-                return None;
-            }
-            if (*estate).es_processed != 0 {
                 return None;
             }
             let planned = (*query_desc).plannedstmt;
@@ -171,19 +171,55 @@ mod live {
             }
             let raw =
                 crate::hooks::pk_predicate::extract_raw_attnum_equality((*planned).planTree, (*query_desc).params)?;
+            // Every distinct PK candidate this predicate could name is at
+            // most one row (PK columns are unique), so `es_processed`
+            // (the statement's total affected-row count) can never exceed
+            // the candidate count -- and it equals the candidate count
+            // exactly iff the native statement found every single one.
+            // `es_processed < candidate_count` is therefore precisely
+            // "at least one candidate was not found natively" -- for a
+            // plain equality predicate (candidate_count == 1) this is the
+            // same `es_processed == 0` check as before (zero added cost on
+            // the common hot-and-found path); for an `IN (...)` predicate
+            // it correctly also catches a PARTIAL match. Confirmed live,
+            // `DELETE ... WHERE id IN (1,2)` with id=1 hot and id=2
+            // cold-only reported `es_processed = 1` (not 0) and silently
+            // deleted only the hot row, leaving id=2's cold duplicate
+            // untouched with no error -- exactly the silent-wrong-answer
+            // #122 exists to prevent, just hiding behind a nonzero count.
+            //
+            // Checking every candidate whenever *any* mismatch exists
+            // (rather than gating on "no candidate found at all") was
+            // tried first and found unsafe: confirmed live, re-checking a
+            // candidate that the native statement itself had *just*
+            // deleted (as part of this same, not-yet-committed statement)
+            // could still show as "exists" via a stale cold Parquet copy
+            // predating a later `hydrate_pk` -- the async process that
+            // normally suppresses that stale copy after a hot delete
+            // hasn't run yet within the same uncommitted transaction,
+            // producing a false rejection of an otherwise fully correct,
+            // fully-matched IN-list DELETE. Comparing against
+            // candidate_count avoids ever re-checking a candidate the
+            // native statement already handled.
+            let candidate_count: usize = raw.values().map(Vec::len).product();
+            if (*estate).es_processed as usize >= candidate_count {
+                return None;
+            }
             Some((table_oid, raw))
         }
     }
 
     /// Phase 2 of the cold-DML write guard: resolves `raw_predicate`
     /// against the table's actual primary-key columns (a catalog lookup,
-    /// safe now that `standard_ExecutorEnd` has already run) and, only if
-    /// it resolves to a complete PK match that exists hot-or-cold, raises
-    /// the same error `koldstore.update_row`/`delete_row`'s own docs point
-    /// callers at.
+    /// safe now that `standard_ExecutorEnd` has already run) into every
+    /// candidate PK combination (plain equality contributes one; an
+    /// `IN (...)` contributes each element -- see `resolve_pk_predicate`),
+    /// and raises the same error `koldstore.update_row`/`delete_row`'s own
+    /// docs point callers at for the first candidate confirmed to exist
+    /// hot-or-cold.
     unsafe fn enforce_cold_only_update_delete_guard(
         table_oid: pg_sys::Oid,
-        raw_predicate: &std::collections::HashMap<i16, serde_json::Value>,
+        raw_predicate: &std::collections::HashMap<i16, Vec<serde_json::Value>>,
     ) {
         let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
             return;
@@ -191,22 +227,38 @@ mod live {
         let Ok(column_attnums) = crate::sql::cold_dml::guard::column_attnum_map(table_oid) else {
             return;
         };
-        let Some(pk_json) =
+        let Some(candidates) =
             crate::hooks::pk_predicate::resolve_pk_predicate(raw_predicate, &pk_columns, &column_attnums)
         else {
             return;
         };
-        let Ok(exists) = crate::sql::cold_dml::guard::cold_pk_exists(table_oid, &pk_json) else {
-            return;
-        };
-        if exists {
-            let table_name =
-                crate::catalog::resolve::qualified_relation_name(table_oid).unwrap_or_else(|_| "?".to_string());
-            pgrx::error!(
-                "koldstore: refusing this UPDATE/DELETE/MERGE on managed table {table_name} -- it affected zero \
-                 rows, but primary key {pk_json} exists in cold storage; use koldstore.update_row()/delete_row() \
-                 instead (upstream issue #122)"
-            );
+        for pk_json in candidates {
+            let Ok(exists) = crate::sql::cold_dml::guard::cold_pk_exists(table_oid, &pk_json) else {
+                continue;
+            };
+            if exists {
+                // `cold_pk_exists` reports hot-or-cold, not specifically
+                // cold: for a single-candidate predicate this only ever
+                // runs when the native statement already found nothing
+                // (see the es_processed check at the call site), so
+                // "exists" there can only mean cold. For a multi-candidate
+                // `IN (...)` predicate that is not guaranteed -- some
+                // candidates may be genuinely hot and already part of what
+                // the statement affected. Confirmed live: an `IN` list
+                // mixing one hot and one cold key reported the HOT key
+                // here first (HashMap/Vec iteration order is unspecified),
+                // which "exists in cold storage" would have misdescribed.
+                // The wording below is deliberately accurate for both
+                // cases rather than presuming cold.
+                let table_name =
+                    crate::catalog::resolve::qualified_relation_name(table_oid).unwrap_or_else(|_| "?".to_string());
+                pgrx::error!(
+                    "koldstore: refusing this UPDATE/DELETE/MERGE on managed table {table_name} -- primary key \
+                     {pk_json} exists but this statement cannot reliably act on it (it may be cold-only, \
+                     invisible to this statement's own scan); use koldstore.update_row()/delete_row() instead \
+                     (upstream issue #122)"
+                );
+            }
         }
     }
 

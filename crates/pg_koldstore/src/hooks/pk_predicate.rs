@@ -48,7 +48,7 @@ use crate::merge_scan::pg::{literals, qual};
 pub(crate) unsafe fn extract_raw_attnum_equality(
     modify_table_plan: *mut pg_sys::Plan,
     params: pg_sys::ParamListInfo,
-) -> Option<HashMap<i16, serde_json::Value>> {
+) -> Option<HashMap<i16, Vec<serde_json::Value>>> {
     unsafe {
         if modify_table_plan.is_null() {
             return None;
@@ -71,7 +71,7 @@ pub(crate) unsafe fn extract_raw_attnum_equality(
         // reading `indexqualorig` alone made a legitimately-0-row
         // (name mismatch) UPDATE look identical to a cold-only key and
         // wrongly rejected it.
-        let mut matched: HashMap<i16, serde_json::Value> = HashMap::new();
+        let mut matched: HashMap<i16, Vec<serde_json::Value>> = HashMap::new();
         for qual_list in qual_lists {
             if qual_list.is_null() {
                 continue;
@@ -84,17 +84,30 @@ pub(crate) unsafe fn extract_raw_attnum_equality(
     }
 }
 
+/// Above this many candidate PK combinations, [`resolve_pk_predicate`]
+/// gives up rather than expanding the full cross-product -- each candidate
+/// costs one `cold_pk_exists` merge-scan lookup, so an unbounded `IN`
+/// list (or several on different composite-PK columns at once) could
+/// otherwise turn one rejected statement into an unbounded amount of
+/// guard work. Skipping (not rejecting) is always safe -- see the module
+/// doc comment.
+const MAX_CANDIDATE_COMBINATIONS: usize = 64;
+
 /// Phase 2 (SPI-safe, no plan-tree pointers involved): validates that
 /// `raw` -- [`extract_raw_attnum_equality`]'s output -- covers *exactly*
 /// every primary-key column's `attnum` (from `column_attnums`, filtered to
-/// `pk_columns`) and nothing else, and if so builds the `{column: value}`
-/// jsonb object [`super::super::cold_pk_exists`] expects.
+/// `pk_columns`) and nothing else, and if so expands each column's
+/// candidate value list (a plain equality contributes one; an `IN (...)`
+/// contributes each list element) into the full cross-product of
+/// `{column: value}` jsonb objects [`super::super::cold_pk_exists`]
+/// expects -- one candidate PK per combination, e.g. `id IN (1,2,3)`
+/// yields 3 candidates, `tenant_id = 5 AND id IN (1,2)` yields 2.
 #[must_use]
 pub(crate) fn resolve_pk_predicate(
-    raw: &HashMap<i16, serde_json::Value>,
+    raw: &HashMap<i16, Vec<serde_json::Value>>,
     pk_columns: &[String],
     column_attnums: &HashMap<i16, String>,
-) -> Option<serde_json::Value> {
+) -> Option<Vec<serde_json::Value>> {
     if pk_columns.is_empty() {
         return None;
     }
@@ -106,18 +119,36 @@ pub(crate) fn resolve_pk_predicate(
     if pk_attnums.len() != pk_columns.len() || raw.len() != pk_attnums.len() {
         return None;
     }
-    let mut object = serde_json::Map::with_capacity(raw.len());
-    for (attnum, value) in raw {
+
+    // Cross-product of each PK column's candidate list, e.g.
+    // [("id", [1,2,3])] -> [{"id":1}, {"id":2}, {"id":3}].
+    let mut combinations: Vec<serde_json::Map<String, serde_json::Value>> = vec![serde_json::Map::new()];
+    for (attnum, values) in raw {
         let name = pk_attnums.get(attnum)?;
-        object.insert((*name).to_string(), value.clone());
+        if values.is_empty() {
+            return None;
+        }
+        let expanded = combinations.len().checked_mul(values.len())?;
+        if expanded > MAX_CANDIDATE_COMBINATIONS {
+            return None;
+        }
+        let mut next = Vec::with_capacity(expanded);
+        for base in &combinations {
+            for value in values {
+                let mut candidate = base.clone();
+                candidate.insert((*name).to_string(), value.clone());
+                next.push(candidate);
+            }
+        }
+        combinations = next;
     }
-    Some(serde_json::Value::Object(object))
+    Some(combinations.into_iter().map(serde_json::Value::Object).collect())
 }
 
 /// Locates every qual list a simple point-lookup UPDATE/DELETE subplan's
-/// WHERE clause could be split across, for the two physical scan shapes a
-/// PK-equality lookup realistically produces. Anything else
-/// (`BitmapHeapScan`, joins, partition-routed `ModifyTable`, ...) returns
+/// WHERE clause could be split across, for the three physical scan shapes
+/// a PK-equality (or PK `IN (...)`) lookup realistically produces.
+/// Anything else (joins, partition-routed `ModifyTable`, ...) returns
 /// `None` -- deferred scope.
 unsafe fn scan_qual_sources(plan: *mut pg_sys::Plan) -> Option<(pg_sys::Index, Vec<*mut pg_sys::List>)> {
     unsafe {
@@ -137,22 +168,35 @@ unsafe fn scan_qual_sources(plan: *mut pg_sys::Plan) -> Option<(pg_sys::Index, V
                 let scan = plan.cast::<pg_sys::Scan>();
                 Some(((*scan).scanrelid, vec![(*plan).qual]))
             }
+            pg_sys::NodeTag::T_BitmapHeapScan => {
+                // `WHERE pk IN (...)` plans as BitmapHeapScan/BitmapIndexScan
+                // -- confirmed live via EXPLAIN. `bitmapqualorig` mirrors
+                // `indexqualorig`'s role (the original, pre-bitmap-probe
+                // condition); `.scan.plan.qual` is its residual filter, same
+                // reasoning as the IndexScan case above.
+                let bitmap_scan = plan.cast::<pg_sys::BitmapHeapScan>();
+                Some((
+                    (*bitmap_scan).scan.scanrelid,
+                    vec![(*bitmap_scan).bitmapqualorig, (*bitmap_scan).scan.plan.qual],
+                ))
+            }
             _ => None,
         }
     }
 }
 
 /// Walks `qual` (a `List` of ANDed quals) plus any nested `AND`-only
-/// `BoolExpr`, requiring every leaf to be a `Var = <literal>` equality on
-/// this scan's own relation. Returns `false` the moment anything else is
-/// seen (OR, a non-equality operator, a non-literal operand, ...) -- which
-/// column each `Var` is belongs to a PK is validated later, in
-/// [`resolve_pk_predicate`], once a catalog lookup can safely happen.
+/// `BoolExpr`, requiring every leaf to be a `Var = <literal>` equality or
+/// `Var = ANY(<literal array>)` (`IN (...)`) on this scan's own relation.
+/// Returns `false` the moment anything else is seen (OR, a non-equality
+/// operator, a non-literal operand, ...) -- which column each `Var`
+/// belongs to a PK is validated later, in [`resolve_pk_predicate`], once a
+/// catalog lookup can safely happen.
 unsafe fn walk_and_equality(
     qual: *mut pg_sys::List,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, serde_json::Value>,
+    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
 ) -> bool {
     unsafe {
         literals::list_node_pointers(qual)
@@ -165,7 +209,7 @@ unsafe fn walk_and_equality_node(
     expr: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, serde_json::Value>,
+    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
 ) -> bool {
     unsafe {
         if expr.is_null() {
@@ -173,6 +217,7 @@ unsafe fn walk_and_equality_node(
         }
         match (*expr).type_ {
             pg_sys::NodeTag::T_OpExpr => equality_predicate(expr, scanrelid, params, matched),
+            pg_sys::NodeTag::T_ScalarArrayOpExpr => in_list_predicate(expr, scanrelid, params, matched),
             pg_sys::NodeTag::T_BoolExpr => {
                 let bool_expr = expr.cast::<pg_sys::BoolExpr>();
                 if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
@@ -191,7 +236,7 @@ unsafe fn equality_predicate(
     expr: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, serde_json::Value>,
+    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
 ) -> bool {
     unsafe {
         let op_expr = expr.cast::<pg_sys::OpExpr>();
@@ -209,8 +254,41 @@ unsafe fn equality_predicate(
     }
 }
 
+/// `Var = ANY(<array>)` -- `IN (...)`'s planned form. `useOr = false`
+/// (`<> ALL`, i.e. `NOT IN`) is rejected: it does not identify a bounded
+/// candidate set the same way, and is out of scope here. Only a `Var` on
+/// the left (the PostgreSQL-canonical form for `ScalarArrayOpExpr`) is
+/// accepted -- an array on the left never occurs for `x IN (...)`.
+unsafe fn in_list_predicate(
+    expr: *mut pg_sys::Expr,
+    scanrelid: pg_sys::Index,
+    params: pg_sys::ParamListInfo,
+    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
+) -> bool {
+    unsafe {
+        let saop = expr.cast::<pg_sys::ScalarArrayOpExpr>();
+        if !(*saop).useOr || !qual::operator_is_pg_catalog((*saop).opno) || !is_equality_operator((*saop).opno) {
+            return false;
+        }
+        let args = literals::list_node_pointers((*saop).args);
+        if args.len() != 2 {
+            return false;
+        }
+        let Some(attnum) = var_attnum(args[0].cast::<pg_sys::Expr>(), scanrelid) else {
+            return false;
+        };
+        let Some(values) = array_literal_json_values(args[1].cast::<pg_sys::Expr>(), params) else {
+            return false;
+        };
+        if values.is_empty() {
+            return false;
+        }
+        matched.insert(attnum, values).is_none()
+    }
+}
+
 /// If `column_side` is a bare `Var` on `scanrelid` and `value_side` is a
-/// literal-or-bound-param, records `attnum -> value` into `matched` and
+/// literal-or-bound-param, records `attnum -> [value]` into `matched` and
 /// returns `true`. A partial match (a `Var` paired with a non-literal, or
 /// a NULL literal) is treated as a failure, not a skip -- see the module
 /// doc comment on why "no extra/ambiguous conditions" must hold exactly.
@@ -219,7 +297,7 @@ unsafe fn record_if_column_match(
     value_side: *mut pg_sys::Expr,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    matched: &mut HashMap<i16, serde_json::Value>,
+    matched: &mut HashMap<i16, Vec<serde_json::Value>>,
 ) -> bool {
     unsafe {
         let Some(attnum) = var_attnum(column_side, scanrelid) else {
@@ -234,7 +312,7 @@ unsafe fn record_if_column_match(
         let Some(value) = datum_to_json_text(datum, type_oid) else {
             return false;
         };
-        matched.insert(attnum, value).is_none()
+        matched.insert(attnum, vec![value]).is_none()
     }
 }
 
@@ -270,5 +348,57 @@ unsafe fn datum_to_json_text(datum: pg_sys::Datum, type_oid: pg_sys::Oid) -> Opt
         let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
         let text = literals::cstr_owned_pfree(out)?;
         Some(serde_json::Value::String(text))
+    }
+}
+
+/// Resolves `expr` (a `Const` or bound `PARAM_EXTERN`, per
+/// `const_or_param_datum`) to an array-typed datum and decodes every
+/// element to jsonb via the SAME generic output-function conversion
+/// [`datum_to_json_text`] already uses for scalars. Any NULL element
+/// fails the whole array (conservative -- `IN (1, NULL)` is not a clean
+/// "these are the candidate keys" set to check).
+unsafe fn array_literal_json_values(
+    expr: *mut pg_sys::Expr,
+    params: pg_sys::ParamListInfo,
+) -> Option<Vec<serde_json::Value>> {
+    unsafe {
+        let (datum, isnull, array_type_oid) = literals::const_or_param_datum(expr, params)?;
+        if isnull {
+            return None;
+        }
+        let element_type_oid = pg_sys::get_element_type(array_type_oid);
+        if element_type_oid == pg_sys::InvalidOid {
+            return None; // not actually an array type
+        }
+        let mut typlen: i16 = 0;
+        let mut typbyval = false;
+        let mut typalign: std::ffi::c_char = 0;
+        pg_sys::get_typlenbyvalalign(element_type_oid, &mut typlen, &mut typbyval, &mut typalign);
+
+        let array = pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>()).cast::<pg_sys::ArrayType>();
+        let mut elems: *mut pg_sys::Datum = std::ptr::null_mut();
+        let mut nulls: *mut bool = std::ptr::null_mut();
+        let mut nelems: std::ffi::c_int = 0;
+        pg_sys::deconstruct_array(
+            array,
+            element_type_oid,
+            std::ffi::c_int::from(typlen),
+            typbyval,
+            typalign,
+            &mut elems,
+            &mut nulls,
+            &mut nelems,
+        );
+        if nelems <= 0 {
+            return None;
+        }
+        let mut values = Vec::with_capacity(nelems as usize);
+        for index in 0..nelems as usize {
+            if *nulls.add(index) {
+                return None;
+            }
+            values.push(datum_to_json_text(*elems.add(index), element_type_oid)?);
+        }
+        Some(values)
     }
 }
