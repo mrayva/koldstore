@@ -5,6 +5,8 @@
 //! small shared helpers (`job_lock`, `session`, `sort_key`, `ops`).
 
 #[cfg(feature = "pg")]
+pub mod cold_dml;
+#[cfg(feature = "pg")]
 pub mod events;
 pub mod flush;
 #[cfg(feature = "pg")]
