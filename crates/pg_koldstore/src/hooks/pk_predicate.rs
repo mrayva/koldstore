@@ -3,6 +3,14 @@
 //! the cold-DML write guard (`sql::cold_dml::guard`, upstream #122 Option
 //! B).
 //!
+//! Recognizes an `AND`-chain of `Var OP <literal>` leaves (including
+//! `Var IN (...)`), and, as of this pass, an `OR`-chain of equalities (or
+//! `IN`s) on a single column -- `pk = 1 OR pk = 2` is handled as the same
+//! bounded candidate set `pk IN (1, 2)` already was (see
+//! [`or_equality_leaf`]). An `OR` across more than one column, or mixed
+//! with any other operator, is not recognized and falls through to the
+//! same "skip" behavior as any other unrecognized shape.
+//!
 //! Deliberately conservative: any WHERE shape this cannot recognize with
 //! full confidence returns `None`, which means "skip the guard for this
 //! statement" (today's pre-#122-fix behavior), never "treat as unsafe."
@@ -325,14 +333,115 @@ unsafe fn walk_leaf_node(
             pg_sys::NodeTag::T_ScalarArrayOpExpr => in_list_leaf(expr, scanrelid, params, leaves),
             pg_sys::NodeTag::T_BoolExpr => {
                 let bool_expr = expr.cast::<pg_sys::BoolExpr>();
-                if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
-                    return false;
+                match (*bool_expr).boolop {
+                    pg_sys::BoolExprType::AND_EXPR => literals::list_node_pointers((*bool_expr).args)
+                        .into_iter()
+                        .all(|node| walk_leaf_node(node.cast::<pg_sys::Expr>(), scanrelid, params, leaves)),
+                    pg_sys::BoolExprType::OR_EXPR => or_equality_leaf(bool_expr, scanrelid, params, leaves),
+                    _ => false,
                 }
-                literals::list_node_pointers((*bool_expr).args)
-                    .into_iter()
-                    .all(|node| walk_leaf_node(node.cast::<pg_sys::Expr>(), scanrelid, params, leaves))
             }
             _ => false,
+        }
+    }
+}
+
+/// `x = 1 OR x = 2 OR ...` (branches may also individually be `x IN (...)`)
+/// -- only recognized when every branch is a plain equality (or `IN`) on
+/// the SAME column; a different column per branch, a non-equality operator,
+/// a nested `AND`, or any other shape fails the whole extraction, per this
+/// module's conservative "unrecognized shape aborts, never partially
+/// applies" rule (see the module doc comment).
+///
+/// Structurally this is just the existing `Var = ANY(<array>)` (`IN (...)`)
+/// handling spelled out longhand -- an OR-chain of equalities on one column
+/// names exactly the same bounded candidate set -- so it merges into the
+/// same multi-value [`RawLeaf`] representation and, downstream, reuses
+/// [`resolve_predicate`]'s existing candidate-expansion/cap logic
+/// unchanged (`MAX_CANDIDATE_COMBINATIONS` for a PK column,
+/// `MAX_RESIDUAL_IN_VALUES` for a residual one) -- no new bound is needed
+/// here.
+unsafe fn or_equality_leaf(
+    bool_expr: *mut pg_sys::BoolExpr,
+    scanrelid: pg_sys::Index,
+    params: pg_sys::ParamListInfo,
+    leaves: &mut Vec<RawLeaf>,
+) -> bool {
+    unsafe {
+        let args = literals::list_node_pointers((*bool_expr).args);
+        if args.len() < 2 {
+            return false;
+        }
+        let mut attnum: Option<i16> = None;
+        let mut values: Vec<serde_json::Value> = Vec::new();
+        for node in args {
+            let Some(leaf) = single_equality_leaf(node.cast::<pg_sys::Expr>(), scanrelid, params) else {
+                return false;
+            };
+            match attnum {
+                None => attnum = Some(leaf.attnum),
+                Some(existing) if existing == leaf.attnum => {}
+                Some(_) => return false, // OR across different columns -- deferred scope
+            }
+            values.extend(leaf.values);
+        }
+        let Some(attnum) = attnum else { return false };
+        leaves.push(RawLeaf { attnum, operator: ComparisonOp::Eq, values });
+        true
+    }
+}
+
+/// Parses exactly one OR-branch as a self-contained equality leaf: either
+/// `Var = <literal>` (either operand order) or `Var IN (...)`. Never pushes
+/// to a shared `leaves` list (unlike [`comparison_leaf`]/[`in_list_leaf`])
+/// since [`or_equality_leaf`] must see each branch's own attnum before
+/// deciding whether the whole OR-chain is on a single column.
+unsafe fn single_equality_leaf(
+    expr: *mut pg_sys::Expr,
+    scanrelid: pg_sys::Index,
+    params: pg_sys::ParamListInfo,
+) -> Option<RawLeaf> {
+    unsafe {
+        if expr.is_null() {
+            return None;
+        }
+        match (*expr).type_ {
+            pg_sys::NodeTag::T_OpExpr => {
+                let op_expr = expr.cast::<pg_sys::OpExpr>();
+                if !qual::operator_is_pg_catalog((*op_expr).opno) {
+                    return None;
+                }
+                if comparison_operator((*op_expr).opno) != Some(ComparisonOp::Eq) {
+                    return None;
+                }
+                let args = literals::list_node_pointers((*op_expr).args);
+                if args.len() != 2 {
+                    return None;
+                }
+                let (left, right) = (args[0].cast::<pg_sys::Expr>(), args[1].cast::<pg_sys::Expr>());
+                record_leaf(left, right, ComparisonOp::Eq, scanrelid, params)
+                    .or_else(|| record_leaf(right, left, ComparisonOp::Eq, scanrelid, params))
+            }
+            pg_sys::NodeTag::T_ScalarArrayOpExpr => {
+                let saop = expr.cast::<pg_sys::ScalarArrayOpExpr>();
+                if !(*saop).useOr || !qual::operator_is_pg_catalog((*saop).opno) {
+                    return None;
+                }
+                if comparison_operator((*saop).opno) != Some(ComparisonOp::Eq) {
+                    return None;
+                }
+                let args = literals::list_node_pointers((*saop).args);
+                if args.len() != 2 {
+                    return None;
+                }
+                let attnum = var_attnum(args[0].cast::<pg_sys::Expr>(), scanrelid)?;
+                let values = array_literal_json_values(args[1].cast::<pg_sys::Expr>(), params)?;
+                if values.is_empty() {
+                    return None;
+                }
+                Some(RawLeaf { attnum, operator: ComparisonOp::Eq, values })
+            }
+            _ => None,
         }
     }
 }
@@ -357,8 +466,15 @@ unsafe fn comparison_leaf(
         }
         let (left, right) = (args[0].cast::<pg_sys::Expr>(), args[1].cast::<pg_sys::Expr>());
 
-        record_leaf(left, right, operator, scanrelid, params, leaves)
-            || record_leaf(right, left, operator.flip(), scanrelid, params, leaves)
+        if let Some(leaf) = record_leaf(left, right, operator, scanrelid, params) {
+            leaves.push(leaf);
+            return true;
+        }
+        if let Some(leaf) = record_leaf(right, left, operator.flip(), scanrelid, params) {
+            leaves.push(leaf);
+            return true;
+        }
+        false
     }
 }
 
@@ -400,34 +516,26 @@ unsafe fn in_list_leaf(
 }
 
 /// If `column_side` is a bare `Var` on `scanrelid` and `value_side` is a
-/// literal-or-bound-param, records the leaf and returns `true`. A partial
-/// match (a `Var` paired with a non-literal, or a NULL literal) is treated
-/// as a failure, not a skip -- see the module doc comment on why an
-/// unrecognized shape must abort the whole extraction rather than being
-/// silently dropped.
+/// literal-or-bound-param, returns the leaf. A partial match (a `Var`
+/// paired with a non-literal, or a NULL literal) returns `None`, treated
+/// as a failure, not a skip, by every caller -- see the module doc comment
+/// on why an unrecognized shape must abort the whole extraction rather
+/// than being silently dropped.
 unsafe fn record_leaf(
     column_side: *mut pg_sys::Expr,
     value_side: *mut pg_sys::Expr,
     operator: ComparisonOp,
     scanrelid: pg_sys::Index,
     params: pg_sys::ParamListInfo,
-    leaves: &mut Vec<RawLeaf>,
-) -> bool {
+) -> Option<RawLeaf> {
     unsafe {
-        let Some(attnum) = var_attnum(column_side, scanrelid) else {
-            return false;
-        };
-        let Some((datum, isnull, type_oid)) = literals::const_or_param_datum(value_side, params) else {
-            return false;
-        };
+        let attnum = var_attnum(column_side, scanrelid)?;
+        let (datum, isnull, type_oid) = literals::const_or_param_datum(value_side, params)?;
         if isnull {
-            return false;
+            return None;
         }
-        let Some(value) = datum_to_json_text(datum, type_oid) else {
-            return false;
-        };
-        leaves.push(RawLeaf { attnum, operator, values: vec![value] });
-        true
+        let value = datum_to_json_text(datum, type_oid)?;
+        Some(RawLeaf { attnum, operator, values: vec![value] })
     }
 }
 
