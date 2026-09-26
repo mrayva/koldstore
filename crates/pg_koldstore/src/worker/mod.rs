@@ -15,6 +15,8 @@ mod maintenance;
 #[cfg(feature = "pg")]
 mod proc_latch;
 #[cfg(feature = "pg")]
+pub(crate) mod spock_reconciler;
+#[cfg(feature = "pg")]
 mod supervisor;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;

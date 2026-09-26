@@ -88,10 +88,21 @@ Reads those two logs and replays what was lost, through the cold-row-aware
   the change do not receive it again. Verified: the other nodes' mirrors did not move.
 - **Requires** `koldstore.capture_replicated_changes = on` (checked), so the mirror
   records the replay's tombstones and new versions; executable by superusers only.
-- Run it on a schedule on each node (pg_cron, or `\watch` from a session); it takes an
-  advisory lock, so overlapping runs are harmless.
+- **Background worker.** Instead of scheduling it yourself, let koldstore run it. Set
+  (restart required):
 
-Tested on the mesh: updates and deletes of rows cold on node 2, originating on node 1
+      koldstore.capture_replicated_changes = on
+      koldstore.spock_reconcile_interval_seconds = 15      # 0 (default) = off
+      koldstore.spock_reconcile_databases = 'spockdb'      # comma-separated
+
+  One persistent worker per listed database wakes on that interval (first run 5 s after
+  startup), calls the function in its own transaction, and logs a line only when it did
+  something. A failed run (extension or Spock not installed yet) is logged and retried
+  on the next tick. Manual calls remain fine: the function takes an advisory lock, so
+  overlapping runs are harmless.
+
+Tested on the mesh (manually, then with the background worker at a 5 s interval: a divergence
+existed 3 s after the writes and had healed by 15 s with no manual call): updates and deletes of rows cold on node 2, originating on node 1
 and on node 3, a discarded mixed transaction (update + insert + delete), and an
 idempotent rerun. All nodes converged and the mirrors on the originating nodes were
 untouched. Spock-free coverage is in `tests/sql/spock_reconcile_helpers.sql`.

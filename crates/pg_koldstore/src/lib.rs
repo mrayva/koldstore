@@ -119,4 +119,5 @@ pub extern "C" fn _PG_init() {
     row_counter_cache::register_xact_callbacks();
     sql::flush::spi::register_flush_origin_xact_callback();
     worker::register_supervisor_if_shared_preload();
+    worker::spock_reconciler::register_if_shared_preload();
 }

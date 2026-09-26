@@ -34,6 +34,10 @@ static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static CAPTURE_REPLICATED_CHANGES: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
+#[cfg(feature = "pg")]
+static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+#[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
 static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -180,6 +184,24 @@ pub fn define_gucs() {
         c"Mirrors changes applied by logical replication (Spock, native subscriptions).",
         c"By default the async mirror ignores every change that carries a replication origin, which includes everything a Spock apply worker or a subscription writes. Turn on for a node that receives replicated writes: flush prunes are then stamped with a named origin (koldstore_flush_<dboid>) and skipped by name instead. Changing it needs a restart, and the async mirror must be fully caught up (koldstore.wait_for_async_mirror()) first, otherwise prune deletes still in the slot are mirrored as tombstones.",
         &CAPTURE_REPLICATED_CHANGES,
+        GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.spock_reconcile_interval_seconds",
+        c"Seconds between background runs of koldstore.reconcile_spock_conflicts(); 0 disables.",
+        c"When positive, a background worker per database named in koldstore.spock_reconcile_databases calls koldstore.reconcile_spock_conflicts() on this interval. Needs koldstore.capture_replicated_changes = on. Changing it requires a restart.",
+        &SPOCK_RECONCILE_INTERVAL,
+        0,
+        86_400,
+        GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_string_guc(
+        c"koldstore.spock_reconcile_databases",
+        c"Comma-separated databases that get a Spock-conflict reconciler worker.",
+        c"One background worker is started per listed database (typically the Spock database). Changing it requires a restart.",
+        &SPOCK_RECONCILE_DATABASES,
         GucContext::Postmaster,
         flags,
     );
@@ -415,6 +437,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: SPOCK_RECONCILE_INTERVAL_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
+            name: SPOCK_RECONCILE_DATABASES_GUC,
+            internal: false,
+            default_value: "",
+        },
+        GucDefinition {
             name: MAX_HYDRATE_ROWS_GUC,
             internal: false,
             default_value: "10000",
@@ -544,6 +576,8 @@ pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_r
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
 pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
 pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
+pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
+pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
@@ -614,6 +648,42 @@ pub fn capture_replicated_changes() -> bool {
     #[cfg(not(feature = "pg"))]
     {
         false
+    }
+}
+
+/// Seconds between background Spock-conflict reconciliations (0 = off).
+#[must_use]
+pub fn spock_reconcile_interval_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        SPOCK_RECONCILE_INTERVAL.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        0
+    }
+}
+
+/// Databases that get a Spock-conflict reconciler worker.
+#[must_use]
+pub fn spock_reconcile_databases() -> Vec<String> {
+    #[cfg(feature = "pg")]
+    {
+        SPOCK_RECONCILE_DATABASES
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        Vec::new()
     }
 }
 
