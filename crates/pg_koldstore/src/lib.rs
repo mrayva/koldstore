@@ -79,6 +79,13 @@ pgrx::extension_sql_file!(
     requires = ["koldstore_catalog"]
 );
 
+#[cfg(feature = "pg")]
+pgrx::extension_sql_file!(
+    "../sql/koldstore-spock-reconcile.sql",
+    name = "koldstore_spock_reconcile",
+    requires = ["koldstore_catalog"]
+);
+
 /// Returns the extension version.
 #[must_use]
 #[cfg_attr(feature = "pg", pgrx::pg_extern(name = "koldstore_version"))]

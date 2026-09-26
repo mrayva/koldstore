@@ -59,20 +59,56 @@ update to a missing row is likewise not applied) and node 2 keeps the old row:
 Spock's apply does not go through the executor, so no koldstore hook runs on the
 peer, and a trigger cannot fire for a row that is not in the heap.
 
-Options, none implemented:
+Spock records the two cases differently, which matters for the fix:
 
-1. **Age-based flush with a shared, generous margin on every node**, so a row is only
-   cold when it is old enough that nobody modifies it in place. Changes to cold rows
-   then go through hydrate-on-write on the originating node (Finding 2), which
-   replicates correctly. This narrows the window but does not close it (clock skew,
-   replication lag).
-2. **A reconciler** driven by `spock.resolutions` (`save_resolutions = on` is already
-   set): for each `delete_missing` / `update_missing` on a managed table, apply the
-   change to the peer's cold row with `delete_row()` / `update_row()` (the conflict
-   log carries the remote tuple). Eventually consistent, and it needs an ordering
-   story.
-3. **A Spock-side hook** on the missing-row conflict paths that lets an extension
-   hydrate before the operation is retried. Cleanest, but a Spock change.
+- **`DELETE`** of a missing row: a `delete_missing` row in `spock.resolutions` (the key),
+  and the change is skipped.
+- **`UPDATE`** of a missing row is an *error* inside the apply worker. With
+  `spock.exception_behaviour = transdiscard` (the mesh default) Spock discards the
+  **entire remote transaction**, not just that statement, and logs every operation of it
+  (with the full new tuple, in `command_counter` order) in `spock.exception_log`.
+  Verified: an unrelated `INSERT` in the same transaction was lost on the peer too.
+
+## The reconciler (implemented): `koldstore.reconcile_spock_conflicts()`
+
+Reads those two logs and replays what was lost, through the cold-row-aware
+`update_row()` / `delete_row()` for managed tables and plain SQL for other tables:
+
+    SELECT koldstore.reconcile_spock_conflicts();   -- {"transactions": 2, "deletes": 1, ...}
+
+- **Whole transactions are replayed**, in order, atomically per transaction (a
+  sub-transaction each), so a discarded mixed transaction is restored completely.
+- **Once only.** Each handled item is recorded in `koldstore.spock_reconciled`
+  (`txn:<origin>:<xid>` or `res:<node>:<id>`, status `replayed` / `skipped` /
+  `failed`). Delete a row there to retry. A transaction that fails (for example an
+  `INSERT` of a key that already exists cold, rejected by the insert guard) is marked
+  `failed` with the error and left for an operator.
+- **Not forwarded.** The replay runs under its own replication origin
+  (`koldstore_reconcile`), which Spock does not forward, so nodes that already applied
+  the change do not receive it again. Verified: the other nodes' mirrors did not move.
+- **Requires** `koldstore.capture_replicated_changes = on` (checked), so the mirror
+  records the replay's tombstones and new versions; executable by superusers only.
+- Run it on a schedule on each node (pg_cron, or `\watch` from a session); it takes an
+  advisory lock, so overlapping runs are harmless.
+
+Tested on the mesh: updates and deletes of rows cold on node 2, originating on node 1
+and on node 3, a discarded mixed transaction (update + insert + delete), and an
+idempotent rerun. All nodes converged and the mirrors on the originating nodes were
+untouched. Spock-free coverage is in `tests/sql/spock_reconcile_helpers.sql`.
+
+Limits (deliberate for now):
+
+- **Eventual, not immediate:** the peer diverges until the reconciler runs.
+- **No timestamp arbitration.** If the peer changed the same cold key locally between
+  the conflict and the reconcile, the replayed change overwrites it (last reconcile
+  wins). Spock's own `last_update_wins` does not apply because the row was not in the
+  heap when the conflict happened.
+- **Only the missing-row cases** are handled; other conflict types are Spock's.
+- **A Spock-side hook** on the missing-row paths (letting an extension hydrate and retry
+  inside the apply worker) would remove the delay and the ordering gap. That remains the
+  cleaner long-term design and needs a change in Spock.
+- **Age-based flush with a shared margin** on every node still helps: fewer rows are cold
+  on one node and hot on another.
 
 ## Not covered
 

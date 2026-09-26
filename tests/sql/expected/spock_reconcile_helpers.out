@@ -1,0 +1,114 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 15
+ managed
+---------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+CREATE TABLE
+INSERT 0 2
+     tuple_object
+-----------------------
+ {"id": 7, "val": "x"}
+(1 row)
+
+ null_tuple
+------------
+ t
+(1 row)
+
+ pk_object
+-----------
+ {"id": 3}
+(1 row)
+
+ replay_update_cold
+--------------------
+ ok: 1
+(1 row)
+
+ replay_delete_cold
+--------------------
+ ok: 1
+(1 row)
+
+ replay_insert_new
+-------------------
+ ok: 1
+(1 row)
+
+                                                                                                               replay_insert_existing_cold_key
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing INSERT on managed table "sqlreg"."sr1" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+(1 row)
+
+ replay_update_missing_key
+---------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ id  |   val    | n
+-----+----------+----
+   2 | replayed | 22
+   4 | v4       |  4
+ 100 | new      |  1
+(3 rows)
+
+ total_rows
+------------
+         15
+(1 row)
+
+ plain_update
+--------------
+ applied
+(1 row)
+
+ plain_delete
+--------------
+ applied
+(1 row)
+
+ plain_insert
+--------------
+ applied
+(1 row)
+
+ plain_insert_again
+--------------------
+ skipped
+(1 row)
+
+ id |  val   | n
+----+--------+----
+  1 | p1-new | 11
+  3 | p3     |  3
+(2 rows)
+
+                               reconcile_without_spock
+-------------------------------------------------------------------------------------
+ ERROR: koldstore.reconcile_spock_conflicts: Spock is not installed in this database
+(1 row)
+
+ public_can_reconcile
+----------------------
+ f
+(1 row)
+
