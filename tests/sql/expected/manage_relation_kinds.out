@@ -1,0 +1,120 @@
+CREATE FUNCTION
+CREATE TABLE
+ plain_table
+-------------
+ managed
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+                                                                                           partitioned_parent
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_part: it is a partitioned table; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+                                                                                          partition_child
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_part_1: it is a partition; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+                                                                                               inheritance_parent
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_inh_parent: it has inheritance children; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+                                                                                                 inheritance_child
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_inh_child: it inherits from another table; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+                                                                                            temporary_table
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage pg_temp.k_temp: it is a temporary table; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+                                                                                              unlogged_table
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_unlogged: it is an unlogged table; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE FOREIGN DATA WRAPPER
+CREATE SERVER
+CREATE FOREIGN TABLE
+                                                                                             foreign_table
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_foreign: it is a foreign table; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE VIEW
+                                                                                         plain_view
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_view: it is a view; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+SELECT 0
+                                                                                             materialized_view
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_matview: it is a materialized view; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE SEQUENCE
+                                                                                           sequence
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_seq: it is a sequence; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+                                                                                           index_relation
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_plain_pkey: it is an index; only ordinary, permanent tables outside any partition or inheritance hierarchy are supported (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+                          no_primary_key
+-------------------------------------------------------------------
+ ERROR: migrate table failed: managed tables require a primary key
+(1 row)
+
+CREATE TABLE
+ unrelated_table
+-----------------
+ managed
+(1 row)
+
+CREATE FUNCTION
+                                                                                             create_child_of_managed
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: CREATE TABLE ... INHERITS / PARTITION OF is not allowed: sqlreg.k_other is a managed table, and managed tables must stay outside any partition or inheritance hierarchy (upstream issue #125)
+(1 row)
+
+                                                                                           create_partition_of_managed
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: CREATE TABLE ... INHERITS / PARTITION OF is not allowed: sqlreg.k_other is a managed table, and managed tables must stay outside any partition or inheritance hierarchy (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+                                                                                      inherit_from_managed
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: ALTER TABLE ... INHERIT is not allowed: sqlreg.k_other is a managed table, and managed tables must stay outside any partition or inheritance hierarchy (upstream issue #125)
+(1 row)
+
+                                                                                  managed_inherits_from_other
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: ALTER TABLE ... INHERIT is not allowed: sqlreg.k_plain is a managed table, and managed tables must stay outside any partition or inheritance hierarchy (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+                                                                                       attach_managed_as_partition
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: ALTER TABLE ... ATTACH PARTITION is not allowed: sqlreg.k_other is a managed table, and managed tables must stay outside any partition or inheritance hierarchy (upstream issue #125)
+(1 row)
+
+CREATE TABLE
+ inherit_unmanaged
+-------------------
+ ok
+(1 row)
+

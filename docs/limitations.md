@@ -37,21 +37,53 @@ PostgreSQL operation keeps its normal semantics across both tiers.
 - `wait_for_async_mirror()` fences commits up to a captured WAL boundary. Call
   it before acquiring a fixed `REPEATABLE READ` or `SERIALIZABLE` snapshot; it
   cannot advance an existing snapshot or decode the caller's uncommitted work.
-- Normal `UPDATE` and `DELETE` cannot target a row that exists only in cold
-  storage. Native `INSERT ... ON CONFLICT` and primary-key checks inspect the
-  hot index, not a global hot+cold constraint index
-  ([#122](https://github.com/kalamdb/koldstore/issues/122)).
+- A plain `UPDATE`, `DELETE` or `MERGE` only sees the hot heap, so it can never
+  change a row that exists only in cold storage
+  ([#122](https://github.com/kalamdb/koldstore/issues/122)). Instead of silently
+  skipping such rows, KoldStore rejects the statement:
+  - `INSERT` (including `INSERT ... SELECT`, `COPY` and the insert branch of a
+    `MERGE`) of a primary key that already exists hot or cold is rejected by a
+    per-table `BEFORE INSERT` trigger. Native `ON CONFLICT` inspects only the hot
+    index, so hydrate the key first with `koldstore.hydrate_pk()`.
+  - `UPDATE`/`DELETE`/`MERGE` on a primary key (equality, `IN`, an `OR` chain on
+    one column, combined with further conditions) that exists but was not reached
+    is rejected, naming the key.
+  - For every other `WHERE` shape (`id > 5`, `NOT IN`, `OR` across columns, a
+    non-key column, a function, no `WHERE` at all) the statement is rejected if
+    the clause also matches any cold-only row; the check counts cold matches
+    with a second read of cold storage, so it costs a cold scan for such
+    statements on a table that has cold data (`koldstore.guard_scan_writes`,
+    default on, turns it off). It is skipped, not rejected, when it cannot be
+    trusted: the clause cannot be reproduced (joins, `USING`, subqueries,
+    volatile functions), or the transaction already wrote the table.
+  - A `MERGE` that updates or deletes target rows through a multi-row join is
+    rejected when the table has cold data, because the join only matches hot
+    rows and the source keys are gone once it ends. `INSERT`-only and
+    `DO NOTHING` merges, and single-row merges by primary key, are unaffected.
+
+  Change a cold row with `koldstore.update_row()` / `delete_row()`, which act on
+  one primary key at a time.
 - Cold rows have no heap `ctid`, `xmin`, tuple lock, or SSI predicate lock.
   When cold data can contribute, `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY
   SHARE`, `TABLESAMPLE` and system-column projections (`ctid`, `xmin`, ...) are
   refused with an error naming the table and the construct; a managed table with
   no cold data keeps the ordinary PostgreSQL behavior. `TRUNCATE` (including
   `CASCADE`) is refused before anything is changed. `SERIALIZABLE` runs, but it
-  is not a PostgreSQL-equivalent guarantee for cold reads.
-- Partitioned/inherited/foreign/temporary/unlogged relations are outside the
-  supported preview contract unless a specific test documents otherwise
-  ([#125](https://github.com/kalamdb/koldstore/issues/125)); the regression case
-  `tests/sql/unsupported_constructs.sql` pins the constructs above.
+  is not a PostgreSQL-equivalent guarantee for cold reads;
+  `koldstore.reject_serializable_cold_reads = on` makes such reads fail instead.
+- Only ordinary, permanent tables that take no part in a partition or
+  inheritance hierarchy can be managed: `manage_table` refuses partitioned
+  tables, partitions, inheritance parents and children, foreign, temporary and
+  unlogged tables, views, materialized views and sequences, and later `INHERIT`,
+  `ATTACH PARTITION`, `INHERITS (managed)` or `PARTITION OF managed` on a managed
+  table is refused
+  ([#125](https://github.com/kalamdb/koldstore/issues/125)).
+- Schema, table and column names may contain ASCII letters, digits and
+  underscores and must not start with a digit. Mixed case and reserved words are
+  fine (`"MixedCase"`, `"select"`). Names with spaces, quotes, non-ASCII letters
+  or a leading digit are refused by `manage_table` up front; they used to be
+  accepted and then fail every flush.
+
 - Table/schema renames after cold publication are unsafe because object paths
   still depend on mutable names. Other schema evolution can apply in PostgreSQL
   before KoldStore discovers it is unsupported; defaults and constraints are
@@ -61,6 +93,30 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   cold-only rows. Only a planned query such as `COPY (SELECT ...) TO` can enter
   `KoldMergeScan`, and coordinated backup/PITR is not shipped
   ([#126](https://github.com/kalamdb/koldstore/issues/126)).
+
+### Compatibility matrix
+
+Each row is pinned by a case in `tests/sql/`; "refused" means an error before
+any row or object is changed.
+
+| Construct | Behavior | Case |
+|-----------|----------|------|
+| `SELECT` hot + cold, `ORDER BY` (incl. composite primary key) | supported | `merge_order_composite_pk`, `query_semantics` |
+| Read of a table written in the same transaction | refused when cold data is consulted | `txn_local_visibility` |
+| `SELECT ... FOR UPDATE / SHARE` | refused when cold data can contribute | `unsupported_constructs` |
+| `TABLESAMPLE` | refused when cold data can contribute | `unsupported_constructs` |
+| `ctid` / system columns | refused when cold data can contribute | `unsupported_constructs` |
+| `SERIALIZABLE` cold reads | run (weaker guarantee); refused with `koldstore.reject_serializable_cold_reads` | `unsupported_constructs` |
+| `TRUNCATE`, `TRUNCATE ... CASCADE` | refused | `unsupported_constructs` |
+| `INSERT` of an existing hot or cold key | refused | `cold_dml_guard` |
+| `UPDATE`/`DELETE` by primary key reaching a cold-only row | refused | `cold_dml_guard` |
+| `UPDATE`/`DELETE` by range, `NOT IN`, `OR`, non-key column, function, no `WHERE` | refused if it also matches cold-only rows | `cold_dml_scan_guard` |
+| `UPDATE`/`DELETE` with a join, `USING` or subquery | **not guarded** (only hot rows change) | `cold_dml_scan_guard` |
+| `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
+| Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
+| Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
+| Names with spaces, quotes, non-ASCII, leading digit | refused by `manage_table` | `odd_identifiers` |
+| `DROP TABLE` / `DROP SCHEMA` of managed tables | supported; helper objects removed | `drop_cleanup_objects` |
 
 The generated user-scope policy is application-context filtering, not an
 authentication boundary. `koldstore.user_id` is a user-settable GUC, and the

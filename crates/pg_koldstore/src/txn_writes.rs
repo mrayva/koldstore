@@ -104,6 +104,7 @@ pub(crate) fn with_check_suppressed<T>(f: impl FnOnce() -> T) -> T {
 /// check is disabled by the GUC, suppressed for internal work, or the write
 /// guard is suspended (the `hydrate_pk` / `update_row` / `delete_row` helpers).
 pub(crate) fn enforce_before_cold_read(relid: pg_sys::Oid) {
+    enforce_serializable_policy(relid);
     if crate::guc::allow_same_txn_cold_reads()
         || SUPPRESSED.with(Cell::get) > 0
         || crate::sql::cold_dml::guard::suspended()
@@ -140,5 +141,29 @@ pub(crate) fn relation_display_name(relid: pg_sys::Oid) -> String {
         }
         let schema_name = std::ffi::CStr::from_ptr(schema).to_string_lossy().into_owned();
         format!("{schema_name}.{rel_name}")
+    }
+}
+
+/// `koldstore.reject_serializable_cold_reads`: cold rows take no SSI predicate
+/// locks, so a SERIALIZABLE transaction reading them does not get the usual
+/// guarantee for those rows; when the policy is on, refuse instead of running.
+fn enforce_serializable_policy(relid: pg_sys::Oid) {
+    if !crate::guc::reject_serializable_cold_reads() || SUPPRESSED.with(Cell::get) > 0 {
+        return;
+    }
+    // SAFETY: plain backend-local read of the session's isolation level.
+    let serializable = unsafe { pg_sys::XactIsoLevel } == pg_sys::XACT_SERIALIZABLE as i32;
+    if serializable {
+        let name = relation_display_name(relid);
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "koldstore: refusing to read cold data of managed table {name} under SERIALIZABLE isolation \
+                 -- cold rows take no predicate locks, so serializability is not guaranteed for them \
+                 (koldstore.reject_serializable_cold_reads is on; upstream issue #125). Use REPEATABLE READ, \
+                 or turn the setting off to accept the weaker guarantee"
+            )
+        );
     }
 }

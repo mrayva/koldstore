@@ -28,6 +28,10 @@ static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static ALLOW_SAME_TXN_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
+static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -146,6 +150,22 @@ pub fn define_gucs() {
         c"Allows reading cold data of a managed table already modified in this transaction.",
         c"By default a managed-table read that must consult cold storage fails once the same transaction has modified that table: logical decoding cannot see uncommitted work, so a cold row for a key changed in this transaction could be returned stale (upstream #121). Turn on to accept that risk.",
         &ALLOW_SAME_TXN_COLD_READS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.guard_scan_writes",
+        c"Rejects UPDATE/DELETE whose WHERE clause also matches cold-only rows.",
+        c"A plain UPDATE/DELETE only sees the hot heap. When on (default), after such a statement on a managed table with cold data KoldStore counts how many cold rows its WHERE clause matches and rejects the statement if any were left untouched (upstream #122). This reads cold storage for every non-primary-key UPDATE/DELETE on such a table; turn off to skip the check and accept silently partial writes.",
+        &GUARD_SCAN_WRITES,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.reject_serializable_cold_reads",
+        c"Rejects cold reads under SERIALIZABLE isolation.",
+        c"Cold rows live in Parquet segments and take no SSI predicate locks, so a SERIALIZABLE transaction that reads them does not get PostgreSQL's serializability guarantee for those rows. Turn on to fail such reads instead of running them.",
+        &REJECT_SERIALIZABLE_COLD_READS,
         GucContext::Userset,
         flags,
     );
@@ -348,6 +368,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: GUARD_SCAN_WRITES_GUC,
+            internal: false,
+            default_value: "on",
+        },
+        GucDefinition {
+            name: REJECT_SERIALIZABLE_COLD_READS_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
             name: settings::COLD_READS_GUC,
             internal: false,
             default_value: settings::DEFAULT_COLD_READS,
@@ -464,6 +494,8 @@ pub const fn definitions() -> &'static [GucDefinition] {
 pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_reads";
+pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
+pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
 pub const INTERNAL_ASYNC_MIRROR_WORKER_GUC: &str = "koldstore.internal_async_mirror_worker";
@@ -505,6 +537,35 @@ fn read_user_id_config_option() -> Option<String> {
     };
     let trimmed = setting.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether cold reads are refused under SERIALIZABLE isolation.
+#[must_use]
+pub fn reject_serializable_cold_reads() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        REJECT_SERIALIZABLE_COLD_READS.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
+}
+
+/// Whether UPDATE/DELETE statements are checked for cold-only matches of their
+/// WHERE clause (upstream #122).
+#[must_use]
+pub fn guard_scan_writes() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        GUARD_SCAN_WRITES.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
+    }
 }
 
 /// Whether a read may consult cold data of a managed table this transaction

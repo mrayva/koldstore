@@ -103,3 +103,23 @@ BEGIN
   END LOOP;
 END
 $koldstore_detach$;
+
+-- Releases before this one left a table's guard functions (insert guard and
+-- mirror primary-key guard) behind when the table or its schema was dropped
+-- (only unmanage_table removed them). Sweep the ones no trigger uses.
+DO $koldstore_sweep$
+DECLARE
+  orphan regprocedure;
+BEGIN
+  FOR orphan IN
+    SELECT p.oid::regprocedure
+    FROM pg_catalog.pg_proc p
+    WHERE p.pronamespace = 'koldstore'::regnamespace
+      AND (p.proname LIKE '%\_\_cold\_ins\_guard' OR p.proname LIKE '%\_\_cl\_pk\_guard')
+      AND p.prorettype = 'pg_catalog.trigger'::regtype
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgfoid = p.oid)
+  LOOP
+    EXECUTE format('DROP FUNCTION %s', orphan);
+  END LOOP;
+END
+$koldstore_sweep$;

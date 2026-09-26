@@ -70,6 +70,30 @@ BEGIN
 (1 row)
 
 COMMIT
+SET
+BEGIN
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.u1 under SERIALIZABLE isolation -- cold rows take no predicate locks, so serializability is not guaranteed for them (koldstore.reject_serializable_cold_reads is on; upstream issue #125). Use REPEATABLE READ, or turn the setting off to accept the weaker guarantee
+ROLLBACK
+BEGIN
+ serializable_policy_on_hot_only
+---------------------------------
+                               5
+(1 row)
+
+ serializable_policy_on_exact_hot_key
+--------------------------------------
+                                    1
+(1 row)
+
+COMMIT
+BEGIN
+ repeatable_read_policy_on
+---------------------------
+                         7
+(1 row)
+
+COMMIT
+RESET
 CREATE TABLE
 psql:<PATH>: ERROR:  TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency
 psql:<PATH>: ERROR:  TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency

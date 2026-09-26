@@ -38,6 +38,23 @@ mod live {
 
     use pgrx::pg_sys;
 
+    /// What phase 1 of the cold-DML write guard hands to phase 2.
+    struct GuardCandidate {
+        table_oid: pg_sys::Oid,
+        /// The WHERE clause as `Var OP literal` leaves, when it has that shape.
+        raw: Option<Vec<crate::hooks::pk_predicate::RawLeaf>>,
+        /// The WHERE clause as SQL over the table aliased `t`, when it can be
+        /// reproduced standalone (see `hooks::where_deparse`).
+        where_sql: Option<String>,
+        /// Every leaf names exactly one value.
+        single_valued: bool,
+        es_processed: u64,
+        /// The transaction had already written this table before the statement.
+        prior_write: bool,
+        /// A MERGE with an action that changes existing target rows.
+        merge_changes_rows: bool,
+    }
+
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     static mut PREVIOUS: pg_sys::ExecutorEnd_hook_type = None;
 
@@ -96,8 +113,8 @@ mod live {
             }
             crate::memory::release_process_heap_if_pending();
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.
-            if let Some((table_oid, raw_predicate, es_processed)) = cold_guard_candidate {
-                enforce_cold_only_update_delete_guard(table_oid, &raw_predicate, es_processed);
+            if let Some(candidate) = cold_guard_candidate {
+                enforce_cold_only_update_delete_guard(&candidate);
             }
         }
     }
@@ -134,7 +151,7 @@ mod live {
     /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
-    ) -> Option<(pg_sys::Oid, Vec<crate::hooks::pk_predicate::RawLeaf>, u64)> {
+    ) -> Option<GuardCandidate> {
         unsafe {
             if crate::sql::cold_dml::guard::suspended() {
                 return None;
@@ -182,8 +199,10 @@ mod live {
             if !crate::catalog::cache::is_managed_relation(table_oid) {
                 return None;
             }
-            let raw =
-                crate::hooks::pk_predicate::extract_raw_predicate_leaves((*planned).planTree, (*query_desc).params)?;
+            let raw = crate::hooks::pk_predicate::extract_raw_predicate_leaves(
+                (*planned).planTree,
+                (*query_desc).params,
+            );
             // Every distinct PK candidate this predicate could name is at
             // most one row (PK columns are unique), so `es_processed`
             // (the statement's total affected-row count) can never exceed
@@ -208,12 +227,34 @@ mod live {
             // rejected -- it re-found the same row via the cold-or-hot
             // probe and incorrectly treated that as unsafe). Residual
             // leaves must not count toward this early estimate at all.
-            let single_valued = raw.iter().all(|leaf| leaf.value_count() == 1);
-            let es_processed = (*estate).es_processed;
-            if single_valued && es_processed != 0 {
-                return None;
-            }
-            Some((table_oid, raw, es_processed))
+            let single_valued = raw
+                .as_ref()
+                .is_some_and(|leaves| leaves.iter().all(|leaf| leaf.value_count() == 1));
+            // The generic probe (any WHERE shape) needs the clause as SQL
+            // text, taken while the plan tree is still alive. MERGE joins a
+            // source, which a standalone count cannot reproduce.
+            let where_sql = if (*query_desc).operation == pg_sys::CmdType::CMD_MERGE
+                || !crate::guc::guard_scan_writes()
+            {
+                None
+            } else {
+                crate::hooks::where_deparse::deparse_where(
+                    (*planned).planTree,
+                    (*query_desc).params,
+                    table_oid,
+                )
+            };
+            Some(GuardCandidate {
+                table_oid,
+                raw,
+                where_sql,
+                single_valued,
+                es_processed: (*estate).es_processed,
+                // Captured before this statement's own write is recorded.
+                prior_write: crate::txn_writes::was_written(table_oid),
+                merge_changes_rows: (*query_desc).operation == pg_sys::CmdType::CMD_MERGE
+                    && merge_changes_target_rows((*planned).planTree),
+            })
         }
     }
 
@@ -231,29 +272,117 @@ mod live {
     /// doesn't match `'x'` is a legitimate zero-row result unrelated to
     /// #122, not something to reject -- see the module doc comment on
     /// `hooks::pk_predicate` for the full reasoning.
-    unsafe fn enforce_cold_only_update_delete_guard(
-        table_oid: pg_sys::Oid,
-        raw: &[crate::hooks::pk_predicate::RawLeaf],
-        es_processed: u64,
-    ) {
-        let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
+    fn enforce_cold_only_update_delete_guard(candidate: &GuardCandidate) {
+        if let Some(raw) = candidate.raw.as_deref() {
+            if enforce_exact_pk_guard(candidate, raw) {
+                return;
+            }
+        }
+        enforce_generic_cold_match_guard(candidate);
+        enforce_unverifiable_merge_guard(candidate);
+    }
+
+    /// A MERGE that changes target rows through a join the exact-PK analysis
+    /// could not verify (a multi-row source): its `WHEN MATCHED` /
+    /// `WHEN NOT MATCHED BY SOURCE` actions ran against the hot heap only, and
+    /// which keys the source held is gone once the statement ends, so cold rows
+    /// it should have changed cannot be detected afterwards. Fail closed when
+    /// cold data exists (upstream #122).
+    fn enforce_unverifiable_merge_guard(candidate: &GuardCandidate) {
+        if !candidate.merge_changes_rows || !crate::guc::guard_scan_writes() || crate::sql::cold_dml::guard::suspended()
+        {
+            return;
+        }
+        let has_cold = matches!(
+            crate::catalog::cache::cached_manifest_planner_hint(candidate.table_oid),
+            Ok(Some((segments, _))) if segments > 0
+        );
+        if !has_cold {
+            return;
+        }
+        let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
+            .unwrap_or_else(|_| "?".to_string());
+        pgrx::error!(
+            "koldstore: refusing this MERGE on managed table {table_name} -- it updates or deletes target rows \
+             through a join, and the join only sees hot rows, so matching cold rows would be silently skipped. \
+             Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or \
+             INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts \
+             the risk (upstream issue #122)"
+        );
+    }
+
+    /// Generic fallback for every WHERE shape the exact-PK analysis cannot
+    /// name row by row (a PK range, `NOT IN`, an `OR` across columns, a
+    /// function, no WHERE at all, ...): counts the cold-only rows the clause
+    /// matches. A plain UPDATE/DELETE cannot reach those, so any match means
+    /// the statement silently did only part of its job (upstream #122).
+    ///
+    /// Skipped, never rejected, when the answer would be unreliable: the guard
+    /// is switched off, the clause cannot be reproduced (`where_sql` is
+    /// `None`), the table has no published cold segment, or the transaction
+    /// already wrote the table (uncommitted work is invisible to the async
+    /// mirror, so a stale cold copy could be miscounted).
+    fn enforce_generic_cold_match_guard(candidate: &GuardCandidate) {
+        let Some(where_sql) = candidate.where_sql.as_deref() else {
             return;
         };
-        let Ok(column_attnums) = crate::sql::cold_dml::guard::column_attnum_map(table_oid) else {
+        if candidate.prior_write || crate::sql::cold_dml::guard::suspended() {
             return;
+        }
+        let has_cold = matches!(
+            crate::catalog::cache::cached_manifest_planner_hint(candidate.table_oid),
+            Ok(Some((segments, _))) if segments > 0
+        );
+        if !has_cold {
+            return;
+        }
+        let Ok(cold_matches) = crate::sql::cold_dml::guard::count_cold_only_matches(candidate.table_oid, where_sql)
+        else {
+            return;
+        };
+        if cold_matches > 0 {
+            let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
+                .unwrap_or_else(|_| "?".to_string());
+            pgrx::error!(
+                "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- its WHERE clause also \
+                 matches {cold_matches} cold row(s) that a plain statement cannot modify (they live in Parquet \
+                 storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), \
+                 or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call \
+                 koldstore.wait_for_async_mirror() and retry (upstream issue #122)"
+            );
+        }
+    }
+
+    /// Exact primary-key analysis (see the doc comment below). Returns `true`
+    /// when the predicate was fully analyzed this way, so the generic probe is
+    /// not needed.
+    fn enforce_exact_pk_guard(
+        candidate: &GuardCandidate,
+        raw: &[crate::hooks::pk_predicate::RawLeaf],
+    ) -> bool {
+        let table_oid = candidate.table_oid;
+        let es_processed = candidate.es_processed;
+        let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
+            return false;
+        };
+        let Ok(column_attnums) = crate::sql::cold_dml::guard::column_attnum_map(table_oid) else {
+            return false;
         };
         let Some((candidates, residual)) =
             crate::hooks::pk_predicate::resolve_predicate(raw, &pk_columns, &column_attnums)
         else {
-            return;
+            return false;
         };
+        if candidate.single_valued && es_processed != 0 {
+            return true;
+        }
         // The real "already fully handled natively" skip -- see phase 1's
         // comment on why it can only be computed here, once PK leaves are
         // known apart from residual ones. `candidates.len()` is the true
         // count of distinct rows this predicate's PK portion alone could
         // name; a residual `IN (...)` never multiplies into it.
         if es_processed as usize >= candidates.len() {
-            return;
+            return true;
         }
         for pk_json in candidates {
             let Ok(Some(row_json)) = crate::sql::cold_dml::guard::locate_row(table_oid, &pk_json) else {
@@ -313,6 +442,33 @@ mod live {
                      (upstream issue #122)"
                 );
             }
+        }
+        true
+    }
+
+    /// True when the MERGE's plan has an action that changes existing target
+    /// rows (`UPDATE`/`DELETE`, matched or not-matched-by-source). Such an
+    /// action only ever sees hot rows: a cold-only target row is treated as
+    /// "no match", so it is silently skipped.
+    unsafe fn merge_changes_target_rows(plan: *mut pg_sys::Plan) -> bool {
+        unsafe {
+            if plan.is_null() || (*plan).type_ != pg_sys::NodeTag::T_ModifyTable {
+                return false;
+            }
+            let modify = plan.cast::<pg_sys::ModifyTable>();
+            let lists = crate::merge_scan::pg::literals::list_node_pointers((*modify).mergeActionLists);
+            lists.into_iter().any(|actions| {
+                crate::merge_scan::pg::literals::list_node_pointers(actions.cast::<pg_sys::List>())
+                    .into_iter()
+                    .any(|action| {
+                        let action = action.cast::<pg_sys::MergeAction>();
+                        !action.is_null()
+                            && matches!(
+                                (*action).commandType,
+                                pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
+                            )
+                    })
+            })
         }
     }
 

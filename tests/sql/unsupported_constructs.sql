@@ -54,6 +54,19 @@ COMMIT;
 BEGIN ISOLATION LEVEL SERIALIZABLE;
 SELECT count(*) AS serializable FROM sqlreg.u1;
 COMMIT;
+-- the opt-in policy refuses cold reads under SERIALIZABLE only
+SET koldstore.reject_serializable_cold_reads = on;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS serializable_policy_on FROM sqlreg.u1;
+ROLLBACK;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS serializable_policy_on_hot_only FROM sqlreg.u2;
+SELECT count(*) AS serializable_policy_on_exact_hot_key FROM sqlreg.u1 WHERE id = 100;
+COMMIT;
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS repeatable_read_policy_on FROM sqlreg.u1;
+COMMIT;
+RESET koldstore.reject_serializable_cold_reads;
 
 -- ------------------------------------------------------------- TRUNCATE
 CREATE TABLE sqlreg.u_child (id int PRIMARY KEY, p bigint REFERENCES sqlreg.u1 (id));

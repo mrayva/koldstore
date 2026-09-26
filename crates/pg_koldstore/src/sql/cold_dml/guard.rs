@@ -141,6 +141,28 @@ pub(crate) fn residual_conditions_match(
     }
 }
 
+/// Counts the cold-only rows `where_sql` (a condition over the table aliased
+/// `t`, see `hooks::where_deparse`) matches: rows of the merged hot+cold view
+/// minus rows of the heap alone. The heap-only count plans natively with the
+/// merge-scan planner hook disabled; what remains are cold rows no hot row
+/// shadows, which a plain UPDATE/DELETE cannot reach.
+///
+/// Both counts run in the same snapshot. The same-transaction cold-read check
+/// is suppressed: this is an internal probe, and the caller has already ruled
+/// out a transaction that wrote the table.
+#[cfg(feature = "pg")]
+pub(crate) fn count_cold_only_matches(table_oid: pgrx::pg_sys::Oid, where_sql: &str) -> Result<i64, String> {
+    let relation = super::qualified_relation(table_oid)?;
+    let sql = format!("SELECT count(*) FROM {} AS t WHERE {where_sql}", relation.quoted());
+    let merged = crate::txn_writes::with_check_suppressed(|| pgrx::Spi::get_one::<i64>(&sql))
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+    let hot = crate::merge_scan::pg::with_hook_disabled(|| pgrx::Spi::get_one::<i64>(&sql))
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+    Ok(merged - hot)
+}
+
 /// Maps every live column's `attnum` to its name, for
 /// `hooks::pk_predicate::extract_pk_equality`'s `Var.varattno` lookups.
 #[cfg(feature = "pg")]
@@ -200,26 +222,48 @@ pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB
     }
 }
 
-/// Builds a truncation-safe `<= 63`-byte identifier from `prefix`+`suffix`,
-/// truncating `prefix` (never `suffix`) when the combination would
-/// otherwise exceed PostgreSQL's `NAMEDATALEN - 1` limit.
+/// Builds a `<= 63`-byte identifier from `prefix`+`suffix`. A combination that
+/// does not fit keeps the start of `prefix` plus a hash of the whole prefix, so
+/// two long names that share their first characters never collapse onto the
+/// same helper object.
 fn bounded_identifier(prefix: &str, suffix: &str) -> String {
     const MAX_LEN: usize = 63;
     let combined = format!("{prefix}{suffix}");
     if combined.len() <= MAX_LEN {
         return combined;
     }
+    let hash = format!("_{:016x}", fnv1a64(prefix.as_bytes()));
+    let keep = MAX_LEN.saturating_sub(suffix.len() + hash.len());
+    format!("{}{hash}{suffix}", floor_str(prefix, keep))
+}
+
+/// The pre-hash derivation (plain truncation of `prefix`), kept only to find
+/// and remove objects an older release created.
+fn truncated_identifier(prefix: &str, suffix: &str) -> String {
+    const MAX_LEN: usize = 63;
+    let combined = format!("{prefix}{suffix}");
+    if combined.len() <= MAX_LEN {
+        return combined;
+    }
     let keep = MAX_LEN.saturating_sub(suffix.len());
-    let mut truncated = prefix.as_bytes();
-    while truncated.len() > keep && !truncated.is_empty() {
-        truncated = &truncated[..truncated.len() - 1];
+    format!("{}{suffix}", floor_str(prefix, keep))
+}
+
+/// `value` cut to at most `max_bytes`, never inside a UTF-8 codepoint.
+fn floor_str(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
     }
-    // Never split a UTF-8 codepoint -- back off further if the byte cut
-    // landed mid-character.
-    while !truncated.is_empty() && std::str::from_utf8(truncated).is_err() {
-        truncated = &truncated[..truncated.len() - 1];
-    }
-    format!("{}{suffix}", std::str::from_utf8(truncated).unwrap_or(""))
+    &value[..end]
+}
+
+/// Stable 64-bit FNV-1a (unlike `DefaultHasher`, identical across releases, so
+/// names derived from it can be found again later).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The guard function/trigger names for one managed table.
@@ -227,6 +271,10 @@ fn bounded_identifier(prefix: &str, suffix: &str) -> String {
 pub(crate) struct InsertGuardNames {
     pub function: koldstore_common::QualifiedTableName,
     pub trigger: String,
+    /// Names an older release derived by plain truncation when the table name
+    /// is long (`None` when they are the same as the current ones). Teardown and
+    /// re-creation still remove them.
+    pub legacy: Option<(koldstore_common::QualifiedTableName, String)>,
 }
 
 #[cfg(feature = "pg")]
@@ -235,13 +283,16 @@ pub(crate) fn insert_guard_names(source: &koldstore_common::QualifiedTableName) 
         .schema
         .as_deref()
         .map_or_else(|| source.name.clone(), |schema| format!("{schema}_{}", source.name));
-    InsertGuardNames {
-        function: koldstore_common::QualifiedTableName {
-            schema: Some("koldstore".to_string()),
-            name: bounded_identifier(&base, "__cold_ins_guard"),
-        },
-        trigger: bounded_identifier(&base, "__cold_ins_guard_trg"),
-    }
+    let named = |name: String| koldstore_common::QualifiedTableName {
+        schema: Some("koldstore".to_string()),
+        name,
+    };
+    let function = named(bounded_identifier(&base, "__cold_ins_guard"));
+    let trigger = bounded_identifier(&base, "__cold_ins_guard_trg");
+    let legacy_function = named(truncated_identifier(&base, "__cold_ins_guard"));
+    let legacy_trigger = truncated_identifier(&base, "__cold_ins_guard_trg");
+    let legacy = (legacy_function != function || legacy_trigger != trigger).then_some((legacy_function, legacy_trigger));
+    InsertGuardNames { function, trigger, legacy }
 }
 
 /// Plans (as raw SQL text, executed the same way the mirror PK-mutation
@@ -283,10 +334,12 @@ $$
         "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {source_quoted} \
          FOR EACH ROW EXECUTE FUNCTION {function_name}()"
     );
-    let drop_trigger_sql = drop_trigger_if_present_sql(&names.trigger, &source_quoted);
-    let drop_function_sql = format!("DROP FUNCTION IF EXISTS {function_name}()");
-
-    vec![drop_trigger_sql, drop_function_sql, function_sql, trigger_sql]
+    let mut statements = legacy_teardown_sql(&names, &source_quoted);
+    statements.push(drop_trigger_if_present_sql(&names.trigger, &source_quoted));
+    statements.push(format!("DROP FUNCTION IF EXISTS {function_name}()"));
+    statements.push(function_sql);
+    statements.push(trigger_sql);
+    statements
 }
 
 /// Installs (or refreshes) the insert guard on every active managed table.
@@ -341,10 +394,27 @@ fn internal_attach_insert_guards() -> i64 {
 pub(crate) fn plan_insert_guard_teardown(source: &koldstore_common::QualifiedTableName) -> Vec<String> {
     let names = insert_guard_names(source);
     let source_quoted = source.quoted();
-    vec![
-        drop_trigger_if_present_sql(&names.trigger, &source_quoted),
-        format!("DROP FUNCTION IF EXISTS {}()", names.function.quoted()),
-    ]
+    let mut statements = legacy_teardown_sql(&names, &source_quoted);
+    statements.push(drop_trigger_if_present_sql(&names.trigger, &source_quoted));
+    statements.push(format!("DROP FUNCTION IF EXISTS {}()", names.function.quoted()));
+    statements
+}
+
+/// Statements removing the guard objects an older release named by plain
+/// truncation (see [`InsertGuardNames::legacy`]); empty for short names.
+fn legacy_teardown_sql(names: &InsertGuardNames, source_quoted: &str) -> Vec<String> {
+    names.legacy.as_ref().map_or_else(Vec::new, |(function, trigger)| {
+        // Two long names could have been truncated onto the same function; leave it
+        // alone while another table's trigger still uses it.
+        vec![
+            drop_trigger_if_present_sql(trigger, source_quoted),
+            format!(
+                "DO $koldstore_drop_legacy$ BEGIN DROP FUNCTION IF EXISTS {}(); \
+                 EXCEPTION WHEN dependent_objects_still_exist THEN NULL; END $koldstore_drop_legacy$",
+                function.quoted()
+            ),
+        ]
+    })
 }
 
 fn drop_trigger_if_present_sql(trigger_name: &str, source_table: &str) -> String {

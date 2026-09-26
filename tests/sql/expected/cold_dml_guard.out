@@ -133,9 +133,9 @@ INSERT 0 6
  ok: 0
 (1 row)
 
- gap_or_across_columns
------------------------
- ok: 0
+    or_across_columns
+-------------------------
+ REJECTED scan matches=2
 (1 row)
 
     residual_matches_cold
@@ -168,19 +168,19 @@ INSERT 0 6
  ok: 0
 (1 row)
 
- gap_pk_range
---------------
- ok: 0
+        pk_range
+-------------------------
+ REJECTED scan matches=2
 (1 row)
 
- gap_pk_less_than
-------------------
- ok: 0
+      pk_less_than
+-------------------------
+ REJECTED scan matches=2
 (1 row)
 
- gap_not_in
-------------
- ok: 0
+         not_in
+-------------------------
+ REJECTED scan matches=4
 (1 row)
 
  settle
@@ -211,9 +211,9 @@ INSERT 0 6
  REJECTED write pk={"id":"2"}
 (1 row)
 
- merge_new_key_inserts
------------------------
- ok: 1
+                                                                                                                                                                                                         merge_new_key_inserts
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this MERGE on managed table sqlreg.g1 -- it updates or deletes target rows through a join, and the join only sees hot rows, so matching cold rows would be silently skipped. Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts the risk (upstream issue #122)
 (1 row)
 
  merge_update_hot
@@ -261,8 +261,7 @@ INSERT 0 6
   7 | mh
   8 | v8
   9 | v9
- 11 | m
-(9 rows)
+(8 rows)
 
 CREATE TABLE
 INSERT 0 4
@@ -311,9 +310,9 @@ INSERT 0 4
  REJECTED write pk={"a":"1","b":"10"}
 (1 row)
 
- gap_comp_or_across_columns
-----------------------------
- ok: 0
+ comp_or_across_columns
+-------------------------
+ REJECTED scan matches=2
 (1 row)
 
  settle

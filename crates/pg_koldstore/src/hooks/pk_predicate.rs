@@ -263,7 +263,7 @@ pub(crate) fn resolve_predicate(
 /// a PK-equality (or PK `IN (...)`) lookup realistically produces.
 /// Anything else (joins, partition-routed `ModifyTable`, ...) returns
 /// `None` -- deferred scope.
-unsafe fn scan_qual_sources(plan: *mut pg_sys::Plan) -> Option<(pg_sys::Index, Vec<*mut pg_sys::List>)> {
+pub(super) unsafe fn scan_qual_sources(plan: *mut pg_sys::Plan) -> Option<(pg_sys::Index, Vec<*mut pg_sys::List>)> {
     unsafe {
         match (*plan).type_ {
             pg_sys::NodeTag::T_IndexScan => {

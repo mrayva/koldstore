@@ -16,6 +16,101 @@ use koldstore_common::MigrationStatus;
 use koldstore_migrate::{introspection, MigrateTableRequest};
 #[cfg(feature = "pg")]
 use uuid::Uuid;
+/// Refuses everything but an ordinary, permanent heap table that takes no part
+/// in a partition or inheritance hierarchy (upstream #125): a cold row has no
+/// heap presence, so partition routing, inheritance scans, foreign or
+/// non-logged storage cannot be honoured over hot + cold data, and logical
+/// replication (which feeds the mirror) does not cover temporary or unlogged
+/// relations at all. Runs before anything is created.
+#[cfg(feature = "pg")]
+fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
+    let sql = "SELECT c.relkind::text, c.relpersistence::text, c.relispartition, \
+               EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid), \
+               EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid) \
+               FROM pg_catalog.pg_class c WHERE c.oid = $1";
+    let args = [pgrx::datum::DatumWithOid::from(table_oid)];
+    let found = pgrx::Spi::connect(|client| -> Result<Option<(String, String, bool, bool, bool)>, pgrx::spi::Error> {
+        let table = client.select(sql, Some(1), &args)?;
+        let Some(row) = table.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            row.get::<String>(1)?.unwrap_or_default(),
+            row.get::<String>(2)?.unwrap_or_default(),
+            row.get::<bool>(3)?.unwrap_or(false),
+            row.get::<bool>(4)?.unwrap_or(false),
+            row.get::<bool>(5)?.unwrap_or(false),
+        )))
+    })
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let Some((relkind, persistence, is_partition, has_children, is_child)) = found else {
+        return;
+    };
+    let reason = match relkind.as_str() {
+        "r" if is_partition => Some("it is a partition"),
+        "r" if has_children => Some("it has inheritance children"),
+        "r" if is_child => Some("it inherits from another table"),
+        "r" if persistence == "t" => Some("it is a temporary table"),
+        "r" if persistence == "u" => Some("it is an unlogged table"),
+        "r" => None,
+        "p" => Some("it is a partitioned table"),
+        "f" => Some("it is a foreign table"),
+        "v" => Some("it is a view"),
+        "m" => Some("it is a materialized view"),
+        "S" => Some("it is a sequence"),
+        "i" | "I" => Some("it is an index"),
+        "c" => Some("it is a composite type"),
+        "t" => Some("it is a TOAST table"),
+        _ => Some("its relation kind is not supported"),
+    };
+    if let Some(reason) = reason {
+        let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
+            .unwrap_or_else(|_| format!("(oid {})", table_oid.to_u32()));
+        pgrx::error!(
+            "migrate table failed: cannot manage {relation}: {reason}; only ordinary, permanent tables outside \
+             any partition or inheritance hierarchy are supported (upstream issue #125)"
+        );
+    }
+    reject_unsupported_identifiers(table_oid);
+}
+
+/// KoldStore builds SQL, mirror objects and Parquet schemas from the table's
+/// schema, namespace, table and column names, and only handles plain names
+/// (ASCII letters, digits and `_`, not starting with a digit; mixed case and
+/// reserved words are fine because they are always quoted). Anything else used
+/// to be accepted here and then fail every flush, leaving a managed table whose
+/// hot data could never be moved; refuse it up front instead.
+#[cfg(feature = "pg")]
+fn reject_unsupported_identifiers(table_oid: pgrx::pg_sys::Oid) {
+    let sql = "SELECT n.nspname::text AS name, 'schema' AS kind FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 \
+               UNION ALL SELECT c.relname::text, 'table' FROM pg_catalog.pg_class c WHERE c.oid = $1 \
+               UNION ALL SELECT a.attname::text, 'column' FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped";
+    let args = [pgrx::datum::DatumWithOid::from(table_oid)];
+    let names = pgrx::Spi::connect(|client| -> Result<Vec<(String, String)>, pgrx::spi::Error> {
+        client
+            .select(sql, None, &args)?
+            .map(|row| Ok((row.get::<String>(1)?.unwrap_or_default(), row.get::<String>(2)?.unwrap_or_default())))
+            .collect()
+    })
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let unsupported: Vec<String> = names
+        .into_iter()
+        .filter(|(name, _)| !koldstore_common::is_safe_identifier(name))
+        .map(|(name, kind)| format!("{kind} \"{name}\""))
+        .collect();
+    if !unsupported.is_empty() {
+        let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
+            .unwrap_or_else(|_| format!("(oid {})", table_oid.to_u32()));
+        pgrx::error!(
+            "migrate table failed: cannot manage {relation}: unsupported identifier(s): {}; names may only \
+             contain ASCII letters, digits and underscores and must not start with a digit",
+            unsupported.join(", ")
+        );
+    }
+}
+
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn manage_table_pg_impl(
@@ -55,6 +150,7 @@ pub(crate) fn manage_table_pg_impl(
         compression,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    reject_unsupported_relation_kind(table_oid);
     // Validate logical decoding before taking the transaction-scoped job lock.
     crate::mirror::lifecycle::prepare_capture()
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));

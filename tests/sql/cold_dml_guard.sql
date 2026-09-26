@@ -1,16 +1,17 @@
 -- Cold-tier write guard (upstream #122, Option B): INSERT / UPDATE / DELETE /
 -- MERGE against rows that exist ONLY in cold storage must be rejected instead
--- of silently missing them, and the documented gaps stay pinned.
+-- of silently missing them.
 --
 -- Every statement runs through sqlreg.try(), which executes it in a
 -- subtransaction and reports "ok: <rows affected>" or "ERROR: <first line>",
 -- so one rejected statement never aborts the case and the result of each
 -- statement is visible in the expected output.
 --
--- KNOWN GAPS: cases marked "gap:" pin behavior that is deliberately NOT guarded
--- yet (the statement silently affects 0 rows although cold rows match). They
--- exist so closing a gap shows up as an intentional expected-output change,
--- not as an accident.
+-- Shapes the exact-primary-key analysis cannot name row by row (ranges, NOT IN,
+-- OR across columns, ...) fall through to the generic cold-match guard, which
+-- has its own case: cold_dml_scan_guard. The statements below that used to be
+-- pinned as unguarded gaps run against a table earlier cases have already
+-- changed, so they only assert that the newer guard does not misfire here.
 
 \set VERBOSITY terse
 
@@ -34,6 +35,8 @@ EXCEPTION WHEN OTHERS THEN
     RETURN 'ERROR: ' || msg;
   ELSIF msg LIKE 'koldstore: refusing INSERT%' THEN
     RETURN 'REJECTED insert';
+  ELSIF msg LIKE 'koldstore: refusing this UPDATE/DELETE on managed table%' THEN
+    RETURN 'REJECTED scan matches=' || substring(msg from 'also matches ([0-9]+) cold');
   ELSIF msg LIKE 'koldstore: refusing this UPDATE/DELETE/MERGE%' THEN
     RETURN 'REJECTED write pk=' || substring(msg from 'primary key (\{[^}]*\})');
   END IF;
@@ -102,8 +105,8 @@ SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 1 OR id = 2$$) AS delete_or
 SELECT sqlreg.try($$UPDATE sqlreg.g1 SET val = 'x' WHERE id = 7 OR id = 3$$) AS update_or_hot_and_cold;
 SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 1 OR id IN (2, 3)$$) AS delete_or_mixed_in;
 SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 997 OR id = 998$$) AS delete_or_nonexistent;
--- gap: an OR across DIFFERENT columns is not recognized and stays unguarded
-SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 1 OR val = 'v2'$$) AS gap_or_across_columns;
+-- an OR across DIFFERENT columns is caught by the generic cold-match guard
+SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 1 OR val = 'v2'$$) AS or_across_columns;
 
 -- --------------------------------- extra (residual) non-PK conditions
 SELECT sqlreg.try($$UPDATE sqlreg.g1 SET val = 'x' WHERE id = 3 AND val = 'v3'$$) AS residual_matches_cold;
@@ -113,10 +116,10 @@ SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id = 3 AND val IN ('nope', 'neve
 SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE (id = 3 OR id = 4) AND val = 'v4'$$) AS or_plus_residual_matches;
 SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE (id = 3 OR id = 4) AND val = 'nope'$$) AS or_plus_residual_no_match;
 
--- ----------------------------------------------------------------- known gaps
-SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id BETWEEN 1 AND 2$$) AS gap_pk_range;
-SELECT sqlreg.try($$UPDATE sqlreg.g1 SET val = 'x' WHERE id < 3$$) AS gap_pk_less_than;
-SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id NOT IN (5, 6, 7, 8, 9, 10)$$) AS gap_not_in;
+-- ------------------------------------------- shapes for the generic guard
+SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id BETWEEN 1 AND 2$$) AS pk_range;
+SELECT sqlreg.try($$UPDATE sqlreg.g1 SET val = 'x' WHERE id < 3$$) AS pk_less_than;
+SELECT sqlreg.try($$DELETE FROM sqlreg.g1 WHERE id NOT IN (5, 6, 7, 8, 9, 10)$$) AS not_in;
 -- ... and the cold rows those statements were meant to hit are all still there
 SELECT sqlreg.settle();
 SELECT id, val FROM sqlreg.g1 ORDER BY id;
@@ -164,8 +167,8 @@ SELECT sqlreg.try($$UPDATE sqlreg.g2 SET val = 'x' WHERE a = 2 AND b = 20$$) AS 
 SELECT sqlreg.try($$DELETE FROM sqlreg.g2 WHERE a = 3 AND b = 30$$) AS comp_delete_cold;
 SELECT sqlreg.try($$DELETE FROM sqlreg.g2 WHERE a = 3 AND b = 31$$) AS comp_delete_nonexistent;
 SELECT sqlreg.try($$DELETE FROM sqlreg.g2 WHERE a IN (1, 2) AND b IN (10, 20)$$) AS comp_delete_in_lists;
--- gap: OR across the two PK columns is not a single-column chain
-SELECT sqlreg.try($$DELETE FROM sqlreg.g2 WHERE a = 1 OR b = 20$$) AS gap_comp_or_across_columns;
+-- OR across the two PK columns is not a single-column chain: generic guard
+SELECT sqlreg.try($$DELETE FROM sqlreg.g2 WHERE a = 1 OR b = 20$$) AS comp_or_across_columns;
 SELECT sqlreg.settle();
 SELECT a, b, val FROM sqlreg.g2 ORDER BY val;
 

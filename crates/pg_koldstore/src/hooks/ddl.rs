@@ -91,8 +91,12 @@ mod process_utility {
             let mut copy_from_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
+                    pg_sys::NodeTag::T_CreateStmt => {
+                        reject_create_in_managed_hierarchy((*copied).utilityStmt.cast::<pg_sys::CreateStmt>());
+                    }
                     pg_sys::NodeTag::T_AlterTableStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
+                        reject_alter_hierarchy_of_managed(stmt);
                         captured = strip_options(stmt);
                         has_standard_actions = !(*stmt).cmds.is_null();
                         refresh_oid = relation_oid_from_range_var((*stmt).relation);
@@ -302,6 +306,70 @@ mod process_utility {
         }
         super::apply_management_options(oid, &values)
             .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
+    }
+
+    /// Errors when `relation` names a managed table (hierarchy changes such
+    /// as `INHERIT`, `ATTACH PARTITION` or `INHERITS (...)` would put cold data
+    /// under a parent scan or partition router it cannot take part in; upstream
+    /// #125).
+    unsafe fn reject_if_managed(relation: *mut pg_sys::RangeVar, action: &str) {
+        unsafe {
+            if !crate::catalog::cache::managed_catalog_ready() {
+                return;
+            }
+            if let Some(oid) = relation_oid_from_range_var(relation) {
+                if crate::catalog::cache::is_managed_relation(oid) {
+                    let name = crate::catalog::resolve::qualified_relation_name(oid)
+                        .unwrap_or_else(|_| format!("(oid {})", oid.to_u32()));
+                    pgrx::error!(
+                        "koldstore: {action} is not allowed: {name} is a managed table, and managed tables must \
+                         stay outside any partition or inheritance hierarchy (upstream issue #125)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `CREATE TABLE ... INHERITS (managed)` / `PARTITION OF managed`.
+    unsafe fn reject_create_in_managed_hierarchy(stmt: *mut pg_sys::CreateStmt) {
+        unsafe {
+            if stmt.is_null() {
+                return;
+            }
+            for parent in crate::merge_scan::pg::literals::list_node_pointers((*stmt).inhRelations) {
+                reject_if_managed(parent.cast::<pg_sys::RangeVar>(), "CREATE TABLE ... INHERITS / PARTITION OF");
+            }
+        }
+    }
+
+    /// `ALTER TABLE ... INHERIT parent` and `ATTACH PARTITION` where either
+    /// side is managed.
+    unsafe fn reject_alter_hierarchy_of_managed(stmt: *mut pg_sys::AlterTableStmt) {
+        unsafe {
+            if stmt.is_null() || (*stmt).cmds.is_null() {
+                return;
+            }
+            for cmd in crate::merge_scan::pg::literals::list_node_pointers((*stmt).cmds) {
+                let cmd = cmd.cast::<pg_sys::AlterTableCmd>();
+                if cmd.is_null() {
+                    continue;
+                }
+                match (*cmd).subtype {
+                    pg_sys::AlterTableType::AT_AddInherit => {
+                        reject_if_managed((*stmt).relation, "ALTER TABLE ... INHERIT");
+                        reject_if_managed((*cmd).def.cast::<pg_sys::RangeVar>(), "ALTER TABLE ... INHERIT");
+                    }
+                    pg_sys::AlterTableType::AT_AttachPartition => {
+                        reject_if_managed((*stmt).relation, "ALTER TABLE ... ATTACH PARTITION");
+                        let partition = (*cmd).def.cast::<pg_sys::PartitionCmd>();
+                        if !partition.is_null() {
+                            reject_if_managed((*partition).name, "ALTER TABLE ... ATTACH PARTITION");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Resolves a relation OID from a `RangeVar`, tolerating missing relations.

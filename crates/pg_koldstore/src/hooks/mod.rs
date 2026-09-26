@@ -6,6 +6,8 @@ pub(crate) mod drop_cleanup;
 pub mod executor;
 #[cfg(feature = "pg")]
 pub(crate) mod pk_predicate;
+#[cfg(feature = "pg")]
+pub(crate) mod where_deparse;
 pub mod planner;
 
 /// Registers PostgreSQL hooks.
