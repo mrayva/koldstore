@@ -163,6 +163,64 @@ pub(crate) fn count_cold_only_matches(table_oid: pgrx::pg_sys::Oid, where_sql: &
     Ok(merged - hot)
 }
 
+/// Runs `sql` (a `SELECT count(*)` over the statement's join, see
+/// `hooks::dml_planner`) twice with the statement's own parameters -- once over
+/// the merged hot+cold view, once with `table_oid` forced to plain heap scans
+/// while every other managed table is still read hot+cold -- and returns the
+/// difference: target rows the join matches that only cold storage holds.
+#[cfg(feature = "pg")]
+pub(crate) fn count_join_cold_only_matches(
+    table_oid: pgrx::pg_sys::Oid,
+    sql: &str,
+    params: &[crate::hooks::dml_planner::ProbeParam],
+) -> Result<i64, String> {
+    let merged = crate::txn_writes::with_check_suppressed(|| run_count_with_params(sql, params))?;
+    let hot = {
+        let _hot_only = crate::merge_scan::pg::HotOnlyRelation::new(table_oid);
+        crate::txn_writes::with_check_suppressed(|| run_count_with_params(sql, params))?
+    };
+    Ok(merged - hot)
+}
+
+#[cfg(feature = "pg")]
+fn run_count_with_params(sql: &str, params: &[crate::hooks::dml_planner::ProbeParam]) -> Result<i64, String> {
+    use std::ffi::{c_char, CString};
+
+    use pgrx::pg_sys;
+
+    let c_sql = CString::new(sql).map_err(|error| error.to_string())?;
+    let mut types: Vec<pg_sys::Oid> = params.iter().map(|param| param.type_oid).collect();
+    let mut values: Vec<pg_sys::Datum> = params.iter().map(|param| param.value).collect();
+    let nulls: Vec<c_char> = params.iter().map(|param| if param.is_null { b'n' } else { b' ' } as c_char).collect();
+    let count = i32::try_from(params.len()).map_err(|error| error.to_string())?;
+    pgrx::Spi::connect(|_client| {
+        // SAFETY: SPI is connected for the closure; the arrays outlive the call and
+        // hold `count` entries each; the result tuple table is read before SPI
+        // finishes.
+        unsafe {
+            let code = pg_sys::SPI_execute_with_args(
+                c_sql.as_ptr(),
+                count,
+                types.as_mut_ptr(),
+                values.as_mut_ptr(),
+                nulls.as_ptr(),
+                true,
+                0,
+            );
+            if code != pg_sys::SPI_OK_SELECT as i32 || pg_sys::SPI_processed != 1 || pg_sys::SPI_tuptable.is_null() {
+                return Err(format!("cold-match probe failed (SPI code {code})"));
+            }
+            let tuptable = &*pg_sys::SPI_tuptable;
+            let mut is_null = false;
+            let datum = pg_sys::SPI_getbinval(*tuptable.vals, tuptable.tupdesc, 1, &mut is_null);
+            if is_null {
+                return Ok(0);
+            }
+            Ok(<i64 as pgrx::FromDatum>::from_datum(datum, false).unwrap_or(0))
+        }
+    })
+}
+
 /// Maps every live column's `attnum` to its name, for
 /// `hooks::pk_predicate::extract_pk_equality`'s `Var.varattno` lookups.
 #[cfg(feature = "pg")]

@@ -1,0 +1,183 @@
+# ADR-007: Writing cold-only rows: synchronous tombstone vs hydrate-on-write
+
+## Status
+
+Proposed (design note; nothing here is implemented). Today a plain `UPDATE`,
+`DELETE` or `MERGE` that would have to change a cold-only row is *rejected*
+(upstream [#122](https://github.com/kalamdb/koldstore/issues/122)); the explicit
+`koldstore.update_row()` / `delete_row()` / `hydrate_pk()` functions are the only
+way to change one.
+
+## Date
+
+2026-09-26
+
+## Context
+
+A managed table is a PostgreSQL heap (hot) plus immutable Parquet segments
+(cold). A native `UPDATE`/`DELETE` plans against the heap only, so a cold-only
+row is invisible to it and is silently skipped. The write guards now detect this
+for every statement shape except a few that cannot be re-run faithfully (see
+`docs/limitations.md`) and reject the statement. The open question is whether
+plain SQL should instead *succeed* on cold rows, and how.
+
+Facts about the current design that constrain any answer (all verified in code):
+
+- **Reads mask cold rows through the mirror.** `merge_scan/pg/mirror.rs` loads
+  mirror rows with `op = 3` (tombstones) and `koldstore_merge::MirrorOverlay`
+  drops cold rows whose primary key is masked. A hot row for the same key
+  shadows the cold copy through the scan's seen-keys set.
+- **The mirror has exactly one writer.** The async WAL applier decodes committed
+  changes in commit order and assigns each change a strictly increasing `seq`
+  from `koldstore.async_mirror_state.seq_high_watermark`. Its four upsert
+  builders (`plan_upsert_mirror_row`, `plan_async_mirror_batch_upsert`,
+  `_update`, `_delete_existing` in `koldstore-wal-mirror/src/mirror/shared/write.rs`)
+  are unconditional last-write-wins: `ON CONFLICT ... SET seq = EXCLUDED.seq,
+  op = EXCLUDED.op` with no `WHERE EXCLUDED.seq > mirror.seq`. That is safe only
+  because there is one writer applying in commit order.
+- **Flush moves the mirror into cold.** A flush selects mirror rows by `seq`
+  range, writes them (tombstones become `deleted` markers in a newer segment),
+  and then prunes the mirror with `DELETE ... WHERE seq <= floor`
+  (`koldstore-flush/src/cleanup.rs`). Newer segments win over older ones
+  (`NewestFirstWinnerResolver`).
+- **Uncommitted work is invisible to decoding** (upstream
+  [#121](https://github.com/kalamdb/koldstore/issues/121)), which is why reads
+  after a write in the same transaction are refused.
+- There is no per-key catalog of cold presence by design
+  (`cold_segment_index` comment): cold existence is found through PK min/max
+  bounds and Parquet bloom filters.
+- Compaction (#89) and cold GC (#100) do not exist yet, so a cold row that is
+  "deleted" is only ever masked, never physically removed.
+
+## Option A: synchronous tombstone
+
+The `DELETE` (inside the user's transaction) writes an `op = 3` mirror row for
+each cold-only key it matched. Cheap per row, no data movement.
+
+Why it is harder than it looks:
+
+1. **It is a second writer to a table whose safety argument assumes one.** Two
+   properties must be added to the shared upsert SQL, on the exact path the live
+   applier depends on:
+   - a seq guard in all four builders (`... DO UPDATE SET ... WHERE
+     EXCLUDED.seq > mirror.seq`), so an older write can never overwrite a newer
+     one regardless of arrival order;
+   - a seq for the synchronous tombstone that is *greater than anything the
+     applier will later assign for an earlier-committed change to the same key*.
+     The only floor available (`seq_high_watermark`) reflects applied WAL, not
+     committed-but-undecoded WAL, so the allocation has to happen under the same
+     lock the applier holds (`lock_slot` / the apply lock), which puts a new
+     lock acquisition on every cold-touching `DELETE`.
+2. **The flush window.** A tombstone whose `seq` falls at or below a flush's
+   already-chosen prune floor is deleted from the mirror without ever reaching a
+   segment, and the cold row it masked comes back. Allocation therefore must be
+   above any in-progress flush's floor, again requiring the shared lock (flush
+   holds it across its publish window).
+3. **Same-key race, concrete.** `DELETE` sees `k` as cold-only and writes a
+   tombstone; a concurrent transaction commits `hydrate_pk(k)` / `update_row(k)`
+   between the statement snapshot and commit. Both orders must converge to a
+   state a native PostgreSQL run could have produced. With a seq guard and a
+   single allocator they do; without either, whichever write lands last wins.
+4. **`UPDATE` still needs a hydrate.** An update produces a new version, which
+   must live in the heap; the old cold copy is then masked (by the hot row).
+   So option A alone does not remove the need for hydration; it only covers
+   `DELETE`.
+5. **Unbounded growth.** With no compaction or cold GC, tombstones flush into
+   segments as delete markers and the physical cold rows they mask stay forever.
+6. **Semantics that native SQL provides for free are lost:** `BEFORE/AFTER
+   DELETE` triggers, `ON DELETE CASCADE`/foreign-key actions, row-level
+   security, `RETURNING`, and `DELETE ... RETURNING` row images would all have
+   to be re-implemented for rows the heap never held.
+
+Verdict: correct only with a shared-write-path change (seq guards + a
+lock-protected allocator) that is larger and riskier than every guard shipped so
+far, and it still leaves `UPDATE` unsolved.
+
+## Option B: hydrate on write (recommended)
+
+Before the native statement scans, materialize the cold-only rows it would
+match into the heap, using ordinary heap `INSERT`, then let the native statement
+run unchanged.
+
+- **No new mirror writer.** Hydration is a normal heap `INSERT`; capture, seq
+  assignment, ordering and flush behave exactly as for any insert. The native
+  `DELETE`/`UPDATE` then produces its own tombstone/new version through the
+  existing WAL path. Everything the one-writer argument needs stays true.
+- **Uniform for `UPDATE`, `DELETE` and `MERGE`,** including triggers, foreign
+  keys, RLS and `RETURNING`, because after hydration the rows are real heap rows.
+- **Machinery already exists.** The guard already computes, per statement, the
+  set of cold-only rows the predicate matches (merged-view rows minus heap-only
+  rows, for single-table WHERE shapes and, since the join/sub-query probe, for
+  joins). `hydrate_pk` already does "locate in merged view, then `INSERT ... ON
+  CONFLICT DO NOTHING` from `jsonb_populate_record`" as two statements because a
+  single statement whose target is also its source does not get a
+  `KoldMergeScan`.
+
+Design sketch:
+
+1. Trigger point: `ExecutorStart` for `UPDATE`/`DELETE` on a managed table with
+   cold segments, when the guard would otherwise reject (same eligibility rules
+   as the guard, including the skipped shapes).
+2. Compute the cold-only match set with the existing probe (a `SELECT` returning
+   full rows instead of a count), capped (`koldstore.max_hydrate_rows`, default
+   e.g. 10 000; over the cap the statement is rejected with today's message).
+3. Insert the rows with `jsonb_populate_recordset` + `ON CONFLICT DO NOTHING`
+   under `guard::with_guard_suspended`.
+4. `CommandCounterIncrement()` and advance the statement's snapshot command id
+   (`estate->es_snapshot->curcid`) so the scan that follows sees the hydrated
+   rows. This is the delicate step and needs its own review against PostgreSQL's
+   snapshot rules; the alternative is to hydrate in a first statement via the
+   planner hook rewriting to a `WITH` and is worse.
+5. Record the write for the same-transaction read check (#121); reads of the
+   table later in the transaction are refused exactly as after any other write.
+
+Costs and honest limits:
+
+- **Data movement and bloat.** Deleting N cold rows first inserts N heap rows,
+  then deletes them: 2N heap tuples and 2N WAL changes. Hence the cap; bulk cold
+  deletes remain an operator job (`update_row`/`delete_row` in batches, or a
+  future purge-by-predicate).
+- **Triggers fire twice in spirit.** User `AFTER INSERT` triggers run for the
+  hydrated rows. `hydrate_pk` already behaves this way; the hydration insert
+  should run with user triggers off where the caller may (`session_replication_role
+  = replica` needs privileges), otherwise document it.
+- **Concurrency.** Two transactions hydrating the same key converge through
+  `ON CONFLICT DO NOTHING`; a concurrent native update of a row that only one
+  side has hydrated is a normal write conflict.
+- **Unchanged limits:** statements the probe cannot reproduce (volatile
+  functions, CTEs, `CURRENT OF`, no primary key) stay rejected.
+
+## Option C: both (later, only if needed)
+
+Option B covers correctness. If very large cold deletes matter, add a *bulk
+purge* as a separate, explicitly-named operation that runs under the apply lock
+with the seq-guarded upsert, rather than making every plain `DELETE` a second
+mirror writer. That keeps the risky change opt-in and isolated.
+
+## Decision (proposed)
+
+Adopt Option B; do not build Option A. The prerequisites for A (seq guards in
+the shared upsert SQL and a lock-protected seq allocator) are only worth taking
+if a measured workload cannot live with the B cap, and then as the isolated bulk
+purge of Option C.
+
+## Work breakdown for Option B
+
+1. Refactor the probe to return matching rows (single-table `where_sql` and the
+   join/sub-query probe) with a row cap.
+2. `ExecutorStart` hook + hydration insert + snapshot advance; regression cases
+   for `DELETE`/`UPDATE`/`MERGE`, triggers, foreign keys, RLS, `RETURNING`,
+   prepared statements, savepoints, concurrent hydration of one key.
+3. Interaction tests with flush running concurrently (hydration during the
+   flush publish window) and with `koldstore.allow_same_txn_cold_reads`.
+4. Documentation: limitations matrix row moves from "rejected" to "supported up
+   to `max_hydrate_rows`".
+
+## Consequences
+
+- Plain SQL becomes usable on tiered tables without new shared-write-path risk.
+- Cold storage grows only by delete/version markers already produced by the
+  existing capture path; nothing new needs compaction to stay correct, though
+  #89/#100 remain needed for space reclamation.
+- The snapshot-advance step in `ExecutorStart` is the one piece of new
+  low-level risk and should be prototyped and reviewed first.

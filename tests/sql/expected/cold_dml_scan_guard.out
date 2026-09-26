@@ -225,13 +225,149 @@ INSERT 0 1
 ROLLBACK
 CREATE TABLE
 INSERT 0 2
- gap_delete_with_subquery
+CREATE TABLE
+INSERT 0 2
+CREATE TABLE
+    delete_using_cold
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+    update_from_cold
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ delete_in_subquery_cold
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ delete_not_in_subquery
+-------------------------
+ REJECTED scan matches=8
+(1 row)
+
+   update_exists_cold
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+  delete_self_join_cold
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ update_from_hot_only
+----------------------
+ ok: 2
+(1 row)
+
+ update_in_subquery_hot_only
+-----------------------------
+ ok: 2
+(1 row)
+
+ delete_using_empty_source
+---------------------------
+ ok: 0
+(1 row)
+
+ delete_in_empty_subquery
 --------------------------
  ok: 0
 (1 row)
 
- gap_delete_using
-------------------
+SET
+PREPARE
+ prepared_join_cold_first
+--------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ prepared_join_cold_second
+---------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ prepared_join_no_match
+------------------------
+ ok: 0
+(1 row)
+
+ prepared_join_cold_other_param
+--------------------------------
+ REJECTED scan matches=1
+(1 row)
+
+RESET
+ explain_delete_using
+----------------------
+ ok (explain)
+(1 row)
+
+CREATE FUNCTION
+ explain_mentions_probe_at
+---------------------------
+                         0
+(1 row)
+
+BEGIN
+ explain_analyze_delete_using
+------------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ROLLBACK
+CREATE TABLE
+INSERT 0 4
+ s4_managed
+------------
+ t
+(1 row)
+
+ s4_flushed
+------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ delete_using_cold_source_table
+--------------------------------
+ REJECTED scan matches=4
+(1 row)
+
+ delete_in_cold_source_no_match
+--------------------------------
+ ok: 0
+(1 row)
+
+SET
+ delete_using_guard_off
+------------------------
+ ok: 0
+(1 row)
+
+RESET
+BEGIN
+INSERT 0 1
+ delete_using_after_write_in_txn
+---------------------------------
+ ok: 0
+(1 row)
+
+ROLLBACK
+ gap_volatile_subquery
+-----------------------
+ ok: 0
+(1 row)
+
+ gap_cte_source
+----------------
  ok: 0
 (1 row)
 
@@ -279,6 +415,16 @@ INSERT 0 4
 
  composite_partial_key_no_match
 --------------------------------
+ ok: 0
+(1 row)
+
+ composite_update_from_cold
+----------------------------
+ REJECTED scan matches=2
+(1 row)
+
+ composite_delete_empty_subquery
+---------------------------------
  ok: 0
 (1 row)
 

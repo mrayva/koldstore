@@ -146,11 +146,75 @@ INSERT INTO sqlreg.s1 VALUES (13, 'h13', 0);
 SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id BETWEEN 1 AND 2$$) AS delete_between_after_write_in_txn;
 ROLLBACK;
 
--- Joins and subqueries are not reproduced standalone: still unguarded.
+-- ------------------------------------------------- joins and sub-queries
+-- The statement's own FROM/USING/sub-query conditions are turned into a probe
+-- SELECT at plan time, so cold-only target rows a join would have matched are
+-- detected the same way as for a single-table WHERE.
 CREATE TABLE sqlreg.s_other (id bigint PRIMARY KEY);
 INSERT INTO sqlreg.s_other VALUES (1), (2);
-SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other)$$) AS gap_delete_with_subquery;
-SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS gap_delete_using;
+CREATE TABLE sqlreg.s_hot (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.s_hot VALUES (50), (51);
+CREATE TABLE sqlreg.s_none (id bigint PRIMARY KEY);
+
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS delete_using_cold;
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'x' FROM sqlreg.s_other o WHERE s1.id = o.id$$) AS update_from_cold;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other)$$) AS delete_in_subquery_cold;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id NOT IN (SELECT id FROM sqlreg.s_other)$$) AS delete_not_in_subquery;
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'y' WHERE EXISTS (SELECT 1 FROM sqlreg.s_other o WHERE o.id = s1.id)$$) AS update_exists_cold;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 a USING sqlreg.s1 b WHERE a.id = b.id AND b.id < 3$$) AS delete_self_join_cold;
+-- joins that only reach hot rows, or nothing, keep working
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'hot-joined' FROM sqlreg.s_hot h WHERE s1.id = h.id$$) AS update_from_hot_only;
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'hot-in' WHERE id IN (SELECT id FROM sqlreg.s_hot)$$) AS update_in_subquery_hot_only;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_none n WHERE s1.id = n.id$$) AS delete_using_empty_source;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_none)$$) AS delete_in_empty_subquery;
+
+-- the probe survives plan caching, bound parameters and reuse
+SET plan_cache_mode = force_generic_plan;
+PREPARE del_in_sub(bigint) AS DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE id >= $1);
+SELECT sqlreg.try($$EXECUTE del_in_sub(1)$$) AS prepared_join_cold_first;
+SELECT sqlreg.try($$EXECUTE del_in_sub(1)$$) AS prepared_join_cold_second;
+SELECT sqlreg.try($$EXECUTE del_in_sub(100)$$) AS prepared_join_no_match;
+SELECT sqlreg.try($$EXECUTE del_in_sub(2)$$) AS prepared_join_cold_other_param;
+RESET plan_cache_mode;
+
+-- EXPLAIN builds the plan (carrying the probe) without changing anything and
+-- prints nothing extra; EXPLAIN ANALYZE runs the statement, so it is guarded too
+SELECT sqlreg.try($$EXPLAIN (COSTS OFF) DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS explain_delete_using;
+CREATE FUNCTION sqlreg.explain_text(stmt text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE line text; acc text := '';
+BEGIN
+  FOR line IN EXECUTE 'EXPLAIN (VERBOSE, COSTS OFF) ' || stmt LOOP acc := acc || line || E'\n'; END LOOP;
+  RETURN acc;
+END $$;
+SELECT position('koldstore' IN sqlreg.explain_text($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$)) AS explain_mentions_probe_at;
+BEGIN;
+SELECT sqlreg.try($$EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS explain_analyze_delete_using;
+ROLLBACK;
+
+-- a second managed table with cold data as the source: read hot + cold too
+CREATE TABLE sqlreg.s4 (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.s4 SELECT g FROM generate_series(1, 4) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.s4'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS s4_managed;
+SELECT sqlreg.flush_table('sqlreg.s4'::regclass) IS NOT NULL AS s4_flushed;
+SELECT sqlreg.settle();
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s4 x WHERE s1.id = x.id$$) AS delete_using_cold_source_table;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s4 WHERE id > 100)$$) AS delete_in_cold_source_no_match;
+
+-- the switch and the same-transaction rule apply here too
+SET koldstore.guard_scan_writes = off;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS delete_using_guard_off;
+RESET koldstore.guard_scan_writes;
+BEGIN;
+INSERT INTO sqlreg.s1 VALUES (70, 'h70', 0);
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS delete_using_after_write_in_txn;
+ROLLBACK;
+
+-- still unguarded: statements whose conditions cannot be re-run faithfully
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE random() < 2)$$) AS gap_volatile_subquery;
+SELECT sqlreg.try($$WITH c AS (SELECT id FROM sqlreg.s_other) DELETE FROM sqlreg.s1 USING c WHERE s1.id = c.id$$) AS gap_cte_source;
 
 -- ------------------------------------------------ tables without cold data
 SELECT sqlreg.try($$UPDATE sqlreg.s2 SET val = 'z' WHERE id < 4$$) AS hot_only_range;
@@ -169,3 +233,5 @@ SELECT sqlreg.try($$UPDATE sqlreg.s3 SET val = 'x' WHERE a > 1$$) AS composite_l
 SELECT sqlreg.try($$UPDATE sqlreg.s3 SET val = 'x' WHERE b >= 30$$) AS composite_second_column_range;
 SELECT sqlreg.try($$DELETE FROM sqlreg.s3 WHERE a = 2$$) AS composite_partial_key;
 SELECT sqlreg.try($$DELETE FROM sqlreg.s3 WHERE a = 99$$) AS composite_partial_key_no_match;
+SELECT sqlreg.try($$UPDATE sqlreg.s3 SET val = 'x' FROM sqlreg.s_other o WHERE s3.a = o.id$$) AS composite_update_from_cold;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s3 WHERE a IN (SELECT id FROM sqlreg.s_none)$$) AS composite_delete_empty_subquery;

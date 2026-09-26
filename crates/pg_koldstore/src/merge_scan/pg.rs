@@ -64,6 +64,31 @@ const PRIVATE_ORDER_DESCENDING_INDEX: i32 = 6;
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
     static DISABLE_HOOK: RefCell<bool> = const { RefCell::new(false) };
+    /// Managed relations whose scans must stay plain heap scans (no KoldMergeScan
+    /// path), while every other managed relation is still read hot + cold.
+    static HOT_ONLY_RELATIONS: RefCell<Vec<pg_sys::Oid>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Marks `relation` hot-only for planning while alive (restored on drop, so an
+/// error raised by nested SQL cannot leave it stuck).
+pub(crate) struct HotOnlyRelation(pg_sys::Oid);
+
+impl HotOnlyRelation {
+    pub(crate) fn new(relation: pg_sys::Oid) -> Self {
+        HOT_ONLY_RELATIONS.with(|relations| relations.borrow_mut().push(relation));
+        Self(relation)
+    }
+}
+
+impl Drop for HotOnlyRelation {
+    fn drop(&mut self) {
+        HOT_ONLY_RELATIONS.with(|relations| {
+            let mut relations = relations.borrow_mut();
+            if let Some(position) = relations.iter().rposition(|oid| *oid == self.0) {
+                relations.remove(position);
+            }
+        });
+    }
 }
 
 #[cfg(feature = "pg_test")]
@@ -397,6 +422,9 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         return;
     }
     if (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+        return;
+    }
+    if HOT_ONLY_RELATIONS.with(|relations| relations.borrow().contains(&(*rte).relid)) {
         return;
     }
     if (*root).parse.is_null() {

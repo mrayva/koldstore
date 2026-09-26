@@ -53,6 +53,9 @@ mod live {
         prior_write: bool,
         /// A MERGE with an action that changes existing target rows.
         merge_changes_rows: bool,
+        /// The statement joins or uses a sub-query: the probe SQL prepared at plan
+        /// time (`hooks::dml_planner`) and the statement's parameter values.
+        join_probe: Option<(String, Vec<crate::hooks::dml_planner::ProbeParam>)>,
     }
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -244,8 +247,16 @@ mod live {
                     table_oid,
                 )
             };
+            let join_probe = if where_sql.is_none() && (*query_desc).operation != pg_sys::CmdType::CMD_MERGE {
+                crate::hooks::dml_planner::probe_sql_of((*planned).planTree).and_then(|sql| {
+                    crate::hooks::dml_planner::collect_params((*query_desc).params).map(|params| (sql, params))
+                })
+            } else {
+                None
+            };
             Some(GuardCandidate {
                 table_oid,
+                join_probe,
                 raw,
                 where_sql,
                 single_valued,
@@ -279,7 +290,42 @@ mod live {
             }
         }
         enforce_generic_cold_match_guard(candidate);
+        enforce_join_cold_match_guard(candidate);
         enforce_unverifiable_merge_guard(candidate);
+    }
+
+    /// The same check for a statement that joins or uses a sub-query: counts the
+    /// cold-only target rows its join matches with the probe SELECT prepared at
+    /// plan time. Skipped under the same conditions as the single-table check.
+    fn enforce_join_cold_match_guard(candidate: &GuardCandidate) {
+        let Some((sql, params)) = candidate.join_probe.as_ref() else {
+            return;
+        };
+        if candidate.prior_write || crate::sql::cold_dml::guard::suspended() {
+            return;
+        }
+        let has_cold = matches!(
+            crate::catalog::cache::cached_manifest_planner_hint(candidate.table_oid),
+            Ok(Some((segments, _))) if segments > 0
+        );
+        if !has_cold {
+            return;
+        }
+        let Ok(cold_matches) = crate::sql::cold_dml::guard::count_join_cold_only_matches(candidate.table_oid, sql, params)
+        else {
+            return;
+        };
+        if cold_matches > 0 {
+            let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
+                .unwrap_or_else(|_| "?".to_string());
+            pgrx::error!(
+                "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- its join or sub-query \
+                 also matches {cold_matches} cold row(s) that a plain statement cannot modify (they live in \
+                 Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/\
+                 delete_row(), or narrow the statement to hot rows; if those keys were changed moments ago, \
+                 call koldstore.wait_for_async_mirror() and retry (upstream issue #122)"
+            );
+        }
     }
 
     /// A MERGE that changes target rows through a join the exact-PK analysis

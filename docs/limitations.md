@@ -54,8 +54,12 @@ PostgreSQL operation keeps its normal semantics across both tiers.
     with a second read of cold storage, so it costs a cold scan for such
     statements on a table that has cold data (`koldstore.guard_scan_writes`,
     default on, turns it off). It is skipped, not rejected, when it cannot be
-    trusted: the clause cannot be reproduced (joins, `USING`, subqueries,
-    volatile functions), or the transaction already wrote the table.
+    trusted: the clause cannot be reproduced (volatile functions, CTEs,
+    `WHERE CURRENT OF`), or the transaction already wrote the table.
+    Joins, `USING` and sub-queries are handled too: the statement is turned into
+    an equivalent `SELECT DISTINCT <primary key>` at plan time and counted the
+    same way, with the target table read hot-only and every other managed table
+    read hot + cold.
   - A `MERGE` that updates or deletes target rows through a multi-row join is
     rejected when the table has cold data, because the join only matches hot
     rows and the source keys are gone once it ends. `INSERT`-only and
@@ -115,7 +119,8 @@ any row or object is changed.
 | `INSERT` of an existing hot or cold key | refused | `cold_dml_guard` |
 | `UPDATE`/`DELETE` by primary key reaching a cold-only row | refused | `cold_dml_guard` |
 | `UPDATE`/`DELETE` by range, `NOT IN`, `OR`, non-key column, function, no `WHERE` | refused if it also matches cold-only rows | `cold_dml_scan_guard` |
-| `UPDATE`/`DELETE` with a join, `USING` or subquery | **not guarded** (only hot rows change) | `cold_dml_scan_guard` |
+| `UPDATE`/`DELETE` with a join, `USING` or sub-query (`IN`, `EXISTS`, `NOT IN`, self-join, another managed table as source) | refused if it also matches cold-only target rows | `cold_dml_scan_guard` |
+| Same, but with volatile functions, a CTE or `WHERE CURRENT OF` | **not guarded** (only hot rows change) | `cold_dml_scan_guard` |
 | `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
