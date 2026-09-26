@@ -1,0 +1,154 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 4
+ managed_with_cold
+-------------------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+CREATE TABLE
+ managed_hot_only
+------------------
+ t
+(1 row)
+
+ koldstore.allow_same_txn_cold_reads
+-------------------------------------
+ off
+(1 row)
+
+BEGIN
+ read_only_txn
+---------------
+             4
+(1 row)
+
+COMMIT
+BEGIN
+INSERT 0 1
+ hot_only_table_after_write
+----------------------------
+                          1
+(1 row)
+
+COMMIT
+BEGIN
+INSERT 0 1
+ other_table_after_write
+-------------------------
+                       4
+(1 row)
+
+COMMIT
+BEGIN
+ deleted
+---------
+ true
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.v1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+ROLLBACK
+ rolled_back_delete_still_visible
+----------------------------------
+                                1
+(1 row)
+
+BEGIN
+ updated
+---------
+ true
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.v1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+ROLLBACK
+BEGIN
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.v1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+ROLLBACK
+BEGIN
+COPY 1
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.v1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+ROLLBACK
+BEGIN
+INSERT 0 1
+           QUERY PLAN
+--------------------------------
+ Index Scan using v1_pkey on v1
+   Index Cond: (id = 12)
+(2 rows)
+
+ROLLBACK
+BEGIN
+SET
+ deleted
+---------
+ true
+(1 row)
+
+ id
+----
+  1
+(1 row)
+
+ROLLBACK
+BEGIN
+SAVEPOINT
+ deleted
+---------
+ true
+(1 row)
+
+ROLLBACK
+ after_rollback_to_savepoint
+-----------------------------
+                           4
+(1 row)
+
+SAVEPOINT
+ deleted
+---------
+ true
+(1 row)
+
+RELEASE
+psql:<PATH>: ERROR:  koldstore: refusing to read cold data of managed table sqlreg.v1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+ROLLBACK
+BEGIN
+ updated_3
+-----------
+ true
+(1 row)
+
+ updated_4
+-----------
+ true
+(1 row)
+
+INSERT 0 1
+INSERT 0 1
+COMMIT
+ settle
+--------
+
+(1 row)
+
+ id | val
+----+-----
+  1 | v1
+  2 | v2
+  3 | u3
+  4 | u4
+ 20 | a
+ 21 | b
+(6 rows)
+

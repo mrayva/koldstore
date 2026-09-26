@@ -333,6 +333,12 @@ unsafe extern "C-unwind" fn merge_scan_xact_callback(
     match event {
         pg_sys::XactEvent::XACT_EVENT_ABORT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
             abandon_scan_states_after_abort();
+            crate::txn_writes::clear();
+        }
+        pg_sys::XactEvent::XACT_EVENT_COMMIT
+        | pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT
+        | pg_sys::XactEvent::XACT_EVENT_PREPARE => {
+            crate::txn_writes::clear();
         }
         _ => {}
     }
@@ -341,12 +347,19 @@ unsafe extern "C-unwind" fn merge_scan_xact_callback(
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn merge_scan_subxact_callback(
     event: pg_sys::SubXactEvent::Type,
-    _my_subid: pg_sys::SubTransactionId,
-    _parent_subid: pg_sys::SubTransactionId,
+    my_subid: pg_sys::SubTransactionId,
+    parent_subid: pg_sys::SubTransactionId,
     _arg: *mut std::ffi::c_void,
 ) {
-    if event == pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB {
-        abandon_scan_states_after_abort();
+    match event {
+        pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
+            abandon_scan_states_after_abort();
+            crate::txn_writes::on_subxact_abort(my_subid);
+        }
+        pg_sys::SubXactEvent::SUBXACT_EVENT_COMMIT_SUB => {
+            crate::txn_writes::on_subxact_commit(my_subid, parent_subid);
+        }
+        _ => {}
     }
 }
 
@@ -449,6 +462,11 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         }
     }
 
+    // Cold data can contribute from here on. Constructs that only make sense on a
+    // real heap must be refused now rather than quietly running against the hot
+    // side alone (upstream #125).
+    reject_unsupported_cold_read_features(root, rti, rte, table_oid);
+
     let segment_count = known_manifest.map_or(0, |(segment_count, _)| segment_count);
     let primary_key_attnums = snapshot
         .as_ref()
@@ -479,6 +497,43 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         },
         &raw const PATH_METHODS,
     );
+}
+
+/// Fails a plan before it runs when a query construct cannot be honoured over
+/// hot + cold data: `TABLESAMPLE` (the sample method only ever sees the hot heap,
+/// so cold rows would come back unsampled) and row-level locks
+/// (`FOR UPDATE` / `FOR SHARE` need a heap `ctid` that cold rows do not have).
+///
+/// Only called once cold storage can contribute, so a managed table with no cold
+/// data keeps its ordinary plans.
+unsafe fn reject_unsupported_cold_read_features(
+    root: *mut pg_sys::PlannerInfo,
+    rti: pg_sys::Index,
+    rte: *mut pg_sys::RangeTblEntry,
+    table_oid: pg_sys::Oid,
+) {
+    let feature = if !(*rte).tablesample.is_null() {
+        Some("TABLESAMPLE")
+    } else if (0..list_len((*root).rowMarks)).any(|index| {
+        let mark = list_nth_ptr((*root).rowMarks, index).cast::<pg_sys::PlanRowMark>();
+        !mark.is_null() && ((*mark).rti == rti || (*mark).prti == rti)
+    }) {
+        Some("row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE)")
+    } else {
+        None
+    };
+    if let Some(feature) = feature {
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "koldstore: {feature} is not supported on managed table {} while it has cold data \
+                 (upstream issue #125)",
+                crate::txn_writes::relation_display_name(table_oid)
+            ),
+            "cold rows live in Parquet segments, not in the heap; run the query on a table without cold data, or select the rows first and lock them by primary key in a separate statement"
+        );
+    }
 }
 
 #[pgrx::pg_guard]
@@ -815,6 +870,11 @@ unsafe fn initialize_fallback_scan(
     FALLBACK_INITIALIZATIONS.fetch_add(1, Ordering::Relaxed);
 
     let table_oid = (*(*node).ss.ss_currentRelation).rd_id;
+    // Plain EXPLAIN builds the scan without reading; everything else is about to
+    // consult cold storage (upstream #121 fail-closed check).
+    if eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as c_int) == 0 {
+        crate::txn_writes::enforce_before_cold_read(table_oid);
+    }
     let relation_owner = (*(*node).ss.ss_currentRelation)
         .rd_rel
         .as_ref()

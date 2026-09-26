@@ -64,6 +64,12 @@ mod live {
             // Opening SPI before standard_ExecutorEnd can fail and used to turn
             // managed DML into a silent false negative.
             let changed_relation_oids = changed_relation_oids(query_desc);
+            // Plain `EXPLAIN` runs ExecutorEnd without executing anything.
+            let executed = !query_desc.is_null()
+                && !(*query_desc).estate.is_null()
+                && (*(*query_desc).estate).es_top_eflags
+                    & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int)
+                    == 0;
             // Cold-DML write guard (upstream #122, Option B) phase 1: pure
             // plan-tree pointer walking, no SPI -- must happen here, before
             // `previous`/`standard_ExecutorEnd` may free the executor state
@@ -75,11 +81,18 @@ mod live {
             } else {
                 pg_sys::standard_ExecutorEnd(query_desc);
             }
-            if changed_relation_oids
+            let managed_changed: Vec<pg_sys::Oid> = changed_relation_oids
                 .into_iter()
-                .any(crate::catalog::cache::is_managed_relation)
-            {
+                .filter(|oid| crate::catalog::cache::is_managed_relation(*oid))
+                .collect();
+            if !managed_changed.is_empty() {
                 crate::worker::wake::mark_managed_dml_pending();
+                if executed {
+                    // Feeds the same-transaction cold-read check (upstream #121).
+                    for oid in managed_changed {
+                        crate::txn_writes::record_managed_write(oid);
+                    }
+                }
             }
             crate::memory::release_process_heap_if_pending();
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.

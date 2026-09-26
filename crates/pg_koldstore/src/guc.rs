@@ -26,6 +26,8 @@ static LOG_LEVEL: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::n
 #[cfg(feature = "pg")]
 static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
+static ALLOW_SAME_TXN_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -136,6 +138,14 @@ pub fn define_gucs() {
         c"Enables KoldStore merge scans.",
         c"Required for managed-table SELECT. When off, KoldMergeScan errors instead of allowing an incorrect heap-only read.",
         &ENABLE_MERGE_SCAN,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.allow_same_txn_cold_reads",
+        c"Allows reading cold data of a managed table already modified in this transaction.",
+        c"By default a managed-table read that must consult cold storage fails once the same transaction has modified that table: logical decoding cannot see uncommitted work, so a cold row for a key changed in this transaction could be returned stale (upstream #121). Turn on to accept that risk.",
+        &ALLOW_SAME_TXN_COLD_READS,
         GucContext::Userset,
         flags,
     );
@@ -333,6 +343,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "on",
         },
         GucDefinition {
+            name: ALLOW_SAME_TXN_COLD_READS_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
             name: settings::COLD_READS_GUC,
             internal: false,
             default_value: settings::DEFAULT_COLD_READS,
@@ -448,6 +463,7 @@ pub const fn definitions() -> &'static [GucDefinition] {
 /// Names of GUCs owned by pg-koldstore.
 pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
+pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
 pub const INTERNAL_ASYNC_MIRROR_WORKER_GUC: &str = "koldstore.internal_async_mirror_worker";
@@ -489,6 +505,21 @@ fn read_user_id_config_option() -> Option<String> {
     };
     let trimmed = setting.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether a read may consult cold data of a managed table this transaction
+/// already modified (upstream #121 fail-closed check disabled).
+#[must_use]
+pub fn allow_same_txn_cold_reads() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        ALLOW_SAME_TXN_COLD_READS.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
 }
 
 /// Whether the planner may inject KoldMergeScan paths.

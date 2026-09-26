@@ -1,0 +1,85 @@
+CREATE TABLE
+INSERT 0 6
+ managed
+---------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+INSERT 0 1
+ settled
+---------
+ t
+(1 row)
+
+CREATE TABLE
+ managed_hot_only
+------------------
+ t
+(1 row)
+
+INSERT 0 5
+ baseline
+----------
+        7
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: TABLESAMPLE is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+psql:<PATH>: ERROR:  koldstore: TABLESAMPLE is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+ hot_only_table_tablesample
+----------------------------
+                          5
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+psql:<PATH>: ERROR:  koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+psql:<PATH>: ERROR:  koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+psql:<PATH>: ERROR:  koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+psql:<PATH>: ERROR:  koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.u1 while it has cold data (upstream issue #125)
+ id
+----
+  3
+(1 row)
+
+ id
+-----
+ 100
+(1 row)
+
+psql:<PATH>: ERROR:  KoldMergeScan projection failed: KoldMergeScan cannot materialize PostgreSQL system attribute -1 (ctid/xmin/... exist only on heap rows, not on cold rows; remove it from the query, or use the primary key to identify rows)
+ hot_only_table_ctid
+---------------------
+                   5
+(1 row)
+
+BEGIN
+ repeatable_read
+-----------------
+               7
+(1 row)
+
+COMMIT
+BEGIN
+ serializable
+--------------
+            7
+(1 row)
+
+COMMIT
+CREATE TABLE
+psql:<PATH>: ERROR:  TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency
+psql:<PATH>: ERROR:  TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency
+ rows_after_truncate
+---------------------
+                   7
+(1 row)
+
+ child_still_there
+-------------------
+ t
+(1 row)
+

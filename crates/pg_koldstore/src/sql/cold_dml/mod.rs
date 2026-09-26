@@ -143,7 +143,13 @@ fn locate_row_json(
     // than `Ok(None)`. Confirmed live: hydrate_pk on a nonexistent key
     // raised exactly this error before this match was added. Map it to
     // "not found" explicitly instead of propagating it as a real failure.
-    match pgrx::Spi::get_one_with_args::<pgrx::JsonB>(&locate_sql, &locate_args) {
+    // Internal probe: must keep working in a transaction that already wrote the
+    // table (the write guard runs after native DML), so it is exempt from the
+    // same-transaction cold-read check.
+    let located = crate::txn_writes::with_check_suppressed(|| {
+        pgrx::Spi::get_one_with_args::<pgrx::JsonB>(&locate_sql, &locate_args)
+    });
+    match located {
         Ok(row_json) => Ok(row_json),
         Err(pgrx::spi::Error::InvalidPosition) => Ok(None),
         Err(error) => Err(error.to_string()),

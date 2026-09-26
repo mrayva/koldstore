@@ -25,9 +25,15 @@ The original relation remains a PostgreSQL heap, but a cold row returned from
 Parquet is not a heap tuple. The preview therefore does not claim that every
 PostgreSQL operation keeps its normal semantics across both tiers.
 
-- Mirror capture is asynchronous and sees committed WAL only. It does not
+- Mirror capture is asynchronous and sees committed WAL only, so it cannot
   provide read-your-own-uncommitted-writes for a key with an older cold version
-  ([#121](https://github.com/kalamdb/koldstore/issues/121)).
+  ([#121](https://github.com/kalamdb/koldstore/issues/121)). Rather than return
+  a stale cold row, a read that has to consult cold data **fails** once the same
+  transaction (or an enclosing one) has written that table: `COMMIT`, call
+  `wait_for_async_mirror()`, then read. Reads of other tables, of tables with no
+  cold data, and plain `EXPLAIN` are unaffected, and a rolled-back savepoint
+  forgets its writes. `SET koldstore.allow_same_txn_cold_reads = on` accepts the
+  stale-read risk instead.
 - `wait_for_async_mirror()` fences commits up to a captured WAL boundary. Call
   it before acquiring a fixed `REPEATABLE READ` or `SERIALIZABLE` snapshot; it
   cannot advance an existing snapshot or decode the caller's uncommitted work.
@@ -36,12 +42,16 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   hot index, not a global hot+cold constraint index
   ([#122](https://github.com/kalamdb/koldstore/issues/122)).
 - Cold rows have no heap `ctid`, `xmin`, tuple lock, or SSI predicate lock.
-  System-column projections and `SELECT ... FOR UPDATE/SHARE` are unsupported;
-  `SERIALIZABLE` is not a PostgreSQL-equivalent guarantee for cold reads.
-- Partitioned/inherited/foreign/temporary/unlogged relations, `TABLESAMPLE`,
-  and `TRUNCATE ... CASCADE` are outside the supported preview contract unless
-  a specific test documents otherwise
-  ([#125](https://github.com/kalamdb/koldstore/issues/125)).
+  When cold data can contribute, `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY
+  SHARE`, `TABLESAMPLE` and system-column projections (`ctid`, `xmin`, ...) are
+  refused with an error naming the table and the construct; a managed table with
+  no cold data keeps the ordinary PostgreSQL behavior. `TRUNCATE` (including
+  `CASCADE`) is refused before anything is changed. `SERIALIZABLE` runs, but it
+  is not a PostgreSQL-equivalent guarantee for cold reads.
+- Partitioned/inherited/foreign/temporary/unlogged relations are outside the
+  supported preview contract unless a specific test documents otherwise
+  ([#125](https://github.com/kalamdb/koldstore/issues/125)); the regression case
+  `tests/sql/unsupported_constructs.sql` pins the constructs above.
 - Table/schema renames after cold publication are unsafe because object paths
   still depend on mutable names. Other schema evolution can apply in PostgreSQL
   before KoldStore discovers it is unsupported; defaults and constraints are

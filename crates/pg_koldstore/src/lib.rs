@@ -23,6 +23,8 @@ pub(crate) mod security;
 pub mod settings;
 pub mod spi;
 pub mod sql;
+#[cfg(feature = "pg")]
+pub(crate) mod txn_writes;
 /// Cluster-supervised PostgreSQL background work adapter.
 #[cfg(feature = "pg")]
 pub mod worker;

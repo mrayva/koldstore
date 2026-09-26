@@ -182,6 +182,10 @@ pub(crate) fn column_attnum_map(
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "_cold_insert_guard_check", schema = "koldstore")]
 pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB, table_name: &str) {
+    // Every INSERT path fires this row trigger, COPY included (which never
+    // reaches ExecutorEnd), so record the write for the same-transaction
+    // cold-read check (upstream #121) before anything can return early.
+    crate::txn_writes::record_managed_write(table_oid);
     if suspended() {
         return;
     }
@@ -283,6 +287,51 @@ $$
     let drop_function_sql = format!("DROP FUNCTION IF EXISTS {function_name}()");
 
     vec![drop_trigger_sql, drop_function_sql, function_sql, trigger_sql]
+}
+
+/// Installs (or refreshes) the insert guard on every active managed table.
+///
+/// Tables managed by a release older than the cold-DML guard have no trigger;
+/// the `ALTER EXTENSION ... UPDATE` scripts call this once so they get it
+/// too. Idempotent: `plan_insert_guard` drops before it creates. Runs with the
+/// caller's privileges, so it needs the same rights as `manage_table` (table
+/// owner, CREATE on `koldstore`); an update script runs as a superuser.
+///
+/// Returns the number of tables processed.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "internal_attach_insert_guards", schema = "koldstore")]
+fn internal_attach_insert_guards() -> i64 {
+    // Schema and relation names come straight from pg_class rather than through
+    // `QualifiedTableName::parse`, which rejects some legal quoted identifiers.
+    let relations: Vec<(String, String)> = pgrx::Spi::connect(|client| {
+        client
+            .select(
+                "SELECT n.nspname::text, c.relname::text FROM koldstore.schemas s \
+                 JOIN pg_catalog.pg_class c ON c.oid = s.table_oid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE s.active ORDER BY s.table_oid",
+                None,
+                &[],
+            )?
+            .map(|row| Ok((row.get::<String>(1)?, row.get::<String>(2)?)))
+            .collect::<Result<Vec<_>, pgrx::spi::Error>>()
+    })
+    .unwrap_or_else(|error| pgrx::error!("attach insert guards failed: {error}"))
+    .into_iter()
+    .filter_map(|(schema, name)| Some((schema?, name?)))
+    .collect();
+    for (schema, name) in &relations {
+        let source = koldstore_common::QualifiedTableName {
+            schema: Some(schema.clone()),
+            name: name.clone(),
+        };
+        for statement in plan_insert_guard(&source) {
+            pgrx::Spi::run(&statement).unwrap_or_else(|error| {
+                pgrx::error!("attach insert guards failed for {}: {error}", source.quoted());
+            });
+        }
+    }
+    i64::try_from(relations.len()).unwrap_or(i64::MAX)
 }
 
 /// Idempotently tears down the insert guard trigger/function for one

@@ -76,6 +76,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
 | `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
 | `koldstore.explain_pipeline` | bool | `off` | When `on`, `EXPLAIN (FORMAT JSON)` includes the nested `KoldStore Pipeline` diagnostic tree. `EXPLAIN … VERBOSE` also enables it for JSON. Default keeps concise Custom Scan properties plus real `Plans` children. |
+| `koldstore.allow_same_txn_cold_reads` | bool | `off` | When `off`, a read that must consult cold data of a managed table fails if the current transaction already modified that table (a cold row for a changed key could otherwise come back stale, because the async mirror only sees committed WAL; upstream #121). `on` accepts that risk. |
 | `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
 | `koldstore.max_merge_seen_keys` | int | `1000000` | Per-scan cap on exact PK identities retained by `KoldMergeScan` (fail-closed when exceeded). Protects backends from accidental full-table scans. `0` disables the cap. Clamped to `0..=100000000`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
@@ -677,12 +678,14 @@ changed.
   manifest state pending.
 - Standard SQL cold-only `UPDATE` affects zero rows in the MVP.
 
-The following explicit cold DML SQL functions are planned but not yet exposed by
-the extension (tracked: https://github.com/kalamdb/koldstore/issues/55):
-
-- `koldstore.hydrate_pk(...)`
-- `koldstore.update_row(...)`
-- `koldstore.delete_row(...)`
+Explicit cold-row DML is available through `koldstore.hydrate_pk(table, pk)`,
+`koldstore.update_row(table, pk, patch, lookup_cold => true)` and
+`koldstore.delete_row(table, pk, lookup_cold => true)`. A `BEFORE INSERT` guard
+trigger on each managed table rejects an `INSERT` whose primary key already
+exists hot or cold, and `UPDATE`/`DELETE`/`MERGE` statements that would need to
+change a cold-only key are rejected rather than silently matching nothing
+(upstream #122). Rows changed in a transaction are visible to later reads only
+after `COMMIT`; see `koldstore.allow_same_txn_cold_reads` above.
 
 ## Changes and Operations
 
@@ -747,3 +750,19 @@ Existing flat `hot_row_limit` catalog JSON remains readable; new policy writes
 use tagged `flush_policy` JSON and require no eager rewrite. The `ALTER TABLE`
 hook becomes available after installing the new shared library and restarting
 PostgreSQL with KoldStore in `shared_preload_libraries`.
+
+### Extension upgrades
+
+`ALTER EXTENSION koldstore UPDATE` needs a `koldstore--<from>--<to>.sql` file.
+pgrx only generates full install snapshots, so these are written by hand in
+`crates/pg_koldstore/sql/` and shipped by `cargo pgrx install`. The
+`0.1.11-preview.0` -> `0.1.12-preview.0` script adds the cold-row functions,
+replaces `manage_table` (new optional parquet tuning parameters), and installs
+the insert guard trigger on tables managed under 0.1.11.
+
+After adding or changing an upgrade script, run
+`scripts/check-upgrade-path.sh <from-version>` against a cluster that has the new
+build installed and loaded. It upgrades a scratch database and diffs its
+catalog (functions, tables, columns, constraints, indexes, triggers, ACLs)
+against a freshly created one. Restart PostgreSQL after installing a new shared
+library; a backend that loaded the old library cannot call new functions.

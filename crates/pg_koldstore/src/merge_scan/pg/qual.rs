@@ -128,7 +128,8 @@ pub(super) unsafe fn required_scan_projection(
 
     if let Some(attnum) = system_column {
         return Err(format!(
-            "KoldMergeScan cannot materialize PostgreSQL system attribute {attnum}"
+            "KoldMergeScan cannot materialize PostgreSQL system attribute {attnum} (ctid/xmin/... exist only on heap rows, not on cold rows; \
+             remove it from the query, or use the primary key to identify rows)"
         ));
     }
 
