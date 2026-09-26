@@ -12,28 +12,27 @@ use crate::{ident, KoldstoreError, Result};
 pub struct TableName(String);
 
 impl TableName {
-    /// Parses a one- or two-part unquoted PostgreSQL table name.
+    /// Parses a one- or two-part PostgreSQL table name, as typed or as
+    /// `regclass::text` prints it: a part may be double-quoted (`"MixedCase"`,
+    /// `"select"`) and is stored without the quotes. The part's content must
+    /// still be a plain identifier (ASCII letters, digits, `_`).
     ///
     /// # Errors
     ///
     /// Returns an error when the table name is blank, multipart beyond
-    /// `schema.table`, or contains unsafe identifier characters.
+    /// `schema.table`, or a part contains unsafe identifier characters.
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref().trim();
-        let parts = value.split('.').collect::<Vec<_>>();
-        let valid = match parts.as_slice() {
-            [name] => ident::is_safe_identifier(name),
-            [schema, name] => ident::is_safe_identifier(schema) && ident::is_safe_identifier(name),
-            _ => false,
-        };
+        let valid = split_name_parts(value).filter(|parts| {
+            matches!(parts.len(), 1 | 2) && parts.iter().all(|part| ident::is_safe_identifier(part))
+        });
 
-        if valid {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(KoldstoreError::InvalidIdentifier {
+        match valid {
+            Some(parts) => Ok(Self(parts.join("."))),
+            None => Err(KoldstoreError::InvalidIdentifier {
                 kind: "table name",
                 value: value.to_string(),
-            })
+            }),
         }
     }
 
@@ -67,6 +66,46 @@ impl TableName {
                 ident::quote_ident(self.relation())
             ),
             None => ident::quote_ident(self.relation()),
+        }
+    }
+}
+
+/// Splits `schema.name` text into its parts, honouring double-quoted parts
+/// (with `""` as an escaped quote) so a dot inside quotes does not split.
+fn split_name_parts(value: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut chars = value.chars().peekable();
+    loop {
+        let mut part = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    '"' if chars.peek() == Some(&'"') => {
+                        chars.next();
+                        part.push('"');
+                    }
+                    '"' => break,
+                    character => part.push(character),
+                }
+            }
+        } else {
+            while let Some(&character) = chars.peek() {
+                if character == '.' {
+                    break;
+                }
+                part.push(character);
+                chars.next();
+            }
+        }
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(part);
+        match chars.next() {
+            None => return Some(parts),
+            Some('.') => {}
+            Some(_) => return None,
         }
     }
 }

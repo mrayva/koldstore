@@ -1,0 +1,317 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 3
+ mixed_case_manage
+-------------------
+ managed
+(1 row)
+
+ mixed_case_flush
+------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ mixed_case_read
+-----------------
+ ok: 1
+(1 row)
+
+ mixed_case_insert_cold_key
+----------------------------
+ REJECTED insert
+(1 row)
+
+    mixed_case_update_cold_key
+-----------------------------------
+ REJECTED write pk={"OrderId":"2"}
+(1 row)
+
+ mixed_case_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ mixed_case_unmanaged
+----------------------
+ t
+(1 row)
+
+ mixed_case_rows_after_unmanage
+--------------------------------
+                              3
+(1 row)
+
+ mixed_case_helper_objects_left
+--------------------------------
+                              0
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ reserved_manage
+-----------------
+ managed
+(1 row)
+
+ reserved_flush
+----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ reserved_read
+---------------
+ ok: 1
+(1 row)
+
+ reserved_insert_cold_key
+--------------------------
+ REJECTED insert
+(1 row)
+
+    reserved_update_cold_key
+--------------------------------
+ REJECTED write pk={"user":"2"}
+(1 row)
+
+  reserved_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ reserved_unmanaged
+--------------------
+ t
+(1 row)
+
+ reserved_rows_after_unmanage
+------------------------------
+                            3
+(1 row)
+
+ reserved_helper_objects_left
+------------------------------
+                            0
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ tbl_long_manage
+-----------------
+ managed
+(1 row)
+
+ tbl_long_flush
+----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ tbl_long_read
+---------------
+ ok: 1
+(1 row)
+
+ tbl_long_insert_cold_key
+--------------------------
+ REJECTED insert
+(1 row)
+
+   tbl_long_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+  tbl_long_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ tbl_long_unmanaged
+--------------------
+ t
+(1 row)
+
+ tbl_long_rows_after_unmanage
+------------------------------
+                            3
+(1 row)
+
+ tbl_long_helper_objects_left
+------------------------------
+                            0
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ collide_1_manage
+------------------
+ managed
+(1 row)
+
+ collide_1_flush
+-----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_1_read
+----------------
+ ok: 1
+(1 row)
+
+ collide_1_insert_cold_key
+---------------------------
+ REJECTED insert
+(1 row)
+
+  collide_1_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ collide_1_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ collide_1_unmanaged
+---------------------
+ t
+(1 row)
+
+ collide_1_rows_after_unmanage
+-------------------------------
+                             3
+(1 row)
+
+ collide_1_helper_objects_left
+-------------------------------
+                             0
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ collide_2_manage
+------------------
+ managed
+(1 row)
+
+ collide_2_flush
+-----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_2_read
+----------------
+ ok: 1
+(1 row)
+
+ collide_2_insert_cold_key
+---------------------------
+ REJECTED insert
+(1 row)
+
+  collide_2_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ collide_2_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ collide_2_unmanaged
+---------------------
+ t
+(1 row)
+
+ collide_2_rows_after_unmanage
+-------------------------------
+                             3
+(1 row)
+
+ collide_2_helper_objects_left
+-------------------------------
+                             0
+(1 row)
+
+CREATE TABLE
+                                                                                               col_space_manage
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.odd_col_space: unsupported identifier(s): column "Some Value"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                            col_quote_manage
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.odd_col_quote: unsupported identifier(s): column "va"l"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                              col_unicode_manage
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.odd_col_unicode: unsupported identifier(s): column "valeur_é"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                         col_digit_first_manage
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.odd_col_digit: unsupported identifier(s): column "2nd"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                              pk_space_manage
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.odd_pk_space: unsupported identifier(s): column "Order Id"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                            tbl_space_manage
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg."Odd Name": unsupported identifier(s): table "Odd Name"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                           tbl_quote_manage
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg."Quo""te": unsupported identifier(s): table "Quo"te"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                       tbl_unicode_manage
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg."Café": unsupported identifier(s): table "Café"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+
+CREATE TABLE
+                                                                                       tbl_digit_first_manage
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg."1table": unsupported identifier(s): table "1table"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+(1 row)
+

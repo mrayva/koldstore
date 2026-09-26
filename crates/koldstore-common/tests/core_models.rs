@@ -45,6 +45,25 @@ fn table_name_newtype_normalizes_and_rejects_unsafe_names() {
 }
 
 #[test]
+fn table_name_accepts_quoted_parts_as_regclass_prints_them() {
+    let mixed = TableName::parse("app.\"MixedCase\"").unwrap();
+    assert_eq!(mixed.schema(), Some("app"));
+    assert_eq!(mixed.relation(), "MixedCase");
+    assert_eq!(mixed.quoted(), "\"app\".\"MixedCase\"");
+    assert_eq!(TableName::parse("\"select\"").unwrap().relation(), "select");
+    assert_eq!(TableName::parse("\"Sch\".\"Tbl\"").unwrap().as_str(), "Sch.Tbl");
+    let qualified = QualifiedTableName::parse("app.\"MixedCase\"").unwrap();
+    assert_eq!(qualified.name, "MixedCase");
+    // quoting never lets other characters through
+    assert!(TableName::parse("app.\"Odd Name\"").is_err());
+    assert!(TableName::parse("\"a\"\"b\"").is_err());
+    assert!(TableName::parse("\"unterminated").is_err());
+    assert!(TableName::parse("\"a\".\"b\".\"c\"").is_err());
+    assert!(TableName::parse("\"\"").is_err());
+    assert!(TableName::parse("\"a\"x").is_err());
+}
+
+#[test]
 fn qualified_table_name_exposes_parts_and_safe_quoting() {
     let table = QualifiedTableName::parse(" app.items ").unwrap();
     assert_eq!(table.schema.as_deref(), Some("app"));
