@@ -212,10 +212,18 @@ Known limits of the prototype (all fail closed or are documented, none silent):
 - Only single-table statements whose `WHERE` clause `where_deparse` can reproduce;
   joins, sub-queries, data-modifying CTEs and `MERGE` fall through to the guards
   (which reject).
-- **User triggers fire for the hydration `INSERT`.** With an `AFTER INSERT`
-  trigger on the table, deleting a cold row logs an `INSERT` for it and then the
-  `DELETE`. `hydrate_pk` behaves the same way. A production version needs a
-  decision (suppress user triggers for the hydration insert, or document it).
+- **User triggers (resolved 2026-09-26): the hydration `INSERT` no longer fires them.**
+  The prototype originally fired user `AFTER INSERT` triggers for the hydrated row,
+  so deleting one cold row logged `INSERT` then `DELETE`. Hydration now runs under
+  `session_replication_role = replica` (scoped to a GUC nest level) with
+  `koldstore.hydrating = on`, for `hydrate_on_write`, `hydrate_pk`, `update_row` and
+  `delete_row`. Ordinary triggers see only the user's real operation; a trigger marked
+  `ENABLE ALWAYS` still fires for hydration and can test the marker. The setting
+  changes trigger firing only, so the insert is still logged, decoded and replicated
+  (verified on the Spock mesh). Referential-integrity triggers are skipped too, which
+  should stop a cold child whose parent is gone from blocking its own delete; that part
+  is untested (the FK opt-in `allow_fk_hot_only` is not reachable through
+  `manage_table` arguments). `CHECK` and unique constraints still apply.
 - **Concurrency on one cold key.** Two sessions hydrating the same key serialize
   on the primary-key conflict (the second waits for the first to finish).
   If the first *updates*, the second's `DELETE` finds nothing and is then rejected

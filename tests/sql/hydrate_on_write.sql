@@ -144,16 +144,35 @@ CREATE TABLE sqlreg.h_src (id bigint PRIMARY KEY);
 INSERT INTO sqlreg.h_src VALUES (18);
 SELECT sqlreg.try($$DELETE FROM sqlreg.h1 USING sqlreg.h_src s WHERE h1.id = s.id$$) AS join_delete_still_rejected;
 
--- user triggers on the table: the hydration INSERT fires them (documented limit)
-CREATE TABLE sqlreg.h_log (op text, id bigint);
+-- User triggers: the hydration INSERT must not fire ordinary triggers (the row already
+-- exists logically); the user's own DELETE does. A trigger marked ENABLE ALWAYS still
+-- fires for hydration and can tell it apart through koldstore.hydrating.
+CREATE TABLE sqlreg.h_log (op text, id bigint, hydrating text);
 CREATE FUNCTION sqlreg.h_trg() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO sqlreg.h_log VALUES (TG_OP, coalesce(NEW.id, OLD.id));
+  INSERT INTO sqlreg.h_log VALUES (TG_OP, coalesce(NEW.id, OLD.id), current_setting('koldstore.hydrating', true));
   RETURN coalesce(NEW, OLD);
 END $$;
 CREATE TRIGGER h_after AFTER INSERT OR DELETE ON sqlreg.h1 FOR EACH ROW EXECUTE FUNCTION sqlreg.h_trg();
 SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 20$$) AS delete_with_triggers;
+SELECT op, id, hydrating FROM sqlreg.h_log ORDER BY op, id;
+-- an ALWAYS trigger sees the hydration, flagged
+CREATE TRIGGER h_always AFTER INSERT ON sqlreg.h1 FOR EACH ROW EXECUTE FUNCTION sqlreg.h_trg();
+ALTER TABLE sqlreg.h1 ENABLE ALWAYS TRIGGER h_always;
+TRUNCATE sqlreg.h_log;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 18$$) AS delete_with_always_trigger;
+SELECT op, id, hydrating FROM sqlreg.h_log ORDER BY op, id;
+SELECT current_setting('koldstore.hydrating') AS hydrating_after_statement;
+SELECT current_setting('session_replication_role') AS role_after_statement;
+DROP TRIGGER h_after ON sqlreg.h1;
+DROP TRIGGER h_always ON sqlreg.h1;
+
+-- explicit cold-row functions share the same hydration: update_row fires the UPDATE only
+CREATE TRIGGER h_after AFTER INSERT OR UPDATE OR DELETE ON sqlreg.h1 FOR EACH ROW EXECUTE FUNCTION sqlreg.h_trg();
+TRUNCATE sqlreg.h_log;
+SELECT koldstore.update_row('sqlreg.h1'::regclass, '{"id": 17}', '{"val": "explicit"}') ->> 'updated' AS update_row_updated;
 SELECT op, id FROM sqlreg.h_log ORDER BY op, id;
+DROP TRIGGER h_after ON sqlreg.h1;
 
 -- the job lock is released after the statements: a flush still runs
 SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;

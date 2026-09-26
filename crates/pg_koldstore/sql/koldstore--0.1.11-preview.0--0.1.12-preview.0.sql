@@ -209,7 +209,8 @@ $$;
 -- Returns {"transactions": n, "deletes": n, "failed": n, ...}. Safe to run repeatedly;
 -- every item is handled once (see koldstore.spock_reconciled; delete a row there to retry).
 CREATE OR REPLACE FUNCTION koldstore.reconcile_spock_conflicts(max_items integer DEFAULT 200)
-RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, koldstore AS $$
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, koldstore
+  SET session_replication_role = replica AS $$
 DECLARE
   t record;
   o record;

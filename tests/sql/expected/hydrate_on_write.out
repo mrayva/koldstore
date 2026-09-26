@@ -206,12 +206,50 @@ CREATE TRIGGER
  ok: 1
 (1 row)
 
-   op   | id
---------+----
- DELETE | 20
- INSERT | 20
+   op   | id | hydrating
+--------+----+-----------
+ DELETE | 20 | off
+(1 row)
+
+CREATE TRIGGER
+ALTER TABLE
+TRUNCATE TABLE
+ delete_with_always_trigger
+----------------------------
+ ok: 1
+(1 row)
+
+   op   | id | hydrating
+--------+----+-----------
+ DELETE | 18 | off
+ INSERT | 18 | on
 (2 rows)
 
+ hydrating_after_statement
+---------------------------
+ off
+(1 row)
+
+ role_after_statement
+----------------------
+ origin
+(1 row)
+
+DROP TRIGGER
+DROP TRIGGER
+CREATE TRIGGER
+TRUNCATE TABLE
+ update_row_updated
+--------------------
+ true
+(1 row)
+
+   op   | id
+--------+----
+ UPDATE | 17
+(1 row)
+
+DROP TRIGGER
  flush_after_hydration
 -----------------------
  t

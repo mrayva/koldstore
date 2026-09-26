@@ -44,7 +44,9 @@ With the setting on and `koldstore.hydrate_on_write = on` on the originating nod
 - `UPDATE` of a cold-only key on node 1: all three nodes show the new value.
 
 This is why the hydration insert must replicate (see ADR-007): the peer gets a hot
-copy for the following change to act on.
+copy for the following change to act on. Hydration no longer fires user triggers on the
+originating node either, so a trigger-maintained derived table matches native semantics
+(one `DELETE` audit row, not `INSERT` + `DELETE`).
 
 ## Finding 3 (open, real): a change to a row that is cold on a peer diverges
 
@@ -86,6 +88,14 @@ Reads those two logs and replays what was lost, through the cold-row-aware
 - **Not forwarded.** The replay runs under its own replication origin
   (`koldstore_reconcile`), which Spock does not forward, so nodes that already applied
   the change do not receive it again. Verified: the other nodes' mirrors did not move.
+- **User triggers do not fire during the replay** (the function runs with
+  `session_replication_role = replica`, as Spock's own apply workers do): the change
+  already fired its triggers once at the node where it originated. Verified with a
+  trigger maintaining a replicated audit table: before this, the peer's replay wrote its
+  own extra audit rows that were not forwarded (the derived table diverged), and a
+  trigger relying on client-session state (`inet_server_port()` is NULL in a background
+  worker) made the replay fail outright; after it the audit tables were identical on all
+  three nodes.
 - **Requires** `koldstore.capture_replicated_changes = on` (checked), so the mirror
   records the replay's tombstones and new versions; executable by superusers only.
 - **Background worker.** Instead of scheduling it yourself, let koldstore run it. Set

@@ -32,6 +32,8 @@ static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static HYDRATING: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static CAPTURE_REPLICATED_CHANGES: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
@@ -176,6 +178,14 @@ pub fn define_gucs() {
         c"EXPERIMENTAL: lets UPDATE/DELETE change cold-only rows by hydrating them first.",
         c"Before a single-table UPDATE/DELETE on a managed table scans, the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED only; other statements keep being rejected by the write guards (upstream #122).",
         &HYDRATE_ON_WRITE,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.hydrating",
+        c"On while KoldStore inserts a cold row back into the heap (hydration).",
+        c"Set by KoldStore around the hydration INSERT (hydrate_pk, update_row, delete_row, hydrate-on-write) together with session_replication_role = replica, so ordinary user triggers do not fire for it. A trigger marked ENABLE ALWAYS/REPLICA can test current_setting('koldstore.hydrating', true) = 'on' to tell hydration from a real insert. Not meant to be set by applications.",
+        &HYDRATING,
         GucContext::Userset,
         flags,
     );
@@ -432,6 +442,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: HYDRATING_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
             name: CAPTURE_REPLICATED_CHANGES_GUC,
             internal: false,
             default_value: "off",
@@ -579,6 +594,7 @@ pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
+pub const HYDRATING_GUC: &str = "koldstore.hydrating";
 pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";

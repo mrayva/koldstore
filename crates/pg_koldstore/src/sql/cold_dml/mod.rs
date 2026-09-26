@@ -192,8 +192,53 @@ fn hydrate_pk_impl(
     let statement = koldstore_common::SqlStatement::write("koldstore hydrate_pk", &insert_sql)
         .map_err(|error| error.to_string())?;
     let insert_args = [DatumWithOid::from(row_json)];
-    let rows = crate::spi::update(&statement, &insert_args).map_err(|error| error.to_string())?;
+    let rows = as_hydration(|| crate::spi::update(&statement, &insert_args)).map_err(|error| error.to_string())?;
     Ok(rows.rows_affected)
+}
+
+/// Runs `f` -- a hydration `INSERT` -- with ordinary user triggers off and
+/// `koldstore.hydrating = on`.
+///
+/// Hydration only moves a row that already exists logically from cold storage to the
+/// heap; it is not a new row, so `AFTER INSERT` triggers (audit logs, counters, queues)
+/// must not see it. The same reasoning as Spock's apply workers, which write with
+/// `session_replication_role = replica`: the setting changes trigger firing only, so the
+/// insert is still logged, decoded and replicated. Constraints other than triggers
+/// (including referential-integrity triggers, which `replica` also skips) are unchanged
+/// for `CHECK`/unique. The settings are scoped to a GUC nest level and restored when `f`
+/// returns; an error aborts the (sub)transaction, which restores them as well. Superuser
+/// context is used for the setting itself, so callers need no privilege for it.
+pub(crate) fn as_hydration<T>(f: impl FnOnce() -> T) -> T {
+    use std::ffi::CString;
+
+    use pgrx::pg_sys;
+
+    fn set(name: &str, value: &str) {
+        let name = CString::new(name).expect("static GUC name");
+        let value = CString::new(value).expect("static GUC value");
+        // SAFETY: valid NUL-terminated strings; PGC_SUSET/PGC_S_SESSION with SAVE scoping
+        // to the caller's nest level, which `AtEOXact_GUC` below restores.
+        unsafe {
+            pg_sys::set_config_option(
+                name.as_ptr(),
+                value.as_ptr(),
+                pg_sys::GucContext::PGC_SUSET,
+                pg_sys::GucSource::PGC_S_SESSION,
+                pg_sys::GucAction::GUC_ACTION_SAVE,
+                true,
+                0,
+                false,
+            );
+        }
+    }
+
+    // SAFETY: plain GUC bookkeeping; the nest level is closed on every non-error path.
+    let nest = unsafe { pg_sys::NewGUCNestLevel() };
+    set("session_replication_role", "replica");
+    set(crate::guc::HYDRATING_GUC, "on");
+    let result = f();
+    unsafe { pg_sys::AtEOXact_GUC(true, nest) };
+    result
 }
 
 /// Inserts already-located full `rows` (jsonb objects) into the heap, skipping
@@ -213,7 +258,8 @@ pub(crate) fn hydrate_rows(table_oid: pgrx::pg_sys::Oid, rows: &[serde_json::Val
     let statement =
         koldstore_common::SqlStatement::write("koldstore hydrate rows", &insert_sql).map_err(|error| error.to_string())?;
     let args = [DatumWithOid::from(pgrx::JsonB(serde_json::Value::Array(rows.to_vec())))];
-    let done = guard::with_guard_suspended(|| crate::spi::update(&statement, &args)).map_err(|error| error.to_string())?;
+    let done = as_hydration(|| guard::with_guard_suspended(|| crate::spi::update(&statement, &args)))
+        .map_err(|error| error.to_string())?;
     Ok(done.rows_affected)
 }
 

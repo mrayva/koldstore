@@ -8,8 +8,11 @@
 -- The nodes then disagree. koldstore.reconcile_spock_conflicts() replays those changes
 -- through the cold-row-aware update_row()/delete_row(), once, under its own replication
 -- origin so the replay is not forwarded back to nodes that already applied the change.
--- Requires koldstore.capture_replicated_changes = on (otherwise the mirror would not see
--- the replay).
+-- The replay runs with session_replication_role = replica, like Spock's own apply workers:
+-- the change already fired its triggers once, at the node where it originated, so user
+-- triggers must not fire again here (their effects would double, or fail in a background
+-- worker's session). Requires koldstore.capture_replicated_changes = on (otherwise the
+-- mirror would not see the replay).
 
 CREATE TABLE IF NOT EXISTS koldstore.spock_reconciled (
   item_key text PRIMARY KEY,           -- txn:<origin>:<xid> or res:<node>:<id>
@@ -82,7 +85,8 @@ $$;
 -- Returns {"transactions": n, "deletes": n, "failed": n, ...}. Safe to run repeatedly;
 -- every item is handled once (see koldstore.spock_reconciled; delete a row there to retry).
 CREATE OR REPLACE FUNCTION koldstore.reconcile_spock_conflicts(max_items integer DEFAULT 200)
-RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, koldstore AS $$
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, koldstore
+  SET session_replication_role = replica AS $$
 DECLARE
   t record;
   o record;
