@@ -32,6 +32,8 @@ static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static CAPTURE_REPLICATED_CHANGES: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
 static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -171,6 +173,14 @@ pub fn define_gucs() {
         c"Before a single-table UPDATE/DELETE on a managed table scans, the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED only; other statements keep being rejected by the write guards (upstream #122).",
         &HYDRATE_ON_WRITE,
         GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.capture_replicated_changes",
+        c"Mirrors changes applied by logical replication (Spock, native subscriptions).",
+        c"By default the async mirror ignores every change that carries a replication origin, which includes everything a Spock apply worker or a subscription writes. Turn on for a node that receives replicated writes: flush prunes are then stamped with a named origin (koldstore_flush_<dboid>) and skipped by name instead. Changing it needs a restart, and the async mirror must be fully caught up (koldstore.wait_for_async_mirror()) first, otherwise prune deletes still in the slot are mirrored as tombstones.",
+        &CAPTURE_REPLICATED_CHANGES,
+        GucContext::Postmaster,
         flags,
     );
     GucRegistry::define_int_guc(
@@ -400,6 +410,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: CAPTURE_REPLICATED_CHANGES_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
             name: MAX_HYDRATE_ROWS_GUC,
             internal: false,
             default_value: "10000",
@@ -529,6 +544,7 @@ pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_r
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
 pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
 pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
+pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
@@ -579,6 +595,20 @@ pub fn hydrate_on_write() -> bool {
     #[cfg(feature = "pg")]
     {
         HYDRATE_ON_WRITE.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
+}
+
+/// Whether the async mirror also captures changes that carry a replication origin.
+#[must_use]
+pub fn capture_replicated_changes() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        CAPTURE_REPLICATED_CHANGES.get()
     }
 
     #[cfg(not(feature = "pg"))]

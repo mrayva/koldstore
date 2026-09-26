@@ -21,8 +21,8 @@ pub use koldstore_wal_mirror::PUBLICATION_NAME;
 const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
 const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
-/// Serializes PG15 flush-origin `replorigin_session_setup` within one database.
-#[cfg(feature = "pg15")]
+/// Serializes flush-origin `replorigin_session_setup` within one database (PG15, or any
+/// version with `koldstore.capture_replicated_changes`).
 pub(crate) const FLUSH_ORIGIN_LOCK_NAMESPACE: i32 = 1_263_354_736;
 
 /// Returns the database-scoped flush replication origin name (PG15 prune path).

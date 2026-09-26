@@ -617,7 +617,14 @@ fn arm_flush_replication_origin() -> Result<(), String> {
         }
         #[cfg(not(feature = "pg15"))]
         {
-            arm_do_not_replicate_origin(slot)
+            // A node that receives replicated writes (Spock, subscriptions) must see them
+            // in the mirror, so it cannot use the blanket `origin = none` filter and stamps
+            // its own prunes with a named origin instead.
+            if crate::guc::capture_replicated_changes() {
+                arm_named_flush_origin_pg15(slot)
+            } else {
+                arm_do_not_replicate_origin(slot)
+            }
         }
     })
 }
@@ -645,8 +652,8 @@ fn arm_do_not_replicate_origin(
     Ok(())
 }
 
-/// PG15 path: exclusive named origin, queued behind a database advisory lock.
-#[cfg(feature = "pg15")]
+/// Named-origin path (PG15, or `koldstore.capture_replicated_changes`): exclusive named
+/// origin, queued behind a database advisory lock.
 fn arm_named_flush_origin_pg15(
     slot: &std::cell::Cell<Option<pgrx::pg_sys::RepOriginId>>,
 ) -> Result<(), String> {
@@ -693,7 +700,12 @@ fn arm_named_flush_origin_pg15(
     // convert that to a Rust Err so flush soft-fails instead of aborting mid-prune.
     pgrx::PgTryBuilder::new(|| {
         unsafe {
+            #[cfg(feature = "pg15")]
             pgrx::pg_sys::replorigin_session_setup(origin_id);
+            // PG16+ takes the pid of the leader backend that already holds the origin
+            // (0: this backend acquires it itself).
+            #[cfg(not(feature = "pg15"))]
+            pgrx::pg_sys::replorigin_session_setup(origin_id, 0);
         }
         Ok(())
     })

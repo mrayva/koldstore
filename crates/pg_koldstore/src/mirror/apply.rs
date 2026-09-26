@@ -421,11 +421,21 @@ fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<St
         'messages', 'false')"
     );
     #[cfg(not(feature = "pg15"))]
-    let query = format!(
-        "SELECT data FROM pg_catalog.pg_logical_slot_peek_binary_changes(\
-        $1, {upto_sql}, NULL, 'proto_version', '1', 'publication_names', $2, \
-        'messages', 'false', 'origin', 'none')"
-    );
+    let query = if crate::guc::capture_replicated_changes() {
+        // Replicated writes carry a replication origin; keep them and skip only the
+        // named flush origin when its ORIGIN message is decoded.
+        format!(
+            "SELECT data FROM pg_catalog.pg_logical_slot_peek_binary_changes(\
+            $1, {upto_sql}, NULL, 'proto_version', '1', 'publication_names', $2, \
+            'messages', 'false', 'origin', 'any')"
+        )
+    } else {
+        format!(
+            "SELECT data FROM pg_catalog.pg_logical_slot_peek_binary_changes(\
+            $1, {upto_sql}, NULL, 'proto_version', '1', 'publication_names', $2, \
+            'messages', 'false', 'origin', 'none')"
+        )
+    };
 
     pgrx::Spi::connect_mut(|client| {
         if let Some(upto) = upto.as_ref() {
