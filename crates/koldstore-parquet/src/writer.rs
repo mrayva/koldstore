@@ -558,14 +558,14 @@ impl WriterOptions {
         }
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
-                ColumnPath::from(column.as_str()),
+                ColumnPath::new(vec![column.clone()]),
                 // Page-level stats populate the Parquet column index used for
                 // RowSelection pushdown; chunk-only stats omit page indexes.
                 EnabledStatistics::Page,
             );
         }
         for column in &self.bloom_filter_columns {
-            let path = ColumnPath::from(column.as_str());
+            let path = ColumnPath::new(vec![column.clone()]);
             builder = builder
                 .set_column_bloom_filter_enabled(path.clone(), true)
                 .set_column_bloom_filter_max_ndv(path.clone(), row_group_size as u64);

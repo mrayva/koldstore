@@ -100,7 +100,17 @@ pub(super) fn projection_mask(
             names.push(column.as_str());
         }
     }
-    ProjectionMask::columns(schema, names)
+    // Select whole root fields by exact name. `ProjectionMask::columns` treats a
+    // dot as a nested-path separator, which breaks columns named like `a.b`.
+    let roots: Vec<usize> = schema
+        .root_schema()
+        .get_fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| names.iter().any(|name| *name == field.name()))
+        .map(|(index, _)| index)
+        .collect();
+    ProjectionMask::roots(schema, roots)
 }
 
 fn is_clean_metadata_column(name: &str) -> bool {
