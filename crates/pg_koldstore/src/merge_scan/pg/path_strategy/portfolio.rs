@@ -243,7 +243,13 @@ unsafe fn add_custom_wrapper(args: CustomWrapperArgs<'_>) {
     (*custom_path).path.total_cost = total_cost;
     (*custom_path).path.parallel_safe = false;
     if copy_pathkeys {
-        (*custom_path).path.pathkeys = (*hot_child).pathkeys;
+        // The ordered merge only guarantees order on the LEADING key: ties on it
+        // are emitted in hot-then-cold order, not by the remaining keys. The hot
+        // child's pathkeys can be longer (a composite-PK index scan advertises
+        // `a, b`); claiming all of them made PostgreSQL skip the Sort that
+        // `ORDER BY a, b` needs and returned rows out of order. Advertise just
+        // the leading key; PostgreSQL adds an incremental sort for the rest.
+        (*custom_path).path.pathkeys = pg_sys::list_copy_head((*hot_child).pathkeys, 1);
     } else {
         (*custom_path).path.pathkeys = std::ptr::null_mut();
     }

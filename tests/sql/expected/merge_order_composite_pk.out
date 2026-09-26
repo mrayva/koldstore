@@ -1,0 +1,112 @@
+CREATE TABLE
+INSERT 0 4
+ managed
+---------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+INSERT 0 3
+ mirror_settled
+----------------
+ t
+(1 row)
+
+ a | b  |  val
+---+----+-------
+ 1 | 10 | w1
+ 2 |  5 | hot5
+ 2 | 20 | w2
+ 2 | 21 | hot21
+ 3 | 30 | w3
+ 4 | 40 | w4
+ 4 | 41 | hot41
+(7 rows)
+
+ a | b  |  val
+---+----+-------
+ 4 | 41 | hot41
+ 4 | 40 | w4
+ 3 | 30 | w3
+ 2 | 21 | hot21
+ 2 | 20 | w2
+ 2 |  5 | hot5
+ 1 | 10 | w1
+(7 rows)
+
+ a | b  |  val
+---+----+-------
+ 1 | 10 | w1
+ 2 | 21 | hot21
+ 2 | 20 | w2
+ 2 |  5 | hot5
+ 3 | 30 | w3
+ 4 | 41 | hot41
+ 4 | 40 | w4
+(7 rows)
+
+ a | b  |  val
+---+----+-------
+ 2 |  5 | hot5
+ 1 | 10 | w1
+ 2 | 20 | w2
+ 2 | 21 | hot21
+ 3 | 30 | w3
+ 4 | 40 | w4
+ 4 | 41 | hot41
+(7 rows)
+
+ a | b
+---+----
+ 1 | 10
+ 2 |  5
+ 2 | 20
+(3 rows)
+
+ a | b
+---+----
+ 2 |  5
+ 2 | 20
+ 2 | 21
+(3 rows)
+
+CREATE TABLE
+INSERT 0 3
+ managed_single
+----------------
+ t
+(1 row)
+
+ flushed_single
+----------------
+ t
+(1 row)
+
+INSERT 0 2
+ mirror_settled_single
+-----------------------
+ t
+(1 row)
+
+ id | val
+----+-----
+  0 | h0
+  1 | c1
+  2 | c2
+  3 | c3
+  4 | h4
+(5 rows)
+
+ id | val
+----+-----
+  4 | h4
+  3 | c3
+  2 | c2
+  1 | c1
+  0 | h0
+(5 rows)
+
