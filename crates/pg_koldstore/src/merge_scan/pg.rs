@@ -359,11 +359,13 @@ unsafe extern "C-unwind" fn merge_scan_xact_callback(
         pg_sys::XactEvent::XACT_EVENT_ABORT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
             abandon_scan_states_after_abort();
             crate::txn_writes::clear();
+            crate::hooks::hydrate_on_write::release_locks();
         }
         pg_sys::XactEvent::XACT_EVENT_COMMIT
         | pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT
         | pg_sys::XactEvent::XACT_EVENT_PREPARE => {
             crate::txn_writes::clear();
+            crate::hooks::hydrate_on_write::release_locks();
         }
         _ => {}
     }

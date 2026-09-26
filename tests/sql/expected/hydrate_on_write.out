@@ -1,0 +1,219 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 20
+ managed
+---------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+INSERT 0 2
+ settle
+--------
+
+(1 row)
+
+ total_rows
+------------
+         22
+(1 row)
+
+   delete_default_off
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+SET
+ delete_cold_range
+-------------------
+ ok: 3
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ remaining_low_ids
+-------------------
+ 4,5,6
+(1 row)
+
+ total_after_delete
+--------------------
+ 19
+(1 row)
+
+ update_cold_and_hot_by_group
+------------------------------
+ ok: 7
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+    updated_ids
+--------------------
+ 4,7,10,13,16,19,22
+(1 row)
+
+ total_after_update
+--------------------
+ 19
+(1 row)
+
+ update_matching_nothing
+-------------------------
+ ok: 0
+(1 row)
+
+ id | val
+----+-----
+  5 | v5
+  6 | v6
+(2 rows)
+
+DELETE 2
+ settle
+--------
+
+(1 row)
+
+ rows_5_6_after
+----------------
+ 0
+(1 row)
+
+CREATE TABLE
+                                                                                                                                                                                                            cte_delete_matched
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.h1 -- its WHERE clause also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ row_14_after_cte_delete
+-------------------------
+ 1
+(1 row)
+
+ total_before_rollback
+-----------------------
+ 17
+(1 row)
+
+BEGIN
+DELETE 1
+ROLLBACK
+ settle
+--------
+
+(1 row)
+
+ row_8_after_rollback
+----------------------
+ 1
+(1 row)
+
+ total_after_rollback
+----------------------
+ 17
+(1 row)
+
+BEGIN
+DELETE 1
+                                                                                                                                                                                                    read_after_hydrating_write
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing to read cold data of managed table sqlreg.h1 -- this transaction has already modified it, and a cold row for a key changed here could be returned stale (logical decoding cannot see uncommitted work; upstream issue #121). COMMIT first (then call koldstore.wait_for_async_mirror() if you need to see the effect immediately), or set koldstore.allow_same_txn_cold_reads = on to accept the risk
+(1 row)
+
+ROLLBACK
+SET
+                                                                                                                          delete_over_cap
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.h1 -- it matches 4 cold row(s), more than koldstore.max_hydrate_rows (2); narrow the statement or change the rows in batches with koldstore.update_row()/delete_row() (upstream issue #122)
+(1 row)
+
+RESET
+ rows_untouched_after_cap
+--------------------------
+ 6
+(1 row)
+
+PREPARE
+ prepared_custom_plan
+----------------------
+ ok: 0
+(1 row)
+
+SET
+ prepared_generic_plan
+-----------------------
+ ok: 0
+(1 row)
+
+ prepared_generic_plan_again
+-----------------------------
+ ok: 0
+(1 row)
+
+RESET
+ settle
+--------
+
+(1 row)
+
+ rows_11_12_15_after
+---------------------
+ 0
+(1 row)
+
+BEGIN
+    repeatable_read_delete
+-------------------------------
+ REJECTED write pk={"id":"18"}
+(1 row)
+
+ROLLBACK
+CREATE TABLE
+INSERT 0 1
+ join_delete_still_rejected
+----------------------------
+ REJECTED scan matches=1
+(1 row)
+
+CREATE TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+ delete_with_triggers
+----------------------
+ ok: 1
+(1 row)
+
+   op   | id
+--------+----
+ DELETE | 20
+ INSERT | 20
+(2 rows)
+
+ flush_after_hydration
+-----------------------
+ t
+(1 row)
+

@@ -1,0 +1,159 @@
+-- EXPERIMENTAL hydrate-on-write (ADR-007 option B): with koldstore.hydrate_on_write
+-- on, a plain single-table UPDATE/DELETE changes cold-only rows instead of being
+-- rejected, by inserting the cold-only rows its WHERE clause matches into the heap
+-- first. Default off: the write guards reject as before.
+
+\set VERBOSITY terse
+\set ON_ERROR_STOP off
+
+-- try(stmt): "ok: <rows>" | "REJECTED insert" | "REJECTED write pk=<key>" | "ERROR: ..."
+-- try(stmt, true): same, but a koldstore rejection keeps its complete message.
+CREATE FUNCTION sqlreg.try(stmt text, keep_message boolean DEFAULT false) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+  n bigint;
+  msg text;
+BEGIN
+  EXECUTE stmt;
+  IF stmt ~* '^\s*explain' THEN
+    RETURN 'ok (explain)';
+  END IF;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN 'ok: ' || n;
+EXCEPTION WHEN OTHERS THEN
+  msg := split_part(SQLERRM, E'\n', 1);
+  IF keep_message THEN
+    RETURN 'ERROR: ' || msg;
+  ELSIF msg LIKE 'koldstore: refusing INSERT%' THEN
+    RETURN 'REJECTED insert';
+  ELSIF msg LIKE 'koldstore: refusing this UPDATE/DELETE on managed table%' THEN
+    RETURN 'REJECTED scan matches=' || substring(msg from 'also matches ([0-9]+) cold');
+  ELSIF msg LIKE 'koldstore: refusing this MERGE on managed table%' THEN
+    RETURN 'REJECTED merge';
+  ELSIF msg LIKE 'koldstore: refusing this UPDATE/DELETE/MERGE%' THEN
+    RETURN 'REJECTED write pk=' || substring(msg from 'primary key (\{[^}]*\})');
+  END IF;
+  RETURN 'ERROR: ' || msg;
+END
+$$;
+
+-- Committed mirror work applied, so reads below see completed masking.
+CREATE FUNCTION sqlreg.settle() RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM koldstore.wait_for_async_mirror();
+END
+$$;
+
+-- val(query): first column of the first row as text
+CREATE FUNCTION sqlreg.val(stmt text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE result text;
+BEGIN
+  EXECUTE stmt INTO result;
+  RETURN coalesce(result, '(null)');
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'ERROR: ' || split_part(SQLERRM, E'\n', 1);
+END
+$$;
+
+CREATE TABLE sqlreg.h1 (id bigint PRIMARY KEY, val text NOT NULL, grp int NOT NULL);
+INSERT INTO sqlreg.h1 SELECT g, 'v' || g, g % 3 FROM generate_series(1, 20) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h1'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS managed;
+SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flushed;
+SELECT sqlreg.settle();
+INSERT INTO sqlreg.h1 VALUES (21, 'v21', 0), (22, 'v22', 1);
+SELECT sqlreg.settle();
+-- ids 1..20 are cold-only; 21 and 22 are hot
+SELECT count(*) AS total_rows FROM sqlreg.h1;
+
+-- default off: rejected as before
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id < 3$$) AS delete_default_off;
+
+SET koldstore.hydrate_on_write = on;
+
+-- DELETE of cold rows by range, then the effect once the mirror has applied it
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id BETWEEN 1 AND 3$$) AS delete_cold_range;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT string_agg(id::text, ',' ORDER BY id) FROM sqlreg.h1 WHERE id <= 6$$) AS remaining_low_ids;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS total_after_delete;
+
+-- UPDATE of cold rows by a non-key predicate (mixed cold and hot matches)
+SELECT sqlreg.try($$UPDATE sqlreg.h1 SET val = 'upd' WHERE grp = 1$$) AS update_cold_and_hot_by_group;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT string_agg(id::text, ',' ORDER BY id) FROM sqlreg.h1 WHERE val = 'upd'$$) AS updated_ids;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS total_after_update;
+
+-- a statement matching nothing hydrates nothing
+SELECT sqlreg.try($$UPDATE sqlreg.h1 SET val = 'none' WHERE id > 1000$$) AS update_matching_nothing;
+
+-- RETURNING sees the hydrated rows
+DELETE FROM sqlreg.h1 WHERE id IN (5, 6) RETURNING id, val;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id IN (5, 6)$$) AS rows_5_6_after;
+
+-- a data-modifying CTE is not seen by the ExecutorStart hook (its top-level
+-- statement is a SELECT) and, separately, bypasses the write guards
+CREATE TABLE sqlreg.h_cte_note (x int);
+SELECT sqlreg.val($$WITH d AS (DELETE FROM sqlreg.h1 WHERE id = 14 RETURNING id) SELECT count(*) FROM d$$) AS cte_delete_matched;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id = 14$$) AS row_14_after_cte_delete;
+
+-- rollback leaves the cold rows exactly as they were (id 8 is cold-only)
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS total_before_rollback;
+BEGIN;
+DELETE FROM sqlreg.h1 WHERE id = 8;
+ROLLBACK;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id = 8$$) AS row_8_after_rollback;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS total_after_rollback;
+
+-- the read after a write in the same transaction is refused (upstream #121)
+BEGIN;
+DELETE FROM sqlreg.h1 WHERE id = 9;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS read_after_hydrating_write;
+ROLLBACK;
+
+-- cap
+SET koldstore.max_hydrate_rows = 2;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id BETWEEN 15 AND 20$$, true) AS delete_over_cap;
+RESET koldstore.max_hydrate_rows;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id BETWEEN 15 AND 20$$) AS rows_untouched_after_cap;
+
+-- prepared statements, custom and generic plans (verify the effect: ROW_COUNT is
+-- always 0 for EXECUTE run through PL/pgSQL, with or without this feature)
+PREPARE del_one(bigint) AS DELETE FROM sqlreg.h1 WHERE id = $1;
+SELECT sqlreg.try($$EXECUTE del_one(11)$$) AS prepared_custom_plan;
+SET plan_cache_mode = force_generic_plan;
+SELECT sqlreg.try($$EXECUTE del_one(12)$$) AS prepared_generic_plan;
+SELECT sqlreg.try($$EXECUTE del_one(15)$$) AS prepared_generic_plan_again;
+RESET plan_cache_mode;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id IN (11, 12, 15)$$) AS rows_11_12_15_after;
+
+-- other isolation levels fall back to the guards (the snapshot cannot be advanced)
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 18$$) AS repeatable_read_delete;
+ROLLBACK;
+
+-- statements it cannot reproduce still hit the write guards
+CREATE TABLE sqlreg.h_src (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.h_src VALUES (18);
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 USING sqlreg.h_src s WHERE h1.id = s.id$$) AS join_delete_still_rejected;
+
+-- user triggers on the table: the hydration INSERT fires them (documented limit)
+CREATE TABLE sqlreg.h_log (op text, id bigint);
+CREATE FUNCTION sqlreg.h_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO sqlreg.h_log VALUES (TG_OP, coalesce(NEW.id, OLD.id));
+  RETURN coalesce(NEW, OLD);
+END $$;
+CREATE TRIGGER h_after AFTER INSERT OR DELETE ON sqlreg.h1 FOR EACH ROW EXECUTE FUNCTION sqlreg.h_trg();
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 20$$) AS delete_with_triggers;
+SELECT op, id FROM sqlreg.h_log ORDER BY op, id;
+
+-- the job lock is released after the statements: a flush still runs
+SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;

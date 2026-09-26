@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (design note; nothing here is implemented). Today a plain `UPDATE`,
+Proposed. Option B has a working prototype behind `koldstore.hydrate_on_write` (default off, experimental); see "Prototype findings". Option A is not built. Today a plain `UPDATE`,
 `DELETE` or `MERGE` that would have to change a cold-only row is *rejected*
 (upstream [#122](https://github.com/kalamdb/koldstore/issues/122)); the explicit
 `koldstore.update_row()` / `delete_row()` / `hydrate_pk()` functions are the only
@@ -181,3 +181,59 @@ purge of Option C.
   #89/#100 remain needed for space reclamation.
 - The snapshot-advance step in `ExecutorStart` is the one piece of new
   low-level risk and should be prototyped and reviewed first.
+
+## Prototype findings (2026-09-26)
+
+Implemented in `hooks/hydrate_on_write.rs` (an `ExecutorStart` hook), covered by
+`tests/sql/hydrate_on_write.sql`. Enabled per session with
+`SET koldstore.hydrate_on_write = on`; `koldstore.max_hydrate_rows` (default
+10 000) is the cap.
+
+What worked:
+
+- **The snapshot advance is sound in `READ COMMITTED`.** After the hydration
+  `INSERT`, `CommandCounterIncrement()` plus setting the query descriptor
+  snapshot's `curcid` to `GetCurrentCommandId(false)` *before*
+  `standard_ExecutorStart` makes the native scan see the hydrated rows, while the
+  statement's own new tuples (command id = `es_output_cid`) stay invisible to it,
+  so there is no Halloween problem. Verified for `DELETE` and `UPDATE`, plain and
+  prepared statements (custom and forced generic plans), `RETURNING`, cold and hot
+  rows mixed in one statement, and statements matching nothing.
+- **Rollback is clean** (the hydrated rows roll back with the statement), the cap
+  rejects with nothing changed, and a flush still runs afterwards (the table job
+  lock is held to statement end, then released).
+- **Reads after the write in the same transaction are refused** by the existing
+  #121 check, exactly as after any other write.
+
+Known limits of the prototype (all fail closed or are documented, none silent):
+
+- `REPEATABLE READ` / `SERIALIZABLE`: the transaction snapshot cannot be advanced,
+  so the hook stays out and the write guards reject as before.
+- Only single-table statements whose `WHERE` clause `where_deparse` can reproduce;
+  joins, sub-queries, data-modifying CTEs and `MERGE` fall through to the guards
+  (which reject).
+- **User triggers fire for the hydration `INSERT`.** With an `AFTER INSERT`
+  trigger on the table, deleting a cold row logs an `INSERT` for it and then the
+  `DELETE`. `hydrate_pk` behaves the same way. A production version needs a
+  decision (suppress user triggers for the hydration insert, or document it).
+- **Concurrency on one cold key.** Two sessions hydrating the same key serialize
+  on the primary-key conflict (the second waits for the first to finish).
+  If the first *updates*, the second's `DELETE` finds nothing and is then rejected
+  by the exact-primary-key guard (fail closed, no lost delete). If the first
+  *deletes*, the second re-hydrates and deletes again: the final state is right
+  but the second statement reports one deleted row where native PostgreSQL would
+  report zero.
+- Data movement: N cold rows cost N heap inserts plus N deletes/updates.
+
+Side finding (fixed): `UPDATE`/`DELETE` inside a **data-modifying CTE** bypassed the
+write guards entirely, because the top-level statement is a `SELECT`. The guard now
+also inspects `ModifyTable` nodes in the plan's sub-plans and applies the generic
+cold-match check (`cold_dml_scan_guard`, `cte_*` cases).
+
+Test-harness lesson: `FROM ONLY t` is **not** a heap-only scan on a managed table
+(the merge-scan hook still applies). Use `pageinspect`, or the guard's own
+hot-only probe, to look at the heap.
+
+Open items before this could be defaulted on: the trigger decision, the
+double-delete row count, extending hydration to joins/sub-queries/CTEs (the probe
+already exists; it needs to return rows), and a concurrent flush stress test.

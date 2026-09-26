@@ -216,6 +216,13 @@ ROLLBACK;
 SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE random() < 2)$$) AS gap_volatile_subquery;
 SELECT sqlreg.try($$WITH c AS (SELECT id FROM sqlreg.s_other) DELETE FROM sqlreg.s1 USING c WHERE s1.id = c.id$$) AS gap_cte_source;
 
+-- UPDATE/DELETE inside a data-modifying CTE: the top-level statement is a SELECT,
+-- so the guard inspects the sub-plan's ModifyTable nodes
+SELECT sqlreg.try($$WITH d AS (DELETE FROM sqlreg.s1 WHERE id BETWEEN 1 AND 2 RETURNING id) SELECT count(*) FROM d$$) AS cte_delete_cold_range;
+SELECT sqlreg.try($$WITH u AS (UPDATE sqlreg.s1 SET val = 'cte' WHERE val = 'v3' RETURNING id) SELECT count(*) FROM u$$) AS cte_update_cold_value;
+SELECT sqlreg.try($$WITH d AS (DELETE FROM sqlreg.s1 WHERE id > 1000 RETURNING id) SELECT count(*) FROM d$$) AS cte_delete_matching_nothing;
+SELECT sqlreg.try($$WITH d AS (DELETE FROM sqlreg.s1 WHERE id IN (50, 51) RETURNING id) SELECT count(*) FROM d$$) AS cte_delete_hot_rows;
+
 -- ------------------------------------------------ tables without cold data
 SELECT sqlreg.try($$UPDATE sqlreg.s2 SET val = 'z' WHERE id < 4$$) AS hot_only_range;
 SELECT sqlreg.try($$DELETE FROM sqlreg.s2$$) AS hot_only_delete_all;

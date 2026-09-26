@@ -30,6 +30,10 @@ static ALLOW_SAME_TXN_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(fal
 #[cfg(feature = "pg")]
 static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
+static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
+static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
+#[cfg(feature = "pg")]
 static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -158,6 +162,24 @@ pub fn define_gucs() {
         c"Rejects UPDATE/DELETE whose WHERE clause also matches cold-only rows.",
         c"A plain UPDATE/DELETE only sees the hot heap. When on (default), after such a statement on a managed table with cold data KoldStore counts how many cold rows its WHERE clause matches and rejects the statement if any were left untouched (upstream #122). This reads cold storage for every non-primary-key UPDATE/DELETE on such a table; turn off to skip the check and accept silently partial writes.",
         &GUARD_SCAN_WRITES,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.hydrate_on_write",
+        c"EXPERIMENTAL: lets UPDATE/DELETE change cold-only rows by hydrating them first.",
+        c"Before a single-table UPDATE/DELETE on a managed table scans, the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED only; other statements keep being rejected by the write guards (upstream #122).",
+        &HYDRATE_ON_WRITE,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_hydrate_rows",
+        c"Most cold rows one statement may hydrate.",
+        c"Statements matching more cold-only rows are rejected instead of hydrating.",
+        &MAX_HYDRATE_ROWS,
+        1,
+        10_000_000,
         GucContext::Userset,
         flags,
     );
@@ -373,6 +395,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "on",
         },
         GucDefinition {
+            name: HYDRATE_ON_WRITE_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
+            name: MAX_HYDRATE_ROWS_GUC,
+            internal: false,
+            default_value: "10000",
+        },
+        GucDefinition {
             name: REJECT_SERIALIZABLE_COLD_READS_GUC,
             internal: false,
             default_value: "off",
@@ -495,6 +527,8 @@ pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_reads";
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
+pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
+pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
 pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
@@ -537,6 +571,34 @@ fn read_user_id_config_option() -> Option<String> {
     };
     let trimmed = setting.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Whether UPDATE/DELETE hydrate the cold-only rows they match (experimental).
+#[must_use]
+pub fn hydrate_on_write() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        HYDRATE_ON_WRITE.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
+}
+
+/// Most cold rows a single statement may hydrate.
+#[must_use]
+pub fn max_hydrate_rows() -> usize {
+    #[cfg(feature = "pg")]
+    {
+        usize::try_from(MAX_HYDRATE_ROWS.get()).unwrap_or(10_000)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        10_000
+    }
 }
 
 /// Whether cold reads are refused under SERIALIZABLE isolation.

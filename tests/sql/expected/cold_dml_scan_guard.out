@@ -371,6 +371,26 @@ ROLLBACK
  ok: 0
 (1 row)
 
+  cte_delete_cold_range
+-------------------------
+ REJECTED scan matches=2
+(1 row)
+
+  cte_update_cold_value
+-------------------------
+ REJECTED scan matches=1
+(1 row)
+
+ cte_delete_matching_nothing
+-----------------------------
+ ok: 1
+(1 row)
+
+ cte_delete_hot_rows
+---------------------
+ ok: 1
+(1 row)
+
  hot_only_range
 ----------------
  ok: 3

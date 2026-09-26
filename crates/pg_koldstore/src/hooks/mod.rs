@@ -9,6 +9,8 @@ pub(crate) mod pk_predicate;
 #[cfg(feature = "pg")]
 pub(crate) mod dml_planner;
 #[cfg(feature = "pg")]
+pub(crate) mod hydrate_on_write;
+#[cfg(feature = "pg")]
 pub(crate) mod where_deparse;
 pub mod planner;
 
@@ -19,6 +21,7 @@ pub fn register_hooks() {
         crate::merge_scan::pg::register_custom_scan_hooks();
         executor::register_executor_end_hook();
         dml_planner::register();
+        hydrate_on_write::register();
         ddl::register_process_utility_hook();
     }
 }

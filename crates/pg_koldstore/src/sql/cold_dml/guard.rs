@@ -163,6 +163,40 @@ pub(crate) fn count_cold_only_matches(table_oid: pgrx::pg_sys::Oid, where_sql: &
     Ok(merged - hot)
 }
 
+/// The full rows (as jsonb objects) of the cold-only matches of `where_sql`
+/// (a condition over the table aliased `t`): rows of the merged hot+cold view
+/// whose primary key the heap-only view does not have. Used by hydrate-on-write.
+#[cfg(feature = "pg")]
+pub(crate) fn cold_only_matching_rows(
+    table_oid: pgrx::pg_sys::Oid,
+    where_sql: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let relation = super::qualified_relation(table_oid)?;
+    let pk_columns = super::primary_key_columns(table_oid)?;
+    let sql = format!(
+        "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) FROM {} AS t WHERE {where_sql}",
+        relation.quoted()
+    );
+    let fetch = |sql: &str| -> Result<Vec<serde_json::Value>, String> {
+        let rows = pgrx::Spi::get_one::<pgrx::JsonB>(sql).map_err(|error| error.to_string())?;
+        Ok(match rows.map(|json| json.0) {
+            Some(serde_json::Value::Array(rows)) => rows,
+            _ => Vec::new(),
+        })
+    };
+    let merged = crate::txn_writes::with_check_suppressed(|| fetch(&sql))?;
+    let hot = {
+        let _hot_only = crate::merge_scan::pg::HotOnlyRelation::new(table_oid);
+        crate::txn_writes::with_check_suppressed(|| fetch(&sql))?
+    };
+    let key = |row: &serde_json::Value| -> String {
+        serde_json::to_string(&pk_columns.iter().map(|column| row.get(column).cloned()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let hot_keys: std::collections::HashSet<String> = hot.iter().map(key).collect();
+    Ok(merged.into_iter().filter(|row| !hot_keys.contains(&key(row))).collect())
+}
+
 /// Runs `sql` (a `SELECT count(*)` over the statement's join, see
 /// `hooks::dml_planner`) twice with the statement's own parameters -- once over
 /// the merged hot+cold view, once with `table_oid` forced to plain heap scans

@@ -196,6 +196,27 @@ fn hydrate_pk_impl(
     Ok(rows.rows_affected)
 }
 
+/// Inserts already-located full `rows` (jsonb objects) into the heap, skipping
+/// keys that are already present. Set-based counterpart of [`hydrate_pk_impl`]'s
+/// second step, used by hydrate-on-write. Returns the number inserted.
+#[cfg(feature = "pg")]
+pub(crate) fn hydrate_rows(table_oid: pgrx::pg_sys::Oid, rows: &[serde_json::Value]) -> Result<u64, String> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let quoted = qualified_relation(table_oid)?.quoted();
+    let insert_sql = format!(
+        "INSERT INTO {quoted} \
+         SELECT * FROM jsonb_populate_recordset(NULL::{quoted}, $1) \
+         ON CONFLICT DO NOTHING"
+    );
+    let statement =
+        koldstore_common::SqlStatement::write("koldstore hydrate rows", &insert_sql).map_err(|error| error.to_string())?;
+    let args = [DatumWithOid::from(pgrx::JsonB(serde_json::Value::Array(rows.to_vec())))];
+    let done = guard::with_guard_suspended(|| crate::spi::update(&statement, &args)).map_err(|error| error.to_string())?;
+    Ok(done.rows_affected)
+}
+
 /// Hydrates a cold-only primary key back into the heap.
 ///
 /// SQL contract: `koldstore.hydrate_pk(table_name regclass, pk jsonb) → jsonb`.

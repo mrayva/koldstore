@@ -96,6 +96,9 @@ mod live {
             // those pointers reference. See `pk_predicate`'s module doc
             // comment for why this can't be a single pass.
             let cold_guard_candidate = cold_only_update_delete_candidate(query_desc);
+            // `UPDATE`/`DELETE` inside a data-modifying CTE live in the plan's sub-plans; the
+            // top-level statement is a SELECT (or an INSERT), so they need their own look.
+            let cte_guard_candidates = cold_only_cte_candidates(query_desc);
             if let Some(previous) = PREVIOUS {
                 previous(query_desc);
             } else {
@@ -115,10 +118,80 @@ mod live {
                 }
             }
             crate::memory::release_process_heap_if_pending();
+            crate::hooks::hydrate_on_write::release_locks();
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.
             if let Some(candidate) = cold_guard_candidate {
                 enforce_cold_only_update_delete_guard(&candidate);
             }
+            for candidate in &cte_guard_candidates {
+                enforce_cold_only_update_delete_guard(candidate);
+            }
+        }
+    }
+
+    /// Guard candidates for `UPDATE`/`DELETE` nodes inside data-modifying CTEs
+    /// (`WITH d AS (DELETE ... RETURNING ...) SELECT ...`). They only get the generic
+    /// cold-match check: the exact-primary-key analysis relies on the top-level
+    /// statement's row count.
+    unsafe fn cold_only_cte_candidates(query_desc: *mut pg_sys::QueryDesc) -> Vec<GuardCandidate> {
+        unsafe {
+            let mut candidates = Vec::new();
+            if query_desc.is_null()
+                || (*query_desc).plannedstmt.is_null()
+                || (*query_desc).estate.is_null()
+                || crate::sql::cold_dml::guard::suspended()
+                || !crate::guc::guard_scan_writes()
+            {
+                return candidates;
+            }
+            let estate = (*query_desc).estate;
+            if (*estate).es_top_eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int) != 0 {
+                return candidates;
+            }
+            let planned = (*query_desc).plannedstmt;
+            if !(*planned).hasModifyingCTE || (*planned).rtable.is_null() {
+                return candidates;
+            }
+            let literals = crate::merge_scan::pg::literals::list_node_pointers;
+            for subplan in literals((*planned).subplans) {
+                let plan = subplan.cast::<pg_sys::Plan>();
+                if plan.is_null() || (*plan).type_ != pg_sys::NodeTag::T_ModifyTable {
+                    continue;
+                }
+                let modify = plan.cast::<pg_sys::ModifyTable>();
+                if !matches!((*modify).operation, pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE) {
+                    continue;
+                }
+                if (*modify).resultRelations.is_null() || (*(*modify).resultRelations).length != 1 {
+                    continue;
+                }
+                let range_table_index = (*(*(*modify).resultRelations).elements.add(0)).int_value;
+                let rtable = (*planned).rtable;
+                if range_table_index <= 0 || range_table_index > (*rtable).length {
+                    continue;
+                }
+                let rte = (*(*rtable).elements.add((range_table_index - 1) as usize))
+                    .ptr_value
+                    .cast::<pg_sys::RangeTblEntry>();
+                if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                    continue;
+                }
+                let table_oid = (*rte).relid;
+                if !crate::catalog::cache::is_managed_relation(table_oid) {
+                    continue;
+                }
+                candidates.push(GuardCandidate {
+                    table_oid,
+                    raw: None,
+                    where_sql: crate::hooks::where_deparse::deparse_where(plan, (*query_desc).params, table_oid),
+                    single_valued: false,
+                    es_processed: 0,
+                    prior_write: crate::txn_writes::was_written(table_oid),
+                    merge_changes_rows: false,
+                    join_probe: None,
+                });
+            }
+            candidates
         }
     }
 
