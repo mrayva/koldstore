@@ -105,7 +105,7 @@ fn cleanup_one_managed_table_before_drop(
         &relation.namespace,
         &relation.name,
     )?;
-    let table = QualifiedTableName::parse(&format!("{}.{}", relation.namespace, relation.name))
+    let table = QualifiedTableName::new(Some(&relation.namespace), &relation.name)
         .map_err(|error| error.to_string())?;
 
     let client = crate::object_store::open_managed_object_store_client(

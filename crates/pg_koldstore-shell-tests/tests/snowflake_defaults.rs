@@ -18,8 +18,10 @@ fn primary_key_default_clause_quotes_safe_greenfield_identifier() {
 }
 
 #[test]
-fn primary_key_default_clause_rejects_unsafe_identifier() {
+fn primary_key_default_clause_rejects_blank_and_quotes_unusual_identifiers() {
     assert!(primary_key_default_clause("").is_err());
-    assert!(primary_key_default_clause("not safe").is_err());
-    assert!(primary_key_default_clause("id; drop table app.items").is_err());
+    assert_eq!(
+        primary_key_default_clause("not \"safe\"").unwrap(),
+        "\"not \"\"safe\"\"\" bigint PRIMARY KEY DEFAULT SNOWFLAKE_ID()"
+    );
 }

@@ -32,10 +32,13 @@ fn user_scope_policy_plan_enables_fail_closed_rls() {
 }
 
 #[test]
-fn user_scope_policy_plan_rejects_unsafe_scope_columns() {
+fn user_scope_policy_plan_rejects_blank_and_quotes_unusual_scope_columns() {
     let table = QualifiedTableName::parse("app.notes").unwrap();
 
     assert!(plan_user_scope_policy(&table, "").is_err());
-    assert!(plan_user_scope_policy(&table, "not safe").is_err());
-    assert!(plan_user_scope_policy(&table, "user_id; drop table app.notes").is_err());
+    // Anything else is a legal identifier once quoted, so it is quoted, never spliced in.
+    let plan = plan_user_scope_policy(&table, "user id\"; drop table app.notes").unwrap();
+    let create_policy = &plan.statements[2].sql;
+    assert!(create_policy.contains("\"user id\"\"; drop table app.notes\" = current_setting"));
+    assert!(!create_policy.contains("user id\"; drop"));
 }

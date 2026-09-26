@@ -20,13 +20,14 @@ impl PkColumn {
     ///
     /// Returns an error when the name is empty.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let trimmed = value.as_ref().trim();
-        if trimmed.is_empty() {
+        // Names are taken exactly: a column may legitimately start or end with a blank.
+        let name = value.as_ref();
+        if name.is_empty() {
             return Err(KoldstoreError::InvalidPrimaryKey(
                 "primary-key column name cannot be empty".to_string(),
             ));
         }
-        Ok(Self(trimmed.to_string()))
+        Ok(Self(name.to_string()))
     }
 
     /// Returns the column name.

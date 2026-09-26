@@ -54,9 +54,25 @@ fn table_name_accepts_quoted_parts_as_regclass_prints_them() {
     assert_eq!(TableName::parse("\"Sch\".\"Tbl\"").unwrap().as_str(), "Sch.Tbl");
     let qualified = QualifiedTableName::parse("app.\"MixedCase\"").unwrap();
     assert_eq!(qualified.name, "MixedCase");
-    // quoting never lets other characters through
-    assert!(TableName::parse("app.\"Odd Name\"").is_err());
-    assert!(TableName::parse("\"a\"\"b\"").is_err());
+    // quoted parts may hold any valid identifier
+    let odd = TableName::parse("app.\"Odd Name\"").unwrap();
+    assert_eq!(odd.relation(), "Odd Name");
+    assert_eq!(odd.quoted(), "\"app\".\"Odd Name\"");
+    assert_eq!(odd.as_str(), "app.\"Odd Name\"");
+    assert_eq!(TableName::parse(odd.as_str()).unwrap(), odd);
+    let quote = TableName::parse("\"Quo\"\"te\".\"dot.ted\"").unwrap();
+    assert_eq!((quote.schema(), quote.relation()), (Some("Quo\"te"), "dot.ted"));
+    assert_eq!(quote.quoted(), "\"Quo\"\"te\".\"dot.ted\"");
+    assert_eq!(TableName::parse(quote.as_str()).unwrap(), quote);
+    assert_eq!(TableName::parse("\"Café\"").unwrap().relation(), "Café");
+    assert_eq!(TableName::new(Some("s"), "1 x").unwrap().as_str(), "s.\"1 x\"");
+    // an unquoted part still has to be a plain identifier
+    assert!(TableName::parse("app.Odd Name").is_err());
+    assert!(TableName::parse("1table").is_err());
+    assert!(TableName::parse("app.\"\"").is_err());
+    assert!(TableName::new(None, "").is_err());
+    assert!(TableName::new(None, "a\0b").is_err());
+    assert!(TableName::parse("\"a\"\"b\"").is_ok());
     assert!(TableName::parse("\"unterminated").is_err());
     assert!(TableName::parse("\"a\".\"b\".\"c\"").is_err());
     assert!(TableName::parse("\"\"").is_err());

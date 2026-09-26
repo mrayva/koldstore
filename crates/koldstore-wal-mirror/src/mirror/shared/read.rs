@@ -258,7 +258,7 @@ fn pk_json_projection(primary_key: &[&str]) -> MirrorResult<String> {
     Ok(primary_key
         .iter()
         .zip(quoted)
-        .map(|(column, quoted)| format!("'{}', mirror.{quoted}", column.trim()))
+        .map(|(column, quoted)| format!("'{}', mirror.{quoted}", koldstore_common::escape_sql_literal(column)))
         .collect::<Vec<_>>()
         .join(", "))
 }

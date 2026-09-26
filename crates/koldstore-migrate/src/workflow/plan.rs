@@ -1,7 +1,7 @@
 //! Migration entrypoint planning.
 
 use koldstore_common::{
-    is_safe_identifier, ColumnId, ColumnRef, SqlStatement, StorageId, TableKind, TableOid,
+    is_valid_identifier, ColumnId, ColumnRef, SqlStatement, StorageId, TableKind, TableOid,
 };
 use uuid::Uuid;
 
@@ -138,13 +138,13 @@ pub fn plan_empty_table_migration(
     let effective_scope_column = match request.table_type.as_str() {
         "shared" => None,
         "user" => {
-            let Some(column) = request.scope_column.as_deref().map(str::trim) else {
+            let Some(column) = request.scope_column.as_deref() else {
                 return Err(MigrationError::MissingScopeColumn);
             };
             if column.is_empty() {
                 return Err(MigrationError::MissingScopeColumn);
             }
-            if !is_safe_identifier(column) {
+            if !is_valid_identifier(column) {
                 return Err(MigrationError::InvalidScopeColumn(column.to_string()));
             }
             Some(column.to_string())

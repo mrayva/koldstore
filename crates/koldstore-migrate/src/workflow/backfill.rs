@@ -1,7 +1,7 @@
 //! Existing-row mirror initialization settings and planning.
 
 use koldstore_common::{
-    is_safe_identifier, quote_ident, snowflake_id_call_expression, PrimaryKeyColumnShape,
+    is_valid_identifier, quote_ident, snowflake_id_call_expression, PrimaryKeyColumnShape,
 };
 use koldstore_wal_mirror::{quoted_pk_columns, MirrorColumn};
 use thiserror::Error;
@@ -103,12 +103,12 @@ pub fn plan_mirror_initialization_batch_with_segment_order(
     if primary_key.is_empty() {
         return Err(MirrorInitializationError::MissingPrimaryKey);
     }
-    if !is_safe_identifier(&ordering.column) {
+    if !is_valid_identifier(&ordering.column) {
         return Err(MirrorInitializationError::InvalidIdentifier(
             ordering.column,
         ));
     }
-    if let Some(column) = segment_order_column.filter(|column| !is_safe_identifier(column)) {
+    if let Some(column) = segment_order_column.filter(|column| !is_valid_identifier(column)) {
         return Err(MirrorInitializationError::InvalidIdentifier(
             column.to_string(),
         ));

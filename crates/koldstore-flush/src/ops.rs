@@ -7,7 +7,7 @@
 //! `pg_koldstore`.
 
 use koldstore_common::{
-    is_safe_identifier, quote_ident, QualifiedTableName, ScopeKey, SeqId, SqlParamType,
+    is_valid_identifier, quote_ident, QualifiedTableName, ScopeKey, SeqId, SqlParamType,
     SqlStatement, TableName,
 };
 use thiserror::Error;
@@ -816,9 +816,8 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
     }
 }
 fn validate_identifier(value: &str) -> Result<String, OpsError> {
-    let trimmed = value.trim();
-    if is_safe_identifier(trimmed) {
-        Ok(quote_ident(trimmed))
+    if is_valid_identifier(value) {
+        Ok(quote_ident(value))
     } else {
         Err(OpsError::Sql(format!("invalid identifier `{value}`")))
     }

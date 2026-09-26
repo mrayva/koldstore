@@ -34,7 +34,10 @@ pub use config::{
 };
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
-pub use ident::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident};
+pub use ident::{
+    derived_base_name, display_ident, encode_path_segment, escape_sql_literal, floor_str, stable_name_hash, is_safe_identifier, is_valid_identifier, quote_ident, quote_qualified_ident,
+    split_qualified,
+};
 pub use json::{column_stats_range_may_overlap, compare_json_values};
 pub use log::{component as log_component, format_line as format_log_line, TimedOp};
 pub use lsn::{format_pg_lsn, parse_pg_lsn, AppliedWalBoundary, WalFenceLsn};

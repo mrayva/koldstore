@@ -1,6 +1,9 @@
 CREATE FUNCTION
 CREATE FUNCTION
 CREATE FUNCTION
+CREATE FUNCTION
+CREATE SCHEMA
+CREATE SCHEMA
 CREATE TABLE
 INSERT 0 3
  mixed_case_manage
@@ -20,7 +23,12 @@ INSERT 0 3
 
  mixed_case_read
 -----------------
- ok: 1
+ 3
+(1 row)
+
+ mixed_case_ordered_read
+-------------------------
+ 3,2
 (1 row)
 
  mixed_case_insert_cold_key
@@ -38,6 +46,36 @@ INSERT 0 3
  REJECTED scan matches=3
 (1 row)
 
+ mixed_case_update_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ mixed_case_updated_visible
+----------------------------
+ 1
+(1 row)
+
+ mixed_case_delete_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ mixed_case_after_delete_row
+-----------------------------
+ 2
+(1 row)
+
  mixed_case_unmanaged
 ----------------------
  t
@@ -45,12 +83,7 @@ INSERT 0 3
 
  mixed_case_rows_after_unmanage
 --------------------------------
-                              3
-(1 row)
-
- mixed_case_helper_objects_left
---------------------------------
-                              0
+                              2
 (1 row)
 
 CREATE TABLE
@@ -72,7 +105,12 @@ INSERT 0 3
 
  reserved_read
 ---------------
- ok: 1
+ 3
+(1 row)
+
+ reserved_ordered_read
+-----------------------
+ 3,2
 (1 row)
 
  reserved_insert_cold_key
@@ -90,6 +128,36 @@ INSERT 0 3
  REJECTED scan matches=3
 (1 row)
 
+ reserved_update_row
+---------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ reserved_updated_visible
+--------------------------
+ 1
+(1 row)
+
+ reserved_delete_row
+---------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ reserved_after_delete_row
+---------------------------
+ 2
+(1 row)
+
  reserved_unmanaged
 --------------------
  t
@@ -97,23 +165,18 @@ INSERT 0 3
 
  reserved_rows_after_unmanage
 ------------------------------
-                            3
-(1 row)
-
- reserved_helper_objects_left
-------------------------------
-                            0
+                            2
 (1 row)
 
 CREATE TABLE
 INSERT 0 3
- tbl_long_manage
------------------
+ spaces_manage
+---------------
  managed
 (1 row)
 
- tbl_long_flush
-----------------
+ spaces_flush
+--------------
  t
 (1 row)
 
@@ -122,39 +185,725 @@ INSERT 0 3
 
 (1 row)
 
- tbl_long_read
----------------
- ok: 1
+ spaces_read
+-------------
+ 3
 (1 row)
 
- tbl_long_insert_cold_key
---------------------------
+ spaces_ordered_read
+---------------------
+ 3,2
+(1 row)
+
+ spaces_insert_cold_key
+------------------------
  REJECTED insert
 (1 row)
 
-   tbl_long_update_cold_key
-------------------------------
- REJECTED write pk={"id":"2"}
+       spaces_update_cold_key
+------------------------------------
+ REJECTED write pk={"Order Id":"2"}
 (1 row)
 
-  tbl_long_range_delete
+   spaces_range_delete
 -------------------------
  REJECTED scan matches=3
 (1 row)
 
- tbl_long_unmanaged
+ spaces_update_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ spaces_updated_visible
+------------------------
+ 1
+(1 row)
+
+ spaces_delete_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ spaces_after_delete_row
+-------------------------
+ 2
+(1 row)
+
+ spaces_unmanaged
+------------------
+ t
+(1 row)
+
+ spaces_rows_after_unmanage
+----------------------------
+                          2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ quotes_manage
+---------------
+ managed
+(1 row)
+
+ quotes_flush
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ quotes_read
+-------------
+ 3
+(1 row)
+
+ quotes_ordered_read
+---------------------
+ 3,2
+(1 row)
+
+ quotes_insert_cold_key
+------------------------
+ REJECTED insert
+(1 row)
+
+     quotes_update_cold_key
+--------------------------------
+ REJECTED write pk={"i\"d":"2"}
+(1 row)
+
+   quotes_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ quotes_update_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ quotes_updated_visible
+------------------------
+ 1
+(1 row)
+
+ quotes_delete_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ quotes_after_delete_row
+-------------------------
+ 2
+(1 row)
+
+ quotes_unmanaged
+------------------
+ t
+(1 row)
+
+ quotes_rows_after_unmanage
+----------------------------
+                          2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ unicode_manage
+----------------
+ managed
+(1 row)
+
+ unicode_flush
+---------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ unicode_read
+--------------
+ 3
+(1 row)
+
+ unicode_ordered_read
+----------------------
+ 3,2
+(1 row)
+
+ unicode_insert_cold_key
+-------------------------
+ REJECTED insert
+(1 row)
+
+    unicode_update_cold_key
+-------------------------------
+ REJECTED write pk={"clé":"2"}
+(1 row)
+
+  unicode_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ unicode_update_row
+--------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ unicode_updated_visible
+-------------------------
+ 1
+(1 row)
+
+ unicode_delete_row
+--------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ unicode_after_delete_row
+--------------------------
+ 2
+(1 row)
+
+ unicode_unmanaged
+-------------------
+ t
+(1 row)
+
+ unicode_rows_after_unmanage
+-----------------------------
+                           2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ digit_first_manage
+--------------------
+ managed
+(1 row)
+
+ digit_first_flush
+-------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ digit_first_read
+------------------
+ 3
+(1 row)
+
+ digit_first_ordered_read
+--------------------------
+ 3,2
+(1 row)
+
+ digit_first_insert_cold_key
+-----------------------------
+ REJECTED insert
+(1 row)
+
+  digit_first_update_cold_key
+-------------------------------
+ REJECTED write pk={"2nd":"2"}
+(1 row)
+
+ digit_first_range_delete
+--------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ digit_first_update_row
+------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ digit_first_updated_visible
+-----------------------------
+ 1
+(1 row)
+
+ digit_first_delete_row
+------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ digit_first_after_delete_row
+------------------------------
+ 2
+(1 row)
+
+ digit_first_unmanaged
+-----------------------
+ t
+(1 row)
+
+ digit_first_rows_after_unmanage
+---------------------------------
+                               2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ dots_slashes_manage
+---------------------
+ managed
+(1 row)
+
+ dots_slashes_flush
 --------------------
  t
 (1 row)
 
- tbl_long_rows_after_unmanage
-------------------------------
-                            3
+ settle
+--------
+
 (1 row)
 
- tbl_long_helper_objects_left
+ dots_slashes_read
+-------------------
+ 3
+(1 row)
+
+ dots_slashes_ordered_read
+---------------------------
+ 3,2
+(1 row)
+
+ dots_slashes_insert_cold_key
 ------------------------------
-                            0
+ REJECTED insert
+(1 row)
+
+ dots_slashes_update_cold_key
+-------------------------------
+ REJECTED write pk={"a.b":"2"}
+(1 row)
+
+ dots_slashes_range_delete
+---------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ dots_slashes_update_row
+-------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ dots_slashes_updated_visible
+------------------------------
+ 1
+(1 row)
+
+ dots_slashes_delete_row
+-------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ dots_slashes_after_delete_row
+-------------------------------
+ 2
+(1 row)
+
+ dots_slashes_unmanaged
+------------------------
+ t
+(1 row)
+
+ dots_slashes_rows_after_unmanage
+----------------------------------
+                                2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ odd_schema_manage
+-------------------
+ managed
+(1 row)
+
+ odd_schema_flush
+------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ odd_schema_read
+-----------------
+ 3
+(1 row)
+
+ odd_schema_ordered_read
+-------------------------
+ 3,2
+(1 row)
+
+ odd_schema_insert_cold_key
+----------------------------
+ REJECTED insert
+(1 row)
+
+  odd_schema_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ odd_schema_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ odd_schema_update_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ odd_schema_updated_visible
+----------------------------
+ 1
+(1 row)
+
+ odd_schema_delete_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ odd_schema_after_delete_row
+-----------------------------
+ 2
+(1 row)
+
+ odd_schema_unmanaged
+----------------------
+ t
+(1 row)
+
+ odd_schema_rows_after_unmanage
+--------------------------------
+                              2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ padded_manage
+---------------
+ managed
+(1 row)
+
+ padded_flush
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ padded_read
+-------------
+ 3
+(1 row)
+
+ padded_ordered_read
+---------------------
+ 3,2
+(1 row)
+
+ padded_insert_cold_key
+------------------------
+ REJECTED insert
+(1 row)
+
+     padded_update_cold_key
+--------------------------------
+ REJECTED write pk={" pk ":"2"}
+(1 row)
+
+   padded_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ padded_update_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ padded_updated_visible
+------------------------
+ 1
+(1 row)
+
+ padded_delete_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ padded_after_delete_row
+-------------------------
+ 2
+(1 row)
+
+ padded_unmanaged
+------------------
+ t
+(1 row)
+
+ padded_rows_after_unmanage
+----------------------------
+                          2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ long_unicode_manage
+---------------------
+ managed
+(1 row)
+
+ long_unicode_flush
+--------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_unicode_read
+-------------------
+ 3
+(1 row)
+
+ long_unicode_ordered_read
+---------------------------
+ 3,2
+(1 row)
+
+ long_unicode_insert_cold_key
+------------------------------
+ REJECTED insert
+(1 row)
+
+ long_unicode_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ long_unicode_range_delete
+---------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ long_unicode_update_row
+-------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_unicode_updated_visible
+------------------------------
+ 1
+(1 row)
+
+ long_unicode_delete_row
+-------------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_unicode_after_delete_row
+-------------------------------
+ 2
+(1 row)
+
+ long_unicode_unmanaged
+------------------------
+ t
+(1 row)
+
+ long_unicode_rows_after_unmanage
+----------------------------------
+                                2
+(1 row)
+
+CREATE TABLE
+INSERT 0 3
+ long_plain_manage
+-------------------
+ managed
+(1 row)
+
+ long_plain_flush
+------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_plain_read
+-----------------
+ 3
+(1 row)
+
+ long_plain_ordered_read
+-------------------------
+ 3,2
+(1 row)
+
+ long_plain_insert_cold_key
+----------------------------
+ REJECTED insert
+(1 row)
+
+  long_plain_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ long_plain_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ long_plain_update_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_plain_updated_visible
+----------------------------
+ 1
+(1 row)
+
+ long_plain_delete_row
+-----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ long_plain_after_delete_row
+-----------------------------
+ 2
+(1 row)
+
+ long_plain_unmanaged
+----------------------
+ t
+(1 row)
+
+ long_plain_rows_after_unmanage
+--------------------------------
+                              2
 (1 row)
 
 CREATE TABLE
@@ -176,7 +925,12 @@ INSERT 0 3
 
  collide_1_read
 ----------------
- ok: 1
+ 3
+(1 row)
+
+ collide_1_ordered_read
+------------------------
+ 3,2
 (1 row)
 
  collide_1_insert_cold_key
@@ -194,6 +948,36 @@ INSERT 0 3
  REJECTED scan matches=3
 (1 row)
 
+ collide_1_update_row
+----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_1_updated_visible
+---------------------------
+ 1
+(1 row)
+
+ collide_1_delete_row
+----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_1_after_delete_row
+----------------------------
+ 2
+(1 row)
+
  collide_1_unmanaged
 ---------------------
  t
@@ -201,12 +985,7 @@ INSERT 0 3
 
  collide_1_rows_after_unmanage
 -------------------------------
-                             3
-(1 row)
-
- collide_1_helper_objects_left
--------------------------------
-                             0
+                             2
 (1 row)
 
 CREATE TABLE
@@ -228,7 +1007,12 @@ INSERT 0 3
 
  collide_2_read
 ----------------
- ok: 1
+ 3
+(1 row)
+
+ collide_2_ordered_read
+------------------------
+ 3,2
 (1 row)
 
  collide_2_insert_cold_key
@@ -246,6 +1030,36 @@ INSERT 0 3
  REJECTED scan matches=3
 (1 row)
 
+ collide_2_update_row
+----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_2_updated_visible
+---------------------------
+ 1
+(1 row)
+
+ collide_2_delete_row
+----------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ collide_2_after_delete_row
+----------------------------
+ 2
+(1 row)
+
  collide_2_unmanaged
 ---------------------
  t
@@ -253,65 +1067,272 @@ INSERT 0 3
 
  collide_2_rows_after_unmanage
 -------------------------------
-                             3
-(1 row)
-
- collide_2_helper_objects_left
--------------------------------
-                             0
+                             2
 (1 row)
 
 CREATE TABLE
-                                                                                               col_space_manage
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.odd_col_space: unsupported identifier(s): column "Some Value"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+INSERT 0 3
+ twin_a_manage
+---------------
+ managed
+(1 row)
+
+ twin_a_flush
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_a_read
+-------------
+ 3
+(1 row)
+
+ twin_a_ordered_read
+---------------------
+ 3,2
+(1 row)
+
+ twin_a_insert_cold_key
+------------------------
+ REJECTED insert
+(1 row)
+
+    twin_a_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+   twin_a_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ twin_a_update_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_a_updated_visible
+------------------------
+ 1
+(1 row)
+
+ twin_a_delete_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_a_after_delete_row
+-------------------------
+ 2
+(1 row)
+
+ twin_a_unmanaged
+------------------
+ t
+(1 row)
+
+ twin_a_rows_after_unmanage
+----------------------------
+                          2
 (1 row)
 
 CREATE TABLE
-                                                                                            col_quote_manage
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.odd_col_quote: unsupported identifier(s): column "va"l"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+INSERT 0 3
+ twin_b_manage
+---------------
+ managed
+(1 row)
+
+ twin_b_flush
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_b_read
+-------------
+ 3
+(1 row)
+
+ twin_b_ordered_read
+---------------------
+ 3,2
+(1 row)
+
+ twin_b_insert_cold_key
+------------------------
+ REJECTED insert
+(1 row)
+
+    twin_b_update_cold_key
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+   twin_b_range_delete
+-------------------------
+ REJECTED scan matches=3
+(1 row)
+
+ twin_b_update_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_b_updated_visible
+------------------------
+ 1
+(1 row)
+
+ twin_b_delete_row
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ twin_b_after_delete_row
+-------------------------
+ 2
+(1 row)
+
+ twin_b_unmanaged
+------------------
+ t
+(1 row)
+
+ twin_b_rows_after_unmanage
+----------------------------
+                          2
+(1 row)
+
+ helper_functions_left
+-----------------------
+                     0
+(1 row)
+
+ mirrors_left
+--------------
+            0
 (1 row)
 
 CREATE TABLE
-                                                                                              col_unicode_manage
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.odd_col_unicode: unsupported identifier(s): column "valeur_é"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+INSERT 0 3
+ evolve_manage
+---------------
+ managed
+(1 row)
+
+ evolve_flush_1
+----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ALTER TABLE
+INSERT 0 1
+ALTER TABLE
+ settle
+--------
+
+(1 row)
+
+ evolve_read_hot
+-----------------
+ 10|hot|42
+(1 row)
+
+ evolve_flush_2
+----------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ evolve_read_all
+-----------------
+ 4
+(1 row)
+
+ evolve_filter_new_col
+-----------------------
+ 1
+(1 row)
+
+ evolve_unmanaged
+------------------
+ t
 (1 row)
 
 CREATE TABLE
-                                                                                         col_digit_first_manage
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.odd_col_digit: unsupported identifier(s): column "2nd"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+INSERT 0 3
+ scoped_managed
+----------------
+ t
 (1 row)
 
-CREATE TABLE
-                                                                                              pk_space_manage
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.odd_pk_space: unsupported identifier(s): column "Order Id"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+SET
+ scoped_flush
+--------------
+ t
 (1 row)
 
-CREATE TABLE
-                                                                                            tbl_space_manage
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg."Odd Name": unsupported identifier(s): table "Odd Name"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+ settle
+--------
+
 (1 row)
 
-CREATE TABLE
-                                                                                           tbl_quote_manage
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg."Quo""te": unsupported identifier(s): table "Quo"te"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+ scoped_read
+-------------
+ 3
 (1 row)
 
-CREATE TABLE
-                                                                                       tbl_unicode_manage
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg."Café": unsupported identifier(s): table "Café"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+ scoped_bloom_filter_read
+--------------------------
+ 1
 (1 row)
 
-CREATE TABLE
-                                                                                       tbl_digit_first_manage
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg."1table": unsupported identifier(s): table "1table"; names may only contain ASCII letters, digits and underscores and must not start with a digit
+RESET
+DROP TABLE
+DROP SCHEMA
+DROP SCHEMA
+ helper_functions_after_drops
+------------------------------
+                            0
 (1 row)
 

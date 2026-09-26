@@ -1,6 +1,6 @@
 //! Low-level mirror write SQL builders.
 
-use koldstore_common::{is_safe_identifier, quote_ident, MirrorOperation};
+use koldstore_common::{is_valid_identifier, quote_ident, MirrorOperation};
 
 use super::columns::MirrorColumn;
 use super::error::{MirrorError, MirrorResult};
@@ -59,8 +59,8 @@ pub fn quoted_pk_columns(primary_key: &[&str]) -> MirrorResult<Vec<String>> {
     primary_key
         .iter()
         .map(|column| {
-            let name = column.trim();
-            if is_safe_identifier(name) {
+            let name: &str = column;
+            if is_valid_identifier(name) {
                 Ok(quote_ident(name))
             } else {
                 Err(MirrorError::InvalidColumn(name.to_string()))

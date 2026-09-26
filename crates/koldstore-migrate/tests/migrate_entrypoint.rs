@@ -71,6 +71,15 @@ fn migrate_table_plan_rejects_unsupported_or_unsafe_arguments() {
 
     request = shared_request();
     request.table_type = "user".to_string();
-    request.scope_column = Some("not safe".to_string());
+    request.scope_column = Some(String::new());
     assert!(plan_empty_table_migration(&request, context()).is_err());
+}
+
+#[test]
+fn scope_columns_with_unusual_characters_are_accepted_and_quoted() {
+    let mut request = shared_request();
+    request.table_type = "user".to_string();
+    request.scope_column = Some("not safe\"; drop table x".to_string());
+    let plan = plan_empty_table_migration(&request, context()).unwrap();
+    assert_eq!(plan.effective_scope_column.as_deref(), Some("not safe\"; drop table x"));
 }

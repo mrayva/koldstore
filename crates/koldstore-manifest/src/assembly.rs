@@ -140,7 +140,11 @@ pub fn manifest_relative_segment_path(
     table_name: &str,
     object_path: &str,
 ) -> String {
-    let prefix = format!("{namespace}/{table_name}/");
+    let prefix = format!(
+        "{}/{}/",
+        koldstore_common::encode_path_segment(namespace),
+        koldstore_common::encode_path_segment(table_name)
+    );
     object_path
         .strip_prefix(&prefix)
         .unwrap_or(object_path)

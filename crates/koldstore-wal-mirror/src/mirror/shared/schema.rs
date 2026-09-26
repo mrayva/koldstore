@@ -1,7 +1,7 @@
 //! Mirror table schema planning.
 
 use koldstore_common::{
-    escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident,
+    escape_sql_literal, is_safe_identifier, is_valid_identifier, quote_ident, quote_qualified_ident,
     PrimaryKeyColumnShape, SqlStatement,
 };
 
@@ -70,7 +70,7 @@ pub fn plan_mirror_pk_column_renames(
         if old_name == new_name {
             continue;
         }
-        if !is_safe_identifier(old_name) || !is_safe_identifier(new_name) {
+        if !is_valid_identifier(old_name) || !is_valid_identifier(new_name) {
             return Err(MirrorError::InvalidColumn(format!(
                 "{old_name} -> {new_name}"
             )));

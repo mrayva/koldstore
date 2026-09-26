@@ -338,7 +338,6 @@ impl RegistrationMetadata {
                 || self
                     .scope_column
                     .as_deref()
-                    .map(str::trim)
                     .filter(|column| !column.is_empty())
                     .is_some())
     }
@@ -382,7 +381,6 @@ impl RegistrationMetadata {
             && self
                 .scope_column
                 .as_deref()
-                .map(str::trim)
                 .filter(|column| !column.is_empty())
                 .is_none()
         {
@@ -431,7 +429,6 @@ impl RegistrationMetadata {
             scope_column: self
                 .scope_column
                 .as_deref()
-                .map(str::trim)
                 .filter(|column| !column.is_empty())
                 .map(ToString::to_string),
             mirror_relation: self
@@ -905,7 +902,7 @@ fn resolve_operator_columns(
 ) -> RegistryResult<Vec<ColumnRef>> {
     let mut resolved = Vec::with_capacity(names.len());
     for raw in names {
-        let name = raw.trim();
+        let name = raw.as_str();
         if name.is_empty() {
             return Err(RegistryError::UnknownColdMetadataColumn {
                 field,

@@ -71,44 +71,6 @@ fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
              any partition or inheritance hierarchy are supported (upstream issue #125)"
         );
     }
-    reject_unsupported_identifiers(table_oid);
-}
-
-/// KoldStore builds SQL, mirror objects and Parquet schemas from the table's
-/// schema, namespace, table and column names, and only handles plain names
-/// (ASCII letters, digits and `_`, not starting with a digit; mixed case and
-/// reserved words are fine because they are always quoted). Anything else used
-/// to be accepted here and then fail every flush, leaving a managed table whose
-/// hot data could never be moved; refuse it up front instead.
-#[cfg(feature = "pg")]
-fn reject_unsupported_identifiers(table_oid: pgrx::pg_sys::Oid) {
-    let sql = "SELECT n.nspname::text AS name, 'schema' AS kind FROM pg_catalog.pg_class c \
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 \
-               UNION ALL SELECT c.relname::text, 'table' FROM pg_catalog.pg_class c WHERE c.oid = $1 \
-               UNION ALL SELECT a.attname::text, 'column' FROM pg_catalog.pg_attribute a \
-                 WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped";
-    let args = [pgrx::datum::DatumWithOid::from(table_oid)];
-    let names = pgrx::Spi::connect(|client| -> Result<Vec<(String, String)>, pgrx::spi::Error> {
-        client
-            .select(sql, None, &args)?
-            .map(|row| Ok((row.get::<String>(1)?.unwrap_or_default(), row.get::<String>(2)?.unwrap_or_default())))
-            .collect()
-    })
-    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let unsupported: Vec<String> = names
-        .into_iter()
-        .filter(|(name, _)| !koldstore_common::is_safe_identifier(name))
-        .map(|(name, kind)| format!("{kind} \"{name}\""))
-        .collect();
-    if !unsupported.is_empty() {
-        let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
-            .unwrap_or_else(|_| format!("(oid {})", table_oid.to_u32()));
-        pgrx::error!(
-            "migrate table failed: cannot manage {relation}: unsupported identifier(s): {}; names may only \
-             contain ASCII letters, digits and underscores and must not start with a digit",
-            unsupported.join(", ")
-        );
-    }
 }
 
 #[cfg(feature = "pg")]
@@ -536,14 +498,12 @@ fn manage_table_validation_context<'a>(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     let scope_column_input = scope_column
-        .map(str::trim)
         .filter(|name| !name.is_empty())
         .and_then(|name| catalog.columns.iter().find(|column| column.name == name))
         .map(|column| koldstore_migrate::manage_table::ScopeColumnInput {
             column_id: column.column_id.get(),
         });
     let segment_order_column = segment_order_column
-        .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| {
             let column = catalog

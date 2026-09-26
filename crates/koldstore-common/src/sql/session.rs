@@ -1,6 +1,6 @@
 //! Session SQL helper constants and pure planning helpers.
 
-use crate::is_safe_identifier;
+use crate::{is_valid_identifier, quote_ident};
 
 /// Public SQL function name used for Snowflake-style ids.
 pub const SNOWFLAKE_ID_FUNCTION: &str = "SNOWFLAKE_ID";
@@ -34,13 +34,13 @@ pub const fn snowflake_id_call_expression() -> &'static str {
 ///
 /// Returns an error when `column_name` is not a simple safe identifier.
 pub fn primary_key_default_clause(column_name: &str) -> SessionSqlResult<String> {
-    let column_name = column_name.trim();
-    if !is_safe_identifier(column_name) {
+    if !is_valid_identifier(column_name) {
         return Err(SessionSqlError::InvalidIdentifier(column_name.to_string()));
     }
 
     Ok(format!(
-        "\"{column_name}\" bigint PRIMARY KEY DEFAULT {}",
+        "{} bigint PRIMARY KEY DEFAULT {}",
+        quote_ident(column_name),
         snowflake_default_expression()
     ))
 }

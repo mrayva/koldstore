@@ -493,7 +493,6 @@ impl ManageTableOptions {
     pub fn explicit_migration_order_by(&self) -> Option<&str> {
         self.migration_order_by
             .as_deref()
-            .map(str::trim)
             .filter(|column| !column.is_empty())
     }
 
@@ -589,7 +588,6 @@ where
     columns
         .into_iter()
         .map(Into::into)
-        .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .filter(|name| seen.insert(name.clone()))
         .collect()
@@ -603,7 +601,7 @@ fn validate_column_name_list(field: &str, columns: Option<&[String]>) -> Result<
         return Err(format!("{field} must not be an empty list"));
     }
     for name in columns {
-        if name.trim().is_empty() {
+        if name.is_empty() {
             return Err(format!("{field} entries must be non-blank column names"));
         }
     }
@@ -895,7 +893,8 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "pruning_columns": ["created_at", "id"],
+                // names are exact: a padded name stays padded, only true duplicates collapse
+                "pruning_columns": ["created_at", " id "],
                 "bloom_filter_columns": ["id", "tenant_id"],
             })
         );
@@ -903,7 +902,7 @@ mod tests {
         let decoded = ManageTableOptions::from_value(&value);
         assert_eq!(
             decoded.pruning_columns.as_deref(),
-            Some(["created_at".to_string(), "id".to_string()].as_slice())
+            Some(["created_at".to_string(), " id ".to_string()].as_slice())
         );
         assert_eq!(
             decoded.bloom_filter_columns.as_deref(),
@@ -921,7 +920,7 @@ mod tests {
         }))
         .is_err());
         assert!(ManageTableOptions::try_from_value(&serde_json::json!({
-            "bloom_filter_columns": ["id", "  "]
+            "bloom_filter_columns": ["id", ""]
         }))
         .is_err());
     }

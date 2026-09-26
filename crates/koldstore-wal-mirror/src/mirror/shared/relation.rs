@@ -2,7 +2,7 @@
 
 //! Mirror relation naming.
 
-use koldstore_common::{is_safe_identifier, TableName};
+use koldstore_common::{derived_base_name, floor_str, is_safe_identifier, stable_name_hash, TableName};
 
 use super::error::{MirrorError, MirrorResult};
 
@@ -61,10 +61,7 @@ pub fn mirror_relation_for_source(source_table: &TableName) -> MirrorResult<Mirr
 }
 
 fn mirror_relation_name(source_table: &TableName) -> String {
-    let source_name = source_table.schema().map_or_else(
-        || source_table.relation().to_string(),
-        |schema| format!("{schema}_{}", source_table.relation()),
-    );
+    let source_name = derived_base_name(source_table.schema(), source_table.relation());
     bounded_identifier(&source_name, CHANGE_LOG_MIRROR_SUFFIX)
 }
 
@@ -79,7 +76,7 @@ pub(crate) fn bounded_identifier(prefix: &str, suffix: &str) -> String {
     }
     let prefix_len = MAX_POSTGRES_IDENTIFIER_BYTES - 1 - MIRROR_NAME_HASH_HEX_LEN - suffix.len();
     let hash = stable_name_hash(prefix);
-    format!("{}_{hash:016x}{suffix}", &prefix[..prefix_len])
+    format!("{}_{hash:016x}{suffix}", floor_str(prefix, prefix_len))
 }
 
 /// Returns PostgreSQL's historical first-63-byte truncation for legacy names.
@@ -88,15 +85,6 @@ pub(crate) fn legacy_truncated_identifier(prefix: &str, suffix: &str) -> String 
         .chars()
         .take(MAX_POSTGRES_IDENTIFIER_BYTES)
         .collect()
-}
-
-fn stable_name_hash(value: &str) -> u64 {
-    value
-        .as_bytes()
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        })
 }
 
 #[cfg(test)]

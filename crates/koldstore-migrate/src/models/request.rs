@@ -94,7 +94,6 @@ impl MigrateTableRequest {
         if self.table_type == "user" {
             self.scope_column
                 .as_deref()
-                .map(str::trim)
                 .filter(|scope| !scope.is_empty())
         } else {
             None
@@ -113,7 +112,6 @@ impl MigrateTableRequest {
         self.table_type != "user"
             || self
                 .effective_scope_column()
-                .map(str::trim)
                 .filter(|scope| !scope.is_empty())
                 .is_some()
     }

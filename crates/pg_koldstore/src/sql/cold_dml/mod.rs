@@ -64,7 +64,7 @@ pub(crate) mod guard;
 #[cfg(feature = "pg")]
 fn qualified_relation(table_oid: pgrx::pg_sys::Oid) -> Result<QualifiedTableName, String> {
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
-    QualifiedTableName::parse(&format!("{}.{}", relation.namespace, relation.name))
+    QualifiedTableName::new(Some(&relation.namespace), &relation.name)
         .map_err(|error| error.to_string())
 }
 

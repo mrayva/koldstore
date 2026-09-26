@@ -1,6 +1,6 @@
 //! User-scope migration helpers.
 
-use koldstore_common::is_safe_identifier;
+use koldstore_common::{is_valid_identifier, quote_ident};
 use thiserror::Error;
 
 use koldstore_common::SqlStatement;
@@ -56,13 +56,12 @@ pub fn plan_user_scope_policy(
     table: &QualifiedTableName,
     scope_column: &str,
 ) -> ScopeResult<UserScopePolicyPlan> {
-    let scope_column = scope_column.trim();
-    if !is_safe_identifier(scope_column) {
+    if !is_valid_identifier(scope_column) {
         return Err(ScopeError::InvalidScopeColumn(scope_column.to_string()));
     }
 
     let table_name = table.quoted();
-    let quoted_scope_column = format!("\"{scope_column}\"");
+    let quoted_scope_column = quote_ident(scope_column);
     let predicate = format!(
         "current_setting('koldstore.user_id', true) IS NOT NULL AND \
          current_setting('koldstore.user_id', true) <> '' AND \

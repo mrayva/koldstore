@@ -117,8 +117,12 @@ impl DemigrateOptions {
 #[must_use]
 pub fn cold_object_prefix_for_table(table: &QualifiedTableName) -> String {
     match table.schema.as_deref() {
-        Some(schema) => format!("{schema}/{}/", table.name),
-        None => format!("{}/", table.name),
+        Some(schema) => format!(
+            "{}/{}/",
+            koldstore_common::encode_path_segment(schema),
+            koldstore_common::encode_path_segment(&table.name)
+        ),
+        None => format!("{}/", koldstore_common::encode_path_segment(&table.name)),
     }
 }
 

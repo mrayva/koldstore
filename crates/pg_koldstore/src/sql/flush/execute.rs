@@ -282,7 +282,7 @@ fn stream_write_flush_batches(
     // between catalog commits (no open txn); `qualified_relation_name` would
     // Assert(IsTransactionState) in the flush executor.
     let table =
-        QualifiedTableName::parse(&format!("{}.{}", ctx.relation.namespace, ctx.relation.name))
+        QualifiedTableName::new(Some(&ctx.relation.namespace), &ctx.relation.name)
             .map_err(|error| error.to_string())?;
     let mirror = QualifiedTableName::from_table_name(&ctx.snapshot.mirror_relation);
     let primary_key_columns: Vec<String> = ctx

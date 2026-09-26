@@ -24,7 +24,11 @@ pub const MANIFEST_SHARD_PATH_HASH_HEX_LEN: usize = 32;
 /// matches the default `{namespace}/{tableName}/` template only.
 #[must_use]
 pub fn table_object_prefix(namespace: &str, table_name: &str) -> String {
-    format!("{namespace}/{table_name}")
+    format!(
+        "{}/{}",
+        koldstore_common::encode_path_segment(namespace),
+        koldstore_common::encode_path_segment(table_name)
+    )
 }
 
 /// Relative manifest path under the default table prefix (`…/manifest.json`).

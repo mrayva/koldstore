@@ -16,23 +16,19 @@ use koldstore_common::{SqlParamType, SqlResult, SqlStatement};
 
 /// Trailing-slash table prefix from `st.regular_path_tmpl` + `n`/`c` relation names.
 ///
+/// The schema and table names are percent-encoded exactly like
+/// `koldstore_common::encode_path_segment` (bytes outside `[A-Za-z0-9_-]` become
+/// `%XX`), so the read side finds what the flush side wrote.
+///
 /// This fragment is inserted via `{SQL_TABLE_PREFIX}` into outer `format!`
 /// templates, so braces here are copied verbatim into the emitted SQL.
-const SQL_TABLE_PREFIX: &str = r#"CASE
-      WHEN regexp_replace(
-          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+const SQL_TABLE_PREFIX: &str = r#"(SELECT CASE WHEN q.p = '' THEN '' ELSE q.p || '/' END
+      FROM (SELECT regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', (SELECT COALESCE(string_agg(CASE WHEN g.b BETWEEN 48 AND 57 OR g.b BETWEEN 65 AND 90 OR g.b BETWEEN 97 AND 122 OR g.b IN (45, 95) THEN chr(g.b) ELSE '%' || lpad(upper(to_hex(g.b)), 2, '0') END, '' ORDER BY g.i), '') FROM (SELECT i, get_byte(convert_to(n.nspname, 'UTF8'), i) AS b FROM generate_series(0, octet_length(convert_to(n.nspname, 'UTF8')) - 1) AS i) AS g)), '{tableName}', (SELECT COALESCE(string_agg(CASE WHEN g.b BETWEEN 48 AND 57 OR g.b BETWEEN 65 AND 90 OR g.b BETWEEN 97 AND 122 OR g.b IN (45, 95) THEN chr(g.b) ELSE '%' || lpad(upper(to_hex(g.b)), 2, '0') END, '' ORDER BY g.i), '') FROM (SELECT i, get_byte(convert_to(c.relname, 'UTF8'), i) AS b FROM generate_series(0, octet_length(convert_to(c.relname, 'UTF8')) - 1) AS i) AS g)),
           '(^/+)|(/+$)',
           '',
           'g'
-      ) = ''
-      THEN ''
-      ELSE regexp_replace(
-          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
-          '(^/+)|(/+$)',
-          '',
-          'g'
-      ) || '/'
-  END"#;
+      ) AS p) AS q)"#;
 
 /// `jsonb_object_agg(column_id → name)` over one historical schema version.
 ///

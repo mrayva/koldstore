@@ -1,6 +1,6 @@
 //! User-scope enforcement helpers shared across workflow crates.
 
-use crate::{is_safe_identifier, quote_ident, ScopeKey, TableKind};
+use crate::{is_valid_identifier, quote_ident, ScopeKey, TableKind};
 use thiserror::Error;
 
 /// Default catalog / progressive-path scope when product scoping is inactive.
@@ -123,8 +123,7 @@ pub fn scope_predicate_sql(
 }
 
 fn validate_identifier(value: &str) -> Result<&str, ScopeSqlError> {
-    let value = value.trim();
-    if is_safe_identifier(value) {
+    if is_valid_identifier(value) {
         Ok(value)
     } else {
         Err(ScopeSqlError(value.to_string()))

@@ -9,7 +9,7 @@ where
 {
     values.into_iter().fold(Vec::new(), |mut columns, value| {
         let column = value.into();
-        let column = column.trim();
+        let column = column.as_str();
         if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
             columns.push(column.to_string());
         }

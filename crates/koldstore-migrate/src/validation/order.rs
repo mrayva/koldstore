@@ -1,6 +1,6 @@
 //! Existing-table migration ordering decisions.
 
-use koldstore_common::{is_safe_identifier, ColumnId, ColumnRef};
+use koldstore_common::{is_valid_identifier, ColumnId, ColumnRef};
 use koldstore_schema::PgType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,8 +85,7 @@ pub fn choose_migration_ordering(
     request: &MigrationOrderingRequest,
 ) -> Result<MigrationOrdering, MigrationOrderingError> {
     if let Some(explicit) = request.explicit_order_column.as_deref() {
-        let explicit = explicit.trim();
-        if !is_safe_identifier(explicit) {
+        if !is_valid_identifier(explicit) {
             return Err(MigrationOrderingError::InvalidOrderColumn(
                 explicit.to_string(),
             ));

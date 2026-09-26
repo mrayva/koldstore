@@ -78,11 +78,15 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   `ATTACH PARTITION`, `INHERITS (managed)` or `PARTITION OF managed` on a managed
   table is refused
   ([#125](https://github.com/kalamdb/koldstore/issues/125)).
-- Schema, table and column names may contain ASCII letters, digits and
-  underscores and must not start with a digit. Mixed case and reserved words are
-  fine (`"MixedCase"`, `"select"`). Names with spaces, quotes, non-ASCII letters
-  or a leading digit are refused by `manage_table` up front; they used to be
-  accepted and then fail every flush.
+- Schema, table and column names may be any valid PostgreSQL identifier:
+  mixed case, reserved words, spaces, embedded quotes and dots, slashes,
+  non-ASCII letters, a leading digit, and leading or trailing blanks. Names are
+  taken exactly (never trimmed or case-folded) and always double-quoted in
+  generated SQL. Helper objects derive plain ASCII names from the source name
+  (a hash keeps two different names apart), and schema and table names are
+  percent-encoded in object-store prefixes, so a name like `../x` cannot leave
+  its own prefix. Names that were plain ASCII keep exactly the names and paths
+  they had before. PostgreSQL's own 63-byte identifier limit still applies.
 
 - Table/schema renames after cold publication are unsafe because object paths
   still depend on mutable names. Other schema evolution can apply in PostgreSQL
@@ -115,7 +119,7 @@ any row or object is changed.
 | `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
-| Names with spaces, quotes, non-ASCII, leading digit | refused by `manage_table` | `odd_identifiers` |
+| Any valid identifier (spaces, quotes, dots, slashes, non-ASCII, leading digit, blanks, long names) in schema, table or column | supported | `odd_identifiers` |
 | `DROP TABLE` / `DROP SCHEMA` of managed tables | supported; helper objects removed | `drop_cleanup_objects` |
 
 The generated user-scope policy is application-context filtering, not an

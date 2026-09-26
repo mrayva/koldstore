@@ -232,9 +232,9 @@ fn bounded_identifier(prefix: &str, suffix: &str) -> String {
     if combined.len() <= MAX_LEN {
         return combined;
     }
-    let hash = format!("_{:016x}", fnv1a64(prefix.as_bytes()));
+    let hash = format!("_{:016x}", koldstore_common::stable_name_hash(prefix));
     let keep = MAX_LEN.saturating_sub(suffix.len() + hash.len());
-    format!("{}{hash}{suffix}", floor_str(prefix, keep))
+    format!("{}{hash}{suffix}", koldstore_common::floor_str(prefix, keep))
 }
 
 /// The pre-hash derivation (plain truncation of `prefix`), kept only to find
@@ -246,24 +246,7 @@ fn truncated_identifier(prefix: &str, suffix: &str) -> String {
         return combined;
     }
     let keep = MAX_LEN.saturating_sub(suffix.len());
-    format!("{}{suffix}", floor_str(prefix, keep))
-}
-
-/// `value` cut to at most `max_bytes`, never inside a UTF-8 codepoint.
-fn floor_str(value: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
-}
-
-/// Stable 64-bit FNV-1a (unlike `DefaultHasher`, identical across releases, so
-/// names derived from it can be found again later).
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-    })
+    format!("{}{suffix}", koldstore_common::floor_str(prefix, keep))
 }
 
 /// The guard function/trigger names for one managed table.
@@ -279,10 +262,7 @@ pub(crate) struct InsertGuardNames {
 
 #[cfg(feature = "pg")]
 pub(crate) fn insert_guard_names(source: &koldstore_common::QualifiedTableName) -> InsertGuardNames {
-    let base = source
-        .schema
-        .as_deref()
-        .map_or_else(|| source.name.clone(), |schema| format!("{schema}_{}", source.name));
+    let base = koldstore_common::derived_base_name(source.schema.as_deref(), &source.name);
     let named = |name: String| koldstore_common::QualifiedTableName {
         schema: Some("koldstore".to_string()),
         name,

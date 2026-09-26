@@ -1,6 +1,8 @@
 //! Object path templates.
 
-pub use koldstore_common::{join_object_key, manifest_object_key, normalize_table_prefix};
+pub use koldstore_common::{
+    encode_path_segment, join_object_key, manifest_object_key, normalize_table_prefix,
+};
 
 /// Path template using pg-koldstore placeholder names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +41,8 @@ impl PathTemplate {
         }
         let rendered = self
             .template
-            .replace("{namespace}", namespace)
-            .replace("{tableName}", table_name)
+            .replace("{namespace}", &encode_path_segment(namespace))
+            .replace("{tableName}", &encode_path_segment(table_name))
             .replace("{scopeId}", scope_id.unwrap_or(""));
         if rendered.contains('{') || rendered.contains('}') {
             return Err("path template contains unresolved placeholders".to_string());
@@ -77,5 +79,16 @@ mod tests {
             join_object_key(&prefix, "manifest.json"),
             "app/items/manifest.json"
         );
+    }
+
+    #[test]
+    fn odd_names_cannot_escape_their_prefix() {
+        let tmpl = PathTemplate::new("{namespace}/{tableName}/");
+        assert_eq!(
+            render_regular_table_prefix(&tmpl, "my app", "../../etc/x").unwrap(),
+            "my%20app/%2E%2E%2F%2E%2E%2Fetc%2Fx/"
+        );
+        assert_eq!(render_regular_table_prefix(&tmpl, "app", "Café").unwrap(), "app/Caf%C3%A9/");
+        assert_eq!(render_regular_table_prefix(&tmpl, "app", "Mixed_Case-1").unwrap(), "app/Mixed_Case-1/");
     }
 }

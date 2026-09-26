@@ -165,7 +165,6 @@ pub fn validate_manage_table(
 
     if let Some(migration_order_by) = context
         .migration_order_by
-        .map(str::trim)
         .filter(|column| !column.is_empty())
     {
         if !context
