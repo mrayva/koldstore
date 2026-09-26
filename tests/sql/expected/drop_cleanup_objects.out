@@ -1,0 +1,103 @@
+CREATE FUNCTION
+CREATE TABLE
+CREATE TABLE
+ d1_managed
+------------
+ t
+(1 row)
+
+ d2_managed
+------------
+ t
+(1 row)
+
+ d1_guard_before | d2_guard_before
+-----------------+-----------------
+               2 |               2
+(1 row)
+
+BEGIN
+DROP TABLE
+ROLLBACK
+ d1_guard_after_rollback
+-------------------------
+                       2
+(1 row)
+
+ d1_triggers_after_rollback
+----------------------------
+                          2
+(1 row)
+
+DROP TABLE
+ d1_guard_after_drop
+---------------------
+                   0
+(1 row)
+
+ d2_guard_untouched
+--------------------
+                  2
+(1 row)
+
+CREATE SCHEMA
+CREATE TABLE
+CREATE TABLE
+ a_managed
+-----------
+ t
+(1 row)
+
+ b_managed
+-----------
+ t
+(1 row)
+
+ schema_guards_before
+----------------------
+                    4
+(1 row)
+
+DROP SCHEMA
+ schema_guards_after
+---------------------
+                   0
+(1 row)
+
+CREATE SCHEMA
+DROP SCHEMA
+ empty_schema_dropped
+----------------------
+ t
+(1 row)
+
+DROP SCHEMA
+psql:<PATH>: ERROR:  schema "sqlreg_never_existed" does not exist
+CREATE SCHEMA
+CREATE TABLE
+ a2_managed
+------------
+ t
+(1 row)
+
+ mirrors_before
+----------------
+              4
+(1 row)
+
+DROP SCHEMA
+ if_exists_guards_after
+------------------------
+                      0
+(1 row)
+
+ mirrors_after
+---------------
+             0
+(1 row)
+
+ active_schema_rows_after
+--------------------------
+                        0
+(1 row)
+

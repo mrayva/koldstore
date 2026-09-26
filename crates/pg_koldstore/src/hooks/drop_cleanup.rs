@@ -116,6 +116,22 @@ fn cleanup_one_managed_table_before_drop(
     )
     .map_err(|error| error.to_string())?;
 
+    // The insert-guard trigger and its function live outside the dropped table
+    // (the function in the koldstore schema), so dropping the table alone would
+    // leave the function behind. The trigger goes first: it depends on the function.
+    for statement in crate::sql::cold_dml::guard::plan_insert_guard_teardown(&table) {
+        pgrx::Spi::run(&statement).map_err(|error| error.to_string())?;
+    }
+    // Likewise the mirror's primary-key guard and capture functions (koldstore
+    // schema), which only the mirror table's own DROP does not reach.
+    if let Some(mirror_relation) = &mirror {
+        let teardown = koldstore_wal_mirror::plan_mirror_source_teardown(&table, mirror_relation)
+            .map_err(|error| error.to_string())?;
+        for statement in teardown {
+            pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+        }
+    }
+
     let plan = plan_drop_table_cleanup(
         table,
         koldstore_common::TableOid::from_raw(table_oid.to_u32()),
@@ -224,13 +240,15 @@ unsafe fn drop_schema_managed_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_
         let mut oids = Vec::new();
         let count = (*objects).length as usize;
         for index in 0..count {
-            let names = (*(*objects).elements.add(index))
-                .ptr_value
-                .cast::<pg_sys::List>();
-            if names.is_null() {
+            // DROP SCHEMA lists its targets as bare `String` nodes (unlike DROP
+            // TABLE, whose targets are name lists); reading them as lists made
+            // every `DROP SCHEMA` without IF EXISTS fail with `schema "" does
+            // not exist`, and skipped managed-table cleanup with IF EXISTS.
+            let node = (*(*objects).elements.add(index)).ptr_value;
+            if node.is_null() {
                 continue;
             }
-            let Some(schema_name) = name_list_to_string(names) else {
+            let Some(schema_name) = schema_node_name(node.cast::<pg_sys::Node>()) else {
                 continue;
             };
             oids.extend(active_managed_table_oids_in_schema(
@@ -239,6 +257,21 @@ unsafe fn drop_schema_managed_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_
             ));
         }
         oids
+    }
+}
+
+/// The schema name of one `DROP SCHEMA` target: a `String` node, or a one-element
+/// name list should a future PostgreSQL version wrap it.
+unsafe fn schema_node_name(node: *mut pg_sys::Node) -> Option<String> {
+    unsafe {
+        match (*node).type_ {
+            pg_sys::NodeTag::T_String => {
+                let sval = (*node.cast::<pg_sys::String>()).sval;
+                (!sval.is_null()).then(|| CStr::from_ptr(sval).to_string_lossy().into_owned())
+            }
+            pg_sys::NodeTag::T_List => name_list_to_string(node.cast::<pg_sys::List>()),
+            _ => None,
+        }
     }
 }
 
