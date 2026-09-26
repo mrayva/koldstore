@@ -1,0 +1,342 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 6
+ managed
+---------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ hot_rows | cold_rows
+----------+-----------
+        0 |         6
+(1 row)
+
+ insert_new_hot_keys
+---------------------
+ ok: 2
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+                                                                                                              insert_dup_cold_pk_full_message
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing INSERT on managed table "sqlreg"."g1" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+(1 row)
+
+                                                                                                                                    delete_cold_eq_full_message
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE/MERGE on managed table sqlreg.g1 -- primary key {"id":"2"} exists but this statement cannot reliably act on it (it may be cold-only, invisible to this statement's own scan); use koldstore.update_row()/delete_row() instead (upstream issue #122)
+(1 row)
+
+ insert_dup_cold_pk
+--------------------
+ REJECTED insert
+(1 row)
+
+ insert_dup_hot_pk
+-------------------
+ REJECTED insert
+(1 row)
+
+ insert_new_key
+----------------
+ ok: 1
+(1 row)
+
+ insert_multirow_one_dup_cold
+------------------------------
+ REJECTED insert
+(1 row)
+
+ insert_select_dup_cold
+------------------------
+ REJECTED insert
+(1 row)
+
+        update_cold_eq
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+        delete_cold_eq
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ update_hot_eq
+---------------
+ ok: 1
+(1 row)
+
+ update_nonexistent
+--------------------
+ ok: 0
+(1 row)
+
+ delete_nonexistent
+--------------------
+ ok: 0
+(1 row)
+
+      delete_in_all_cold
+------------------------------
+ REJECTED write pk={"id":"1"}
+(1 row)
+
+    update_in_hot_and_cold
+------------------------------
+ REJECTED write pk={"id":"7"}
+(1 row)
+
+ id | val
+----+-----
+  1 | v1
+  7 | h
+(2 rows)
+
+ delete_in_nonexistent
+-----------------------
+ ok: 0
+(1 row)
+
+      delete_or_all_cold
+------------------------------
+ REJECTED write pk={"id":"1"}
+(1 row)
+
+    update_or_hot_and_cold
+------------------------------
+ REJECTED write pk={"id":"7"}
+(1 row)
+
+      delete_or_mixed_in
+------------------------------
+ REJECTED write pk={"id":"1"}
+(1 row)
+
+ delete_or_nonexistent
+-----------------------
+ ok: 0
+(1 row)
+
+ gap_or_across_columns
+-----------------------
+ ok: 0
+(1 row)
+
+    residual_matches_cold
+------------------------------
+ REJECTED write pk={"id":"3"}
+(1 row)
+
+ residual_no_match_cold
+------------------------
+ ok: 0
+(1 row)
+
+   residual_in_matches_cold
+------------------------------
+ REJECTED write pk={"id":"3"}
+(1 row)
+
+ residual_in_no_match_cold
+---------------------------
+ ok: 0
+(1 row)
+
+   or_plus_residual_matches
+------------------------------
+ REJECTED write pk={"id":"4"}
+(1 row)
+
+ or_plus_residual_no_match
+---------------------------
+ ok: 0
+(1 row)
+
+ gap_pk_range
+--------------
+ ok: 0
+(1 row)
+
+ gap_pk_less_than
+------------------
+ ok: 0
+(1 row)
+
+ gap_not_in
+------------
+ ok: 0
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ id | val
+----+-----
+  1 | v1
+  2 | v2
+  3 | v3
+  4 | v4
+  5 | v5
+  6 | v6
+  7 | h
+  8 | v8
+  9 | v9
+(9 rows)
+
+      merge_delete_cold
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+      merge_update_cold
+------------------------------
+ REJECTED write pk={"id":"2"}
+(1 row)
+
+ merge_new_key_inserts
+-----------------------
+ ok: 1
+(1 row)
+
+ merge_update_hot
+------------------
+ ok: 1
+(1 row)
+
+ explain_update_cold
+---------------------
+ ok (explain)
+(1 row)
+
+ explain_delete_in_cold
+------------------------
+ ok (explain)
+(1 row)
+
+                     update_row_cold
+---------------------------------------------------------
+ {"updated": true, "hydrated": true, "affected_rows": 1}
+(1 row)
+
+                     delete_row_cold
+---------------------------------------------------------
+ {"deleted": true, "hydrated": true, "affected_rows": 1}
+(1 row)
+
+                    delete_row_missing
+-----------------------------------------------------------
+ {"deleted": false, "hydrated": false, "affected_rows": 0}
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ id |   val
+----+---------
+  2 | patched
+  3 | v3
+  4 | v4
+  5 | v5
+  6 | v6
+  7 | mh
+  8 | v8
+  9 | v9
+ 11 | m
+(9 rows)
+
+CREATE TABLE
+INSERT 0 4
+ managed_composite
+-------------------
+ t
+(1 row)
+
+ flushed_composite
+-------------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ comp_insert_dup_cold
+----------------------
+ REJECTED insert
+(1 row)
+
+ comp_insert_new_second_col
+----------------------------
+ ok: 1
+(1 row)
+
+           comp_update_cold
+--------------------------------------
+ REJECTED write pk={"a":"2","b":"20"}
+(1 row)
+
+           comp_delete_cold
+--------------------------------------
+ REJECTED write pk={"a":"3","b":"30"}
+(1 row)
+
+ comp_delete_nonexistent
+-------------------------
+ ok: 0
+(1 row)
+
+         comp_delete_in_lists
+--------------------------------------
+ REJECTED write pk={"a":"1","b":"10"}
+(1 row)
+
+ gap_comp_or_across_columns
+----------------------------
+ ok: 0
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ a | b  | val
+---+----+-----
+ 2 | 21 | ok
+ 1 | 10 | w1
+ 2 | 20 | w2
+ 3 | 30 | w3
+ 4 | 40 | w4
+(5 rows)
+
+ unmanaged
+-----------
+ t
+(1 row)
+
+                      insert_after_unmanage
+-----------------------------------------------------------------
+ ERROR: duplicate key value violates unique constraint "g1_pkey"
+(1 row)
+

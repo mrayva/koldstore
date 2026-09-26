@@ -13,8 +13,21 @@ PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
 PG_HOST="${KOLDSTORE_E2E_PGHOST:-127.0.0.1}"
 PG_USER="${KOLDSTORE_E2E_PGUSER:-$(whoami)}"
 PG_DATABASE="${KOLDSTORE_SQL_REGRESSION_DB:-koldstore_sql_regression}"
-PG_CONFIG="${PGRX_PG_CONFIG:-$(cargo pgrx info pg-config "$PG_VERSION")}"
-PSQL="$(dirname "$PG_CONFIG")/psql"
+# KOLDSTORE_SQL_REGRESSION_EXTERNAL=1 runs against an ALREADY RUNNING cluster
+# (KOLDSTORE_E2E_PGHOST/PGPORT/PGUSER) that has koldstore installed and in
+# shared_preload_libraries with wal_level=logical: nothing is built, installed,
+# started or stopped, only the regression database is recreated. Lets the suite
+# run without `cargo pgrx install` overwriting a deployed extension, and against
+# non-pgrx clusters. KOLDSTORE_SQL_REGRESSION_PSQL overrides the psql binary.
+EXTERNAL="${KOLDSTORE_SQL_REGRESSION_EXTERNAL:-0}"
+if [[ "$EXTERNAL" == "1" || "$EXTERNAL" == "true" ]]; then
+  PSQL="${KOLDSTORE_SQL_REGRESSION_PSQL:-psql}"
+else
+  PG_CONFIG="${PGRX_PG_CONFIG:-$(cargo pgrx info pg-config "$PG_VERSION")}"
+  PSQL="$(dirname "$PG_CONFIG")/psql"
+fi
+# Space-separated case names (without .sql) to run instead of every case.
+ONLY_CASES="${KOLDSTORE_SQL_REGRESSION_ONLY:-}"
 SQL_DIR="${ROOT_DIR}/tests/sql"
 EXPECTED_DIR="${SQL_DIR}/expected"
 UPDATE_EXPECTED="${KOLDSTORE_SQL_REGRESSION_UPDATE:-0}"
@@ -33,6 +46,15 @@ normalize_output() {
     -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9:.+-]+/<TS>/g' \
     -e 's/[[:space:]]+$//' \
     | awk 'NF {blank=0; print} !NF {if (!blank++) print}'
+}
+
+prepare_external_cluster() {
+  echo "using existing PostgreSQL at ${PG_HOST}:${PG_PORT} (no build/install/restart)"
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${PG_DATABASE} WITH (FORCE)" \
+    -c "CREATE DATABASE ${PG_DATABASE}"
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
 }
 
 prepare_cluster() {
@@ -84,7 +106,7 @@ run_case() {
   # koldstore.min_max_rows_per_file survive into manage_table / flush_table.
   # Suppress setup chatter so expected/*.out stay case-focused.
   {
-    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
       -v "STORAGE_ROOT=${STORAGE_ROOT}" <<EOF
 \\o /dev/null
 \\i ${SQL_DIR}/setup.sql
@@ -117,13 +139,20 @@ EOF
   rm -f "$actual"
 }
 
-prepare_cluster
+if [[ "$EXTERNAL" == "1" || "$EXTERNAL" == "true" ]]; then
+  prepare_external_cluster
+else
+  prepare_cluster
+fi
 
 failures=0
 shopt -s nullglob
 for sql_file in "${SQL_DIR}"/*.sql; do
   name="$(basename "$sql_file")"
   if [[ "$name" == "setup.sql" ]]; then
+    continue
+  fi
+  if [[ -n "$ONLY_CASES" && " $ONLY_CASES " != *" ${name%.sql} "* ]]; then
     continue
   fi
   if ! run_case "$sql_file"; then
