@@ -293,10 +293,35 @@ after the locks too: it writes rows hydrating writers update, and running it fir
 (130+ deadlocks per stress run). Result on the stress script: no deadlocks and no slot-lock timeouts, with
 or without polling. The `after_manifest_publish` failpoint now sits right after the manifest write,
 before any lock, because the prune-race tests run writers while the flush is parked there. Tried and dropped: an "already caught
-up" skip (never fires under write load) and logging running-transactions records more often (no gain once
-starvation was the cause). Also fixed: idle background workers never absorbed a `ProcSignalBarrier`
+up" skip (never fires under write load). Also fixed: idle background workers never absorbed a `ProcSignalBarrier`
 (pgrx's `wait_latch` does not `CHECK_FOR_INTERRUPTS`), which made `DROP DATABASE ... WITH (FORCE)` hang
 indefinitely; worker latch waits now go through `wait_latch_interruptible`.
+
+Throughput, continued: `restart_lsn` (2026-09-27, later). "Logging running-transactions records more
+often" was tried once above and dropped as "no gain," but that measurement predates the lock-order fix
+and was confounded by starvation -- re-measured after, on its own: PostgreSQL only writes a
+running-transactions WAL record on its own roughly every 15s (checkpoint-driven), and a logical slot's
+`restart_lsn` can only advance up to the most recent one, so every read fence opens its decode cursor
+at a `restart_lsn` that falls tens of MB behind `confirmed_flush_lsn` under continuous write load
+(confirmed live: 13-28 MB gap at 8 pgbench clients) and re-decodes that whole stale range. The WAL
+applier worker now calls `pg_sys::LogStandbySnapshot()` itself, rate-limited to once per 200ms
+(`worker::wal::log_running_xacts_if_due`), closing the gap to single-digit KB when the applier can
+actually run. Measured on a 20k-row table, hot_row_limit 10, random cold-key updates,
+`koldstore.hydrate_on_write = on`:
+
+| clients | before this fix | after (queue, default) | after + `hydrate_slot_lock_poll_ms=2000` |
+|---|---|---|---|
+| 1 | 18 tps, 17 MB gap | 44 tps, ~0 gap | -- |
+| 8 | 10.5 tps, 24 MB gap | 13 tps, 24 MB gap | 32 tps, 1.3 MB gap |
+
+Single-client throughput roughly doubles on its own. Eight concurrent hydrators barely move under the
+default queueing mode: they (and the applier) all contend for the same slot lock, and with 8 client
+statements re-queueing far more often than the applier's one drain pass per wake, the applier rarely
+gets a turn to log the snapshot at all. Combined with polling (already available, previously the only
+throughput lever), the two fixes compound to ~3x the original 8-client baseline. The two remaining
+candidate directions from the original throughput TODO (batching one fence across concurrent hydrators;
+having the applier itself do more of the acknowledging) are not done -- this closes the `restart_lsn`
+half of the gap, not the per-statement decode-and-lock cost itself.
 
 Stress test (`scripts/stress-hydrate-on-write.sh`, pgbench, 8 clients + concurrent flushers):
 phase 1 hydrating updates against flush, phase 2 hydrating deletes, phase 3 mixed

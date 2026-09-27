@@ -279,6 +279,7 @@ fn process_sighup() {
 /// apply budgets. `synchronous_commit=off` stays foreground-asynchronous: this
 /// worker performs XLogFlush, not the application backend.
 fn drain_wal_through_fixed_fence() -> Result<(), String> {
+    log_running_xacts_if_due();
     let fence = capture_durable_wal_fence()?;
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     loop {
@@ -318,7 +319,48 @@ fn drain_wal_through_fixed_fence() -> Result<(), String> {
     }
 }
 
+/// Minimum spacing of the running-transactions WAL records this worker requests.
+const RUNNING_XACTS_INTERVAL: Duration = Duration::from_millis(200);
+
+thread_local! {
+    static LAST_RUNNING_XACTS: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Logs a running-transactions record so the replication slot's `restart_lsn` can advance.
+///
+/// PostgreSQL only writes one on its own roughly every 15s (checkpoint-driven), and a logical
+/// slot's `restart_lsn` can only move up to the most recent such record -- every fence a
+/// foreground backend takes (hydrate-on-write's read fence, `wait_for_async_mirror`) opens its
+/// decode cursor at `restart_lsn`, so under continuous write load the record falls tens of MB
+/// behind `confirmed_flush_lsn` (confirmed live: 13-28 MB under an 8-client pgbench run) and every
+/// fence re-decodes that whole stale range instead of the few KB actually new. A first attempt at
+/// this fix was reverted mid-session after being blamed for "no gain" on a measurement that was
+/// actually dominated by the (separately fixed) slot-lock starvation bug; re-measured after that
+/// fix, on its own this closes the gap to single-digit KB (confirmed live) and raises throughput.
+/// Cheap regardless: one small WAL record, rate-limited here to avoid flooding WAL under very
+/// bursty commit rates.
+fn log_running_xacts_if_due() {
+    let due = LAST_RUNNING_XACTS.with(|last| {
+        let due = last.get().is_none_or(|at| at.elapsed() >= RUNNING_XACTS_INTERVAL);
+        if due {
+            last.set(Some(Instant::now()));
+        }
+        due
+    });
+    if !due {
+        return;
+    }
+    // SAFETY: plain call into the standby-snapshot logger; requires wal_level >= replica, which
+    // logical decoding (this worker's whole purpose) already implies.
+    unsafe {
+        if pg_sys::wal_level >= pg_sys::WalLevel::WAL_LEVEL_REPLICA as i32 {
+            pg_sys::LogStandbySnapshot();
+        }
+    }
+}
+
 struct WalApplierRegistration {
+
     database_oid: u32,
 }
 
