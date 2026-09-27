@@ -394,6 +394,38 @@ TRUNCATE TABLE
 (1 row)
 
 CREATE TABLE
+INSERT 0 20
+ drop_managed
+--------------
+ t
+(1 row)
+
+ drop_flushed
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+                drop_cold_without_rehydrate_refused
+--------------------------------------------------------------------
+ ERROR: unmanage table failed: drop_cold requires rehydrate => true
+(1 row)
+
+ drop_cold_unmanaged
+---------------------
+ t
+(1 row)
+
+ drop_rows_after_unmanage
+--------------------------
+                       20
+(1 row)
+
+CREATE TABLE
 INSERT 0 6
  ab_managed
 ------------

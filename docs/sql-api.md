@@ -360,9 +360,19 @@ SELECT koldstore.unmanage_table(
 );
 ```
 
-`rehydrate` controls whether cold rows are restored before detaching. The
-current implementation accepts but does not execute the planned `drop_cold`
-action; do not rely on it to delete or retain objects.
+`rehydrate` controls whether cold rows are restored before detaching.
+`drop_cold` deletes the table's cold objects from storage after a successful
+rehydrate (refused with `rehydrate => false`: that combination would destroy
+the only copy of rows never brought back into the heap). Like `DROP TABLE`'s
+own cold-object deletion, this happens outside the surrounding PostgreSQL
+transaction and cannot be rolled back with it -- see the `DROP TABLE` section
+below and [#100](https://github.com/kalamdb/koldstore/issues/100). A single
+object's delete failure is logged and skipped rather than aborting the whole
+call, so a stubborn object can leave a partial prefix behind; re-running
+`unmanage_table(..., drop_cold => true)` on an already-unmanaged table is not
+supported (there is no active managed table left to unmanage), so a
+leftover object from a failed delete needs the storage backend's own
+tooling to remove.
 
 **Returns:** `bigint` — number of `koldstore.schemas` rows deactivated for the
 table (normally `1` when the table was actively managed, `0` if none were
@@ -530,8 +540,8 @@ completed `drop_table_cleanup` job before PostgreSQL removes the heap.
 Cold-object deletion currently happens before the surrounding PostgreSQL DDL
 transaction commits and cannot be rolled back with it. An aborted `DROP TABLE`
 can therefore restore catalog rows whose cold objects are gone; see
-[#100](https://github.com/kalamdb/koldstore/issues/100). The `drop_cold`
-argument to `unmanage_table` is also not currently executed.
+[#100](https://github.com/kalamdb/koldstore/issues/100). `unmanage_table`'s
+`drop_cold` option (above) has the same property.
 
 ### `koldstore.table_status`
 

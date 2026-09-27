@@ -236,6 +236,21 @@ SELECT koldstore.unmanage_table('sqlreg.h_child'::regclass, true) IS NOT NULL AS
 SELECT count(*) AS child_rows_after_unmanage FROM sqlreg.h_child;
 SELECT count(*) AS insert_triggers_fired_by_unmanage FROM sqlreg.h_log;
 
+-- unmanage_table(..., drop_cold => true): once rehydrate has pulled every row back into the heap,
+-- the cold Parquet copy is redundant and can be deleted from storage; drop_cold without rehydrate
+-- would destroy the only copy of rows never brought back, so that combination is refused.
+CREATE TABLE sqlreg.h_drop (id bigint PRIMARY KEY, val text);
+INSERT INTO sqlreg.h_drop SELECT g, 'v' || g FROM generate_series(1, 20) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_drop'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS drop_managed;
+SELECT sqlreg.flush_table('sqlreg.h_drop'::regclass) IS NOT NULL AS drop_flushed;
+SELECT sqlreg.settle();
+SELECT sqlreg.try($$SELECT koldstore.unmanage_table('sqlreg.h_drop'::regclass, false, true)$$, true) AS drop_cold_without_rehydrate_refused;
+SELECT koldstore.unmanage_table('sqlreg.h_drop'::regclass, true, true) IS NOT NULL AS drop_cold_unmanaged;
+SELECT count(*) AS drop_rows_after_unmanage FROM sqlreg.h_drop;
+
 -- A statement that fails after its mirror fence must not lose an earlier committed delete: the
 -- fence's applied progress is never recorded or acknowledged, so the rolled-back work is
 -- decoded again instead of being skipped by an advanced slot.
