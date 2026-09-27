@@ -13,10 +13,20 @@ KoldStore packages as a normal PostgreSQL extension named `koldstore`.
 - Bootstrap catalog fragment: `crates/pg_koldstore/sql/koldstore--0.1.0.sql` is
   embedded into the generated install script; it is not the versioned install
   file name on disk after packaging.
-- **Development:** edit `koldstore--0.1.0.sql` directly for catalog DDL. Do not
-  add `koldstore--<from>--<to>.sql` upgrade edges while the product is still
-  pre-release. Local iterative installs reinstall / resync extension SQL when
-  the bootstrap fragment changes (see e2e cluster harness).
+- **Development, before a version is released:** edit `koldstore--0.1.0.sql`
+  directly for catalog DDL; no upgrade edge is needed yet. Local iterative
+  installs reinstall / resync extension SQL when the bootstrap fragment
+  changes (see e2e cluster harness).
+- **Development, after a version has shipped an upgrade edge** (the project's
+  first is `koldstore--0.1.11-preview.0--0.1.12-preview.0.sql`): further
+  catalog DDL goes into a *new* `koldstore--<from>--<to>.sql` edge alongside
+  the full snapshot, not back into the bootstrap file. Keep its hand-written
+  `CREATE FUNCTION` statements byte-identical to what pgrx generates for the
+  same functions in the newer full snapshot (`scripts/check-upgrade-path.sh`
+  diffs an upgraded catalog against a fresh install and will catch drift --
+  run it after every change that touches a function's SQL signature; a stale
+  edge that dropped a trailing argument shipped undetected for one release
+  cycle here because this check was not re-run after the argument was added).
 
 ## Install
 
@@ -40,17 +50,40 @@ SELECT koldstore.preload_status();  -- loaded_via_shared_preload must be true
 Requires the shared library and control/SQL files from `cargo pgrx install` or
 a release package to be present on the server.
 
-## Upgrade (deferred during beta)
+## Upgrade
 
-In-place `ALTER EXTENSION koldstore UPDATE` via
-`koldstore--<from>--<to>.sql` edges is **not** used during the current
-development / beta series. Change catalog DDL in `koldstore--0.1.0.sql` and
-reinstall the extension (or let local harnesses drop/recreate when SQL is
-stale).
+```sql
+ALTER EXTENSION koldstore UPDATE;
+SELECT extversion FROM pg_extension WHERE extname = 'koldstore';
+```
 
-When a supported upgrade path is introduced for a release, document the
-`ALTER EXTENSION` steps here and add the packaging edge intentionally. Until
-then, treat cluster major `pg_upgrade` as an ops runbook item as well.
+**Install the new shared library, restart PostgreSQL, then run `ALTER
+EXTENSION UPDATE` immediately -- before any other session calls a koldstore
+function whose SQL signature changed in the new version** (`manage_table`
+gained `allow_fk_hot_only` in 0.1.12, for example). A single `.so` exports one
+compiled version of each function; PostgreSQL fills in defaults and calls it
+with however many arguments the *currently active* `pg_proc` row declares.
+While the catalog is still pinned at the old version but the newer `.so` is
+already loaded (the window between restart and `ALTER EXTENSION UPDATE`), a
+call to a changed function fails with an internal argument-unboxing error
+(confirmed live) rather than running with old semantics -- there is no way
+to serve two different argument counts from one loaded library. Treat that
+window as a maintenance window with no managed-table DDL traffic, exactly
+like restarting for any other reason.
+
+Existing data and catalog state are unaffected by an upgrade whose SQL
+changes are additive (new optional trailing arguments, new functions): the
+underlying catalog tables and Parquet layout are untouched, only
+`pg_proc`/`pg_type` entries change. Verified with real data through
+`0.1.11-preview.0 -> 0.1.12-preview.0`
+(`scripts/check-upgrade-path-with-data.sh`): a managed table's rows, the
+cold-DML write guard, `flush_table()` and `update_row()` all keep working
+unchanged after the upgrade, and the new surface it introduces
+(`allow_fk_hot_only`, `unmanage_table`'s `drop_cold` actually deleting
+storage) works on a table managed after upgrading.
+
+`pg_upgrade` across a PostgreSQL major version is a separate ops runbook
+item, not covered by `ALTER EXTENSION UPDATE`.
 
 ## Production GUC baseline (async)
 

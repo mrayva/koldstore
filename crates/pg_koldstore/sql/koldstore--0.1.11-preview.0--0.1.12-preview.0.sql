@@ -54,8 +54,9 @@ STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'internal_attach_insert_guards_wrapper';
 
--- manage_table() gained the parquet_* tuning parameters. The argument list
--- changed, so it cannot be replaced in place.
+-- manage_table() gained the parquet_* tuning parameters, and later (same
+-- 0.1.12 cycle) allow_fk_hot_only. The argument list changed, so it cannot be
+-- replaced in place.
 DROP FUNCTION koldstore."manage_table"(regclass, text, bigint, bigint, bigint, text, text, text, text, bigint, boolean, text, text[], text[]);
 CREATE FUNCTION koldstore."manage_table"(
 	"table_name" regclass,
@@ -74,7 +75,8 @@ CREATE FUNCTION koldstore."manage_table"(
 	"bloom_filter_columns" TEXT[] DEFAULT NULL,
 	"parquet_row_group_size" bigint DEFAULT NULL,
 	"parquet_data_page_row_count_limit" bigint DEFAULT NULL,
-	"parquet_bloom_filter_fpp" double precision DEFAULT NULL
+	"parquet_bloom_filter_fpp" double precision DEFAULT NULL,
+	"allow_fk_hot_only" bool DEFAULT false
 ) RETURNS uuid
 SECURITY DEFINER
 LANGUAGE c

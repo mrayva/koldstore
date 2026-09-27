@@ -1,8 +1,12 @@
 //! Extension packaging version contract tests.
 //!
-//! During pre-release development, catalog DDL changes go directly into
-//! `sql/koldstore--0.1.0.sql`. Do not add `koldstore--<from>--<to>.sql` upgrade
-//! edges until a supported upgrade path is intentionally introduced.
+//! A supported upgrade path now exists (`koldstore--0.1.11-preview.0--0.1.12-preview.0.sql`,
+//! introduced deliberately, not accidental sprawl -- see its own header comment). Catalog DDL
+//! changes since then go into a new `koldstore--<from>--<to>.sql` upgrade edge alongside the
+//! full snapshot, kept honest by `scripts/check-upgrade-path.sh`, not back into the bootstrap
+//! file. `bootstrap_catalog_sql_exists` and `no_stale_upgrade_edges` below are what remains of
+//! this contract check; the earlier "no upgrade edges at all" assertion (dropped 2026-09-27) is
+//! obsolete now that this project ships one.
 
 use std::fs;
 use std::path::PathBuf;
@@ -39,23 +43,31 @@ fn bootstrap_catalog_sql_exists() {
     );
 }
 
+/// Every packaged upgrade edge (`koldstore--<from>--<to>.sql`) names a `<to>` version that is
+/// either the crate's current version (the live upgrade target) or another edge file's `<from>`
+/// (a still-connected earlier hop) -- catching a dangling edge nobody's `CREATE EXTENSION
+/// koldstore VERSION '<from>'` can reach `ALTER EXTENSION ... UPDATE` forward from.
 #[test]
-fn no_extension_upgrade_sql_edges_during_development() {
+fn no_stale_upgrade_edges() {
+    let crate_version = env!("CARGO_PKG_VERSION");
     let entries = fs::read_dir(sql_dir()).expect("read sql dir");
-    let upgrade_edges: Vec<String> = entries
+    let edges: Vec<(String, String, String)> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            // Packaged UPDATE edges look like koldstore--<from>--<to>.sql
-            // (two version separators). The bootstrap file is koldstore--0.1.0.sql.
-            let is_upgrade_edge = name.starts_with("koldstore--")
-                && name.ends_with(".sql")
-                && name.matches("--").count() >= 2;
-            is_upgrade_edge.then_some(name)
+            let stem = name.strip_prefix("koldstore--")?.strip_suffix(".sql")?;
+            let (from, to) = stem.split_once("--")?;
+            let (from, to) = (from.to_string(), to.to_string());
+            Some((name, from, to))
         })
         .collect();
-    assert!(
-        upgrade_edges.is_empty(),
-        "development builds edit koldstore--0.1.0.sql directly; remove upgrade edges: {upgrade_edges:?}"
-    );
+    let live_targets: std::collections::HashSet<&str> =
+        edges.iter().map(|(_, from, _)| from.as_str()).collect();
+    for (name, _, to) in &edges {
+        assert!(
+            to == crate_version || live_targets.contains(to.as_str()),
+            "upgrade edge {name} targets version {to}, which is neither the crate's current \
+             version ({crate_version}) nor another edge's source -- dangling, nothing can reach it"
+        );
+    }
 }
