@@ -56,6 +56,20 @@ pub(crate) fn snapshot(database_oid: u32) -> Option<WalApplierSnapshot> {
     WAL_APPLIER_REGISTRY.get().snapshot(database_oid)
 }
 
+/// Records that `database_oid`'s mirror is durably caught up through `lsn` (must already be
+/// committed -- see [`koldstore_wal_mirror::WalApplierRegistry::record_applied_through`]).
+pub(crate) fn record_applied_through(database_oid: u32, lsn: u64) {
+    WAL_APPLIER_REGISTRY
+        .get()
+        .record_applied_through(database_oid, lsn);
+}
+
+/// The highest LSN recorded via [`record_applied_through`] for `database_oid`, or `0`.
+#[must_use]
+pub(crate) fn applied_through(database_oid: u32) -> u64 {
+    WAL_APPLIER_REGISTRY.get().applied_through(database_oid)
+}
+
 pub(crate) fn try_reserve(database_oid: u32) -> bool {
     WAL_APPLIER_REGISTRY.get().try_reserve(database_oid)
 }
@@ -304,6 +318,13 @@ fn drain_wal_through_fixed_fence() -> Result<(), String> {
             continue;
         };
         crate::observability::record_async_apply_tick(outcome.row_changes, 0);
+        // Each pass's apply already committed (acknowledge_durable_checkpoint=true in
+        // available()), so whatever it reached is durably visible now -- publish it for
+        // foreground read fences to check for free (see mirror::apply::fence_for_read), even on
+        // an intermediate budget-exhausted pass, not just the final one that reaches `fence`.
+        if let Some(last_applied) = outcome.last_applied {
+            record_applied_through(database_oid, last_applied.get());
+        }
         if outcome.budget_exhausted {
             continue;
         }

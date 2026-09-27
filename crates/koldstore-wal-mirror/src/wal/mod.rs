@@ -5,7 +5,7 @@
 //! decoding remain in `pg_koldstore`; this module owns identity and lock-free
 //! lifecycle state. Mirror SQL/decode contracts live in [`crate::mirror`].
 
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 /// Bounded apply request/outcome contracts and budget helpers.
 pub mod apply_contract;
@@ -66,6 +66,11 @@ struct WalApplierEntry {
     database_oid: AtomicU32,
     required: AtomicU32,
     pid: AtomicI32,
+    /// Highest WAL LSN this database's mirror is known to have durably applied through, via a
+    /// *committed* background-applier pass only (never a foreground read fence, whose apply runs
+    /// inside the caller's own, possibly-aborting transaction -- see
+    /// [`WalApplierRegistry::record_applied_through`]). `0` means unknown/never recorded.
+    applied_through: AtomicU64,
 }
 
 impl WalApplierEntry {
@@ -74,6 +79,7 @@ impl WalApplierEntry {
             database_oid: AtomicU32::new(0),
             required: AtomicU32::new(0),
             pid: AtomicI32::new(WORKER_FREE),
+            applied_through: AtomicU64::new(0),
         }
     }
 
@@ -185,6 +191,28 @@ impl<const N: usize> WalApplierRegistry<N> {
         if let Some(entry) = self.find(database_oid) {
             entry.pid.store(WORKER_FREE, Ordering::Release);
         }
+    }
+
+    /// Records that this database's mirror is durably caught up through `lsn`.
+    ///
+    /// Callers must only pass an LSN whose mirror-row writes are already committed -- the
+    /// background WAL applier's own passes (`acknowledge_durable_checkpoint: true`), never a
+    /// foreground read fence's uncommitted apply, which runs inside the caller's own transaction
+    /// and could still abort. Monotonic: never moves the watermark backward, so a slow/stale pass
+    /// finishing after a newer one cannot regress it.
+    pub fn record_applied_through(&self, database_oid: u32, lsn: u64) {
+        let Some(entry) = self.find(database_oid) else {
+            return;
+        };
+        entry.applied_through.fetch_max(lsn, Ordering::AcqRel);
+    }
+
+    /// The highest LSN [`Self::record_applied_through`] has recorded for this database, or `0`
+    /// when nothing has been recorded (no allocated entry, or no completed pass yet).
+    #[must_use]
+    pub fn applied_through(&self, database_oid: u32) -> u64 {
+        self.find(database_oid)
+            .map_or(0, |entry| entry.applied_through.load(Ordering::Acquire))
     }
 
     #[must_use]

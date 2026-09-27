@@ -323,6 +323,30 @@ candidate directions from the original throughput TODO (batching one fence acros
 having the applier itself do more of the acknowledging) are not done -- this closes the `restart_lsn`
 half of the gap, not the per-statement decode-and-lock cost itself.
 
+Throughput, continued: shared applied-through watermark (2026-09-27, later still). Picked up the two
+remaining candidate directions together, since they turn out to be one mechanism: the WAL applier
+already commits its own apply passes (`acknowledge_durable_checkpoint: true`), so by the time
+`drain_wal_through_fixed_fence` returns from a pass, whatever LSN it reached is durably visible --
+safe to publish to a small shared-memory watermark (`WalApplierRegistry::record_applied_through`,
+monotonic, per database) that any *foreground* `fence_for_read` can check for free before doing any
+work of its own. A read fence must never publish to it itself (its apply runs inside the caller's own,
+possibly-aborting transaction -- the same class of bug the non-acknowledging fence exists to avoid),
+so this only ever flows one way: applier writes, foreground reads. `fence_for_read` now checks the
+watermark first and returns immediately, no lock and no decode, whenever it already covers the fence.
+
+Result on the same benchmark: no clear win over the running-xacts fix alone, and no regression --
+1-client and 8-client-default numbers were statistically indistinguishable from before, and 8-client
+polling landed 17-39 tps across repeated runs, the same noisy band already seen without this change.
+The reason is visible in the mechanism's own design: under 8 concurrent hydrators the applier is
+competing for the *same* slot lock as all of them, so it rarely gets far enough ahead for the watermark
+to already cover a fence by the time one is checked -- the exact contention this and the prior fix both
+still have to fight. Kept anyway: it is strictly cheap when it doesn't help (one atomic load plus a
+fence-LSN capture already needed either way), safe by construction, and should pay off in workloads
+this narrow single-table pgbench benchmark doesn't create -- many concurrent hydrators against
+different tables, or a system where *other* sessions' commits give the applier free room to run ahead
+of any one hydrator's own request pace. Full correctness re-verified (suite x2, stress script x3 each
+mode) with no violations; the throughput ceiling itself is not meaningfully moved by this change alone.
+
 Stress test (`scripts/stress-hydrate-on-write.sh`, pgbench, 8 clients + concurrent flushers):
 phase 1 hydrating updates against flush, phase 2 hydrating deletes, phase 3 mixed
 update/delete on 400 shared keys, then checks that every violation counter is 0

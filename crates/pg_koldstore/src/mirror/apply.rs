@@ -1048,8 +1048,19 @@ fn take_slot_lock_polling() -> Result<(), String> {
 /// and the slot is never advanced, so an abort discards them and the same WAL is decoded
 /// again later. Used by hydrate-on-write, whose statement may fail after the fence.
 pub fn fence_for_read() -> Result<(), String> {
-    take_slot_lock_polling()?;
     let fence = capture_durable_wal_fence()?;
+    // Free skip: the background WAL applier publishes its own *committed* progress (never a
+    // foreground fence's, which runs inside the caller's own possibly-aborting transaction -- see
+    // `worker::wal::record_applied_through`'s doc comment) to a shared watermark after every pass.
+    // Under write load the applier is usually already running (any committing managed-table write
+    // wakes it), so by the time a concurrent hydrator asks, the mirror is often already caught up
+    // to its fence -- no lock, no decode, no redundant work duplicating what the applier already
+    // did. Falls through to the unchanged fence-and-decode path otherwise.
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    if crate::worker::wal::applied_through(database_oid) >= fence.get() {
+        return Ok(());
+    }
+    take_slot_lock_polling()?;
     loop {
         let outcome = apply_bounded(BoundedApplyRequest {
             upper_bound: Some(fence),
