@@ -102,6 +102,19 @@ psql:<PATH>: ERROR:  TRUNCATE is not supported for KoldStore-managed tables; use
                    7
 (1 row)
 
+psql:<PATH>: ERROR:  koldstore: refusing to rename managed table sqlreg.u1 -- it has cold data already published under its current name, and object-store paths are derived from the table name (upstream issue #123: renaming would orphan those segments, making them invisible to future reads). Flush no more rows to it under the old name, or accept losing access to the existing cold data
+ALTER TABLE
+CREATE SCHEMA
+psql:<PATH>: ERROR:  koldstore: refusing to move managed table sqlreg.u1 to another schema -- it has cold data already published under its current schema (upstream issue #123: object-store paths are derived from the schema name, so moving it would orphan those segments). Flush no more rows to it under the current schema, or accept losing access to the existing cold data
+ALTER TABLE
+ALTER TABLE
+psql:<PATH>: ERROR:  koldstore: refusing to rename schema "sqlreg" -- managed table sqlreg.u1 in it has cold data already published under the current schema name (upstream issue #123: object-store paths are derived from the schema name, so renaming would orphan those segments). Unmanage or flush no more rows to that table first, or accept losing access to its existing cold data
+ u2_rows_after_move
+--------------------
+                  5
+(1 row)
+
+DROP SCHEMA
  child_still_there
 -------------------
  t

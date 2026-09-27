@@ -285,7 +285,7 @@ unsafe fn name_list_to_string(names: *mut pg_sys::List) -> Option<String> {
     }
 }
 
-fn active_managed_table_oids_in_schema(schema_name: &str, missing_ok: bool) -> Vec<pg_sys::Oid> {
+pub(crate) fn active_managed_table_oids_in_schema(schema_name: &str, missing_ok: bool) -> Vec<pg_sys::Oid> {
     let Ok(c_name) = CString::new(schema_name) else {
         return Vec::new();
     };

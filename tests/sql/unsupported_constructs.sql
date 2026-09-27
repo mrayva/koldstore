@@ -78,4 +78,20 @@ TRUNCATE sqlreg.u1;
 TRUNCATE sqlreg.u1 CASCADE;
 -- refused before any effect: nothing was truncated, including the referencing table
 SELECT count(*) AS rows_after_truncate FROM sqlreg.u1;
+
+-- ------------------------------------------------------------- RENAME / SET SCHEMA
+-- Object-store paths are derived from the table/schema name (upstream #123): renaming
+-- either after cold publication would orphan the segments already written under the
+-- old name. u2 has no cold data, so it is unaffected; RENAME COLUMN never touches a
+-- storage path either way. u1 stays as sqlreg.u1 throughout (every rename/move of it
+-- below is refused), so later sections of this file can keep referring to it.
+ALTER TABLE sqlreg.u1 RENAME TO u1_renamed;
+ALTER TABLE sqlreg.u2 RENAME TO u2_renamed;
+CREATE SCHEMA sqlreg2;
+ALTER TABLE sqlreg.u1 SET SCHEMA sqlreg2;
+ALTER TABLE sqlreg.u2_renamed SET SCHEMA sqlreg2;
+ALTER TABLE sqlreg.u1 RENAME COLUMN val TO val2;
+ALTER SCHEMA sqlreg RENAME TO sqlreg_renamed;
+SELECT count(*) AS u2_rows_after_move FROM sqlreg2.u2_renamed;
+DROP SCHEMA sqlreg2 CASCADE;
 SELECT to_regclass('sqlreg.u_child') IS NOT NULL AS child_still_there;

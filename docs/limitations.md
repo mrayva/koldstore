@@ -102,11 +102,16 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   its own prefix. Names that were plain ASCII keep exactly the names and paths
   they had before. PostgreSQL's own 63-byte identifier limit still applies.
 
-- Table/schema renames after cold publication are unsafe because object paths
-  still depend on mutable names. Other schema evolution can apply in PostgreSQL
-  before KoldStore discovers it is unsupported; defaults and constraints are
-  not retroactively enforced on older Parquet rows
-  ([#123](https://github.com/kalamdb/koldstore/issues/123)).
+- `ALTER TABLE ... RENAME TO`, `ALTER TABLE ... SET SCHEMA` and
+  `ALTER SCHEMA ... RENAME TO` are refused for a managed table (or a schema
+  containing one) that has published cold data, because object-store paths
+  are derived from the table and schema name and renaming would orphan the
+  segments already written under the old name
+  ([#123](https://github.com/kalamdb/koldstore/issues/123)). A managed table
+  with no cold data yet, and `RENAME COLUMN` on any managed table, are
+  unaffected. Other schema evolution can still apply in PostgreSQL before
+  KoldStore discovers it is unsupported; defaults and constraints are not
+  retroactively enforced on older Parquet rows.
 - `pg_dump --data-only -t table` and `COPY table TO` export the heap and can omit
   cold-only rows. Only a planned query such as `COPY (SELECT ...) TO` can enter
   `KoldMergeScan`, and coordinated backup/PITR is not shipped
@@ -136,6 +141,7 @@ any row or object is changed.
 | `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
+| Renaming/moving-schema a managed table (or its schema) with cold data | refused | `unsupported_constructs` |
 | Any valid identifier (spaces, quotes, dots, slashes, non-ASCII, leading digit, blanks, long names) in schema, table or column | supported | `odd_identifiers` |
 | `DROP TABLE` / `DROP SCHEMA` of managed tables | supported; helper objects removed | `drop_cleanup_objects` |
 
