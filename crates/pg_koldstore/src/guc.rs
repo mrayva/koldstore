@@ -48,7 +48,7 @@ static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
 static HYDRATE_SLOT_LOCK_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 #[cfg(feature = "pg")]
-static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
+static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
@@ -260,7 +260,7 @@ pub fn define_gucs() {
     GucRegistry::define_bool_guc(
         c"koldstore.reject_serializable_cold_reads",
         c"Rejects cold reads under SERIALIZABLE isolation.",
-        c"Cold rows live in Parquet segments and take no SSI predicate locks, so a SERIALIZABLE transaction that reads them does not get PostgreSQL's serializability guarantee for those rows. Turn on to fail such reads instead of running them.",
+        c"Cold rows live in Parquet segments and take no SSI predicate locks, so a SERIALIZABLE transaction that reads them does not get PostgreSQL's serializability guarantee for those rows. Default on (2026-09-27, matching upstream #121's same-transaction guard): fail such reads rather than silently running them with a weaker guarantee. Turn off to accept the weaker guarantee instead.",
         &REJECT_SERIALIZABLE_COLD_READS,
         GucContext::Userset,
         flags,
@@ -516,7 +516,7 @@ pub const fn definitions() -> &'static [GucDefinition] {
         GucDefinition {
             name: REJECT_SERIALIZABLE_COLD_READS_GUC,
             internal: false,
-            default_value: "off",
+            default_value: "on",
         },
         GucDefinition {
             name: settings::COLD_READS_GUC,

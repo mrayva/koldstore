@@ -527,6 +527,11 @@ fn ensure_initial_management(
         .unwrap_or("1000")
         .parse()
         .map_err(|_| "max_rows_per_file must be a positive integer")?;
+    // Same default as `koldstore.manage_table`'s own `allow_fk_hot_only` argument: refused unless
+    // explicitly accepted, since flushing can silently move a foreign-keyed row out of PostgreSQL's
+    // own FK triggers' reach (upstream #122's FK gap).
+    let allow_fk_hot_only = option_value(values, "koldstore_allow_fk_hot_only")
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1"));
     crate::sql::migrate::manage_table_pg_impl(
         table_oid,
         "shared",
@@ -545,6 +550,7 @@ fn ensure_initial_management(
         None,
         None,
         None,
+        allow_fk_hot_only,
     );
     Ok(())
 }

@@ -93,6 +93,7 @@ pub(crate) fn manage_table_pg_impl(
     parquet_row_group_size: Option<i64>,
     parquet_data_page_row_count_limit: Option<i64>,
     parquet_bloom_filter_fpp: Option<f64>,
+    allow_fk_hot_only: bool,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
@@ -160,6 +161,7 @@ pub(crate) fn manage_table_pg_impl(
             parquet_row_group_size,
             parquet_data_page_row_count_limit,
             parquet_bloom_filter_fpp,
+            allow_fk_hot_only,
             catalog.as_ref(),
             constraints,
         ))
@@ -471,6 +473,7 @@ fn manage_table_validation_context<'a>(
     parquet_row_group_size: Option<i64>,
     parquet_data_page_row_count_limit: Option<i64>,
     parquet_bloom_filter_fpp: Option<f64>,
+    allow_fk_hot_only: bool,
     catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -529,7 +532,7 @@ fn manage_table_validation_context<'a>(
             scope_column: scope_column.map(str::to_string),
             storage_exists,
             flush_enabled: hot_row_limit.is_some(),
-            allow_fk_hot_only: false,
+            allow_fk_hot_only,
             columns,
             primary_key: primary_key_names.clone(),
             expression_primary_key: false,

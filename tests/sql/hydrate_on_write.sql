@@ -188,10 +188,22 @@ SELECT koldstore.update_row('sqlreg.h1'::regclass, '{"id": 17}', '{"val": "expli
 SELECT op, id FROM sqlreg.h_log ORDER BY op, id;
 DROP TRIGGER h_after ON sqlreg.h1;
 
--- foreign keys. A cold child whose parent is gone: the hydration insert must not trip the
--- FK (referential-integrity triggers are off under hydration), while the FK itself still
--- refuses an ordinary insert. The FK is added after management (the child heap is empty
--- then) because manage_table refuses foreign keys on flush-enabled tables.
+-- foreign keys. A flush-enabled manage_table() refuses a table with an existing foreign key by
+-- default (upstream #122: koldstore enforces FKs on hot rows only, and a flush can silently move
+-- either side to cold storage, out of PostgreSQL's own FK triggers' reach); allow_fk_hot_only
+-- accepts that risk explicitly.
+CREATE TABLE sqlreg.h_fk_p (id bigint PRIMARY KEY);
+CREATE TABLE sqlreg.h_fk_c (id bigint PRIMARY KEY, pid bigint REFERENCES sqlreg.h_fk_p (id));
+SELECT sqlreg.try($$SELECT koldstore.manage_table(table_name => 'sqlreg.h_fk_c'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10, min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id')::text$$, true) AS fk_refused_by_default;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_fk_c'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', allow_fk_hot_only => true
+) IS NOT NULL AS fk_allowed_opt_in;
+
+-- A cold child whose parent is gone: the hydration insert must not trip the FK
+-- (referential-integrity triggers are off under hydration), while the FK itself still refuses an
+-- ordinary insert. This fixture instead adds the FK after management (the child heap is empty
+-- then), the other way to reach the same cold-child-with-FK state without the opt-in.
 CREATE TABLE sqlreg.h_parent (id bigint PRIMARY KEY);
 INSERT INTO sqlreg.h_parent VALUES (1), (2);
 CREATE TABLE sqlreg.h_child (id bigint PRIMARY KEY, pid bigint NOT NULL, v text);

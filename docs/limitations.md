@@ -76,9 +76,11 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   SHARE`, `TABLESAMPLE` and system-column projections (`ctid`, `xmin`, ...) are
   refused with an error naming the table and the construct; a managed table with
   no cold data keeps the ordinary PostgreSQL behavior. `TRUNCATE` (including
-  `CASCADE`) is refused before anything is changed. `SERIALIZABLE` runs, but it
-  is not a PostgreSQL-equivalent guarantee for cold reads;
-  `koldstore.reject_serializable_cold_reads = on` makes such reads fail instead.
+  `CASCADE`) is refused before anything is changed. `SERIALIZABLE` reading cold
+  data is not a PostgreSQL-equivalent guarantee (no predicate locks on cold
+  rows), so it is refused by default (2026-09-27, matching #121's
+  same-transaction guard); `koldstore.reject_serializable_cold_reads = off`
+  accepts the weaker guarantee instead.
 - Foreign keys that reference a managed table with cold data: deleting or re-keying a
   parent row is refused (the referential-integrity scan of the child needs row locks,
   which cold rows do not support, #125), so parent rows cannot be removed while such a
@@ -122,7 +124,7 @@ any row or object is changed.
 | `SELECT ... FOR UPDATE / SHARE` | refused when cold data can contribute | `unsupported_constructs` |
 | `TABLESAMPLE` | refused when cold data can contribute | `unsupported_constructs` |
 | `ctid` / system columns | refused when cold data can contribute | `unsupported_constructs` |
-| `SERIALIZABLE` cold reads | run (weaker guarantee); refused with `koldstore.reject_serializable_cold_reads` | `unsupported_constructs` |
+| `SERIALIZABLE` cold reads | refused by default; runs with a weaker guarantee if `koldstore.reject_serializable_cold_reads = off` | `unsupported_constructs` |
 | `TRUNCATE`, `TRUNCATE ... CASCADE` | refused | `unsupported_constructs` |
 | `INSERT` of an existing hot or cold key | refused | `cold_dml_guard` |
 | `UPDATE`/`DELETE` by primary key reaching a cold-only row | refused | `cold_dml_guard` |

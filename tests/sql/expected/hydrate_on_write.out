@@ -299,6 +299,18 @@ TRUNCATE TABLE
 
 DROP TRIGGER
 CREATE TABLE
+CREATE TABLE
+                                                                                                                                      fk_refused_by_default
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces foreign keys on hot rows only. Foreign keys: h_fk_c_pid_fkey outbound (columns: pid) -> sqlreg.h_fk_p. Drop or relocate them, or set options.allow_fk_hot_only = true
+(1 row)
+
+ fk_allowed_opt_in
+-------------------
+ t
+(1 row)
+
+CREATE TABLE
 INSERT 0 2
 CREATE TABLE
 INSERT 0 30

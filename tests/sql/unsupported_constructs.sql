@@ -48,23 +48,27 @@ SELECT ctid FROM sqlreg.u1;
 SELECT count(*) AS hot_only_table_ctid FROM (SELECT ctid FROM sqlreg.u2) s;
 
 -- ------------------------------------------------------ isolation levels
+-- REPEATABLE READ is unaffected: only SERIALIZABLE's guarantee is at risk.
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT count(*) AS repeatable_read FROM sqlreg.u1;
 COMMIT;
+-- Default (2026-09-27, matching upstream #121's same-transaction guard): cold rows take no SSI
+-- predicate locks, so a SERIALIZABLE transaction reading them refuses rather than silently running
+-- with a weaker guarantee (upstream #125). Hot-only reads, and an exact hot-key lookup, are unaffected.
 BEGIN ISOLATION LEVEL SERIALIZABLE;
-SELECT count(*) AS serializable FROM sqlreg.u1;
-COMMIT;
--- the opt-in policy refuses cold reads under SERIALIZABLE only
-SET koldstore.reject_serializable_cold_reads = on;
-BEGIN ISOLATION LEVEL SERIALIZABLE;
-SELECT count(*) AS serializable_policy_on FROM sqlreg.u1;
+SELECT count(*) AS serializable_default_rejected FROM sqlreg.u1;
 ROLLBACK;
 BEGIN ISOLATION LEVEL SERIALIZABLE;
-SELECT count(*) AS serializable_policy_on_hot_only FROM sqlreg.u2;
-SELECT count(*) AS serializable_policy_on_exact_hot_key FROM sqlreg.u1 WHERE id = 100;
+SELECT count(*) AS serializable_default_hot_only FROM sqlreg.u2;
+SELECT count(*) AS serializable_default_exact_hot_key FROM sqlreg.u1 WHERE id = 100;
+COMMIT;
+-- SET ... = off accepts the weaker guarantee explicitly, the pre-2026-09-27 behavior.
+SET koldstore.reject_serializable_cold_reads = off;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS serializable_policy_off FROM sqlreg.u1;
 COMMIT;
 BEGIN ISOLATION LEVEL REPEATABLE READ;
-SELECT count(*) AS repeatable_read_policy_on FROM sqlreg.u1;
+SELECT count(*) AS repeatable_read_policy_off FROM sqlreg.u1;
 COMMIT;
 RESET koldstore.reject_serializable_cold_reads;
 
