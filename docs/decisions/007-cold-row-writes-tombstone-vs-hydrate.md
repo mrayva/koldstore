@@ -272,6 +272,32 @@ Test-harness lesson: `FROM ONLY t` is **not** a heap-only scan on a managed tabl
 (the merge-scan hook still applies). Use `pageinspect`, or the guard's own
 hot-only probe, to look at the heap.
 
+Throughput and the slot lock (2026-09-27). Hydrating statements run ~10-25 tps at 8 clients, and
+the cost is the mirror fence, not the cold reads (a hydrating statement is ~7 ms without it and ~20 ms
+with it when idle). Findings: (1) the fence's slot lock (`pg_advisory_xact_lock`, held until commit)
+serializes hydrating transactions, and because they queue on it the WAL applier and flush finalize
+(which only try-lock) are starved; nothing acknowledges the slot, `restart_lsn` fell 21 MB behind and
+each fence re-decoded it (80-95 ms per statement). (2) `koldstore.hydrate_slot_lock_poll_ms` (default 0
+= queue) polls instead, which fixed the starvation (gap 29 kB, ~2x throughput in a pgbench run) but
+loses deadlock detection. (3) The deadlocks seen on the shared cluster are a lock-order inversion, not
+hydrator vs hydrator: flush finalize takes the slot lock and then `SHARE ROW EXCLUSIVE` on the table,
+while a hydrating DELETE/UPDATE already holds `ROW EXCLUSIVE` on the table (taken at parse time, before
+any hook) and then wants the slot lock. PostgreSQL resolves it as `40P01` in ~1 s and the hydrator was
+the victim every time. With polling the cycle only ends at the poll deadline, so the statement fails with
+a retryable `40001` (2 s: ~3% of statements while a flusher loops; 10 s: worse; poll-then-queue: no
+throughput gain, so not kept). The inversion is fixed (2026-09-27) by taking the table lock before the slot lock in flush
+finalize: the pre-lock catch-up now runs as committed passes (slot lock per pass, progress recorded like
+the applier), the manifest object is written with no lock held, then `SHARE ROW EXCLUSIVE`, then the slot
+lock with a 2 s bounded wait, then catalog activation, fence and prune. Catalog activation had to move
+after the locks too: it writes rows hydrating writers update, and running it first made a second cycle
+(130+ deadlocks per stress run). Result on the stress script: no deadlocks and no slot-lock timeouts, with
+or without polling. The `after_manifest_publish` failpoint now sits right after the manifest write,
+before any lock, because the prune-race tests run writers while the flush is parked there. Tried and dropped: an "already caught
+up" skip (never fires under write load) and logging running-transactions records more often (no gain once
+starvation was the cause). Also fixed: idle background workers never absorbed a `ProcSignalBarrier`
+(pgrx's `wait_latch` does not `CHECK_FOR_INTERRUPTS`), which made `DROP DATABASE ... WITH (FORCE)` hang
+indefinitely; worker latch waits now go through `wait_latch_interruptible`.
+
 Stress test (`scripts/stress-hydrate-on-write.sh`, pgbench, 8 clients + concurrent flushers):
 phase 1 hydrating updates against flush, phase 2 hydrating deletes, phase 3 mixed
 update/delete on 400 shared keys, then checks that every violation counter is 0

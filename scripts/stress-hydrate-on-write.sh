@@ -15,6 +15,7 @@ PSQL="${PSQL:-psql}"; PGBENCH="${PGBENCH:-pgbench}"
 ROWS="${ROWS:-20000}"; KEYS="${KEYS:-${ROWS:-20000}}"; KEYS3="${KEYS3:-400}"; CLIENTS="${CLIENTS:-8}"; SECONDS_RUN="${DURATION:-30}"; FLUSHERS="${FLUSHERS:-1}"
 DB="${STRESS_DB:-koldstore_stress}"
 STORE="$(mktemp -d "${TMPDIR:-/tmp}/koldstore-stress.XXXXXX")"
+chmod 777 "$STORE"  # a server running as another OS user (shared cluster) must be able to write here
 p() { "$PSQL" -X -q -Atv ON_ERROR_STOP=1 "$@"; }
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 

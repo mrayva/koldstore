@@ -1002,6 +1002,45 @@ fn push_typed_pk_array_arg(args: &mut Vec<DatumWithOid<'_>>, column: PkBindColum
     }
 }
 
+/// Takes the slot lock (held until the transaction ends) by polling, when
+/// `koldstore.hydrate_slot_lock_poll_ms` is set; otherwise leaves it to `apply_bounded`'s blocking
+/// lock.
+///
+/// Queueing on the lock makes every hydrating transaction a waiter in the lock manager's FIFO
+/// queue, which hands the lock straight to the next waiter: the WAL applier and flush finalize,
+/// which only try-lock, then never find it free, the slot is never acknowledged, and every fence
+/// decodes an ever longer WAL range (measured with 8 clients: restart position 21 MB behind,
+/// ~12 tps; polling: 29 kB, 16-46 tps). The price is that a poll is invisible to the deadlock
+/// detector: a flush finalize holds the slot lock while waiting for a table lock this
+/// transaction's own DML holds, a cycle a blocking wait resolves in about a second but a poll only
+/// at its deadline, so on timeout the statement fails with a retryable serialization_failure
+/// (2 s: about 3% of statements against a continuously flushing table; 10 s: worse).
+fn take_slot_lock_polling() -> Result<(), String> {
+    let wait_ms = crate::guc::hydrate_slot_lock_poll_ms();
+    if wait_ms == 0 {
+        return Ok(());
+    }
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    loop {
+        if super::lifecycle::try_lock_slot(database_oid)? {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            pgrx::ereport!(
+                pgrx::PgLogLevel::ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+                format!(
+                    "koldstore: could not take the async-mirror slot lock within {wait_ms}ms (a flush or \
+                     another hydrating transaction holds it); retry the statement"
+                )
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        pgrx::check_for_interrupts!();
+    }
+}
+
 /// Applies committed WAL through a freshly captured fence so a read in this transaction
 /// sees the mirror caught up, **without** recording or acknowledging applied progress.
 ///
@@ -1009,6 +1048,7 @@ fn push_typed_pk_array_arg(args: &mut Vec<DatumWithOid<'_>>, column: PkBindColum
 /// and the slot is never advanced, so an abort discards them and the same WAL is decoded
 /// again later. Used by hydrate-on-write, whose statement may fail after the fence.
 pub fn fence_for_read() -> Result<(), String> {
+    take_slot_lock_polling()?;
     let fence = capture_durable_wal_fence()?;
     loop {
         let outcome = apply_bounded(BoundedApplyRequest {

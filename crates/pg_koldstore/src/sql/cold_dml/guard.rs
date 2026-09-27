@@ -167,16 +167,7 @@ pub(crate) fn count_cold_only_matches(table_oid: pgrx::pg_sys::Oid, where_sql: &
 /// `(lock key, full row as a jsonb object)`: rows of the merged hot+cold view whose primary
 /// key the heap-only view does not have. Used by hydrate-on-write. The key text is rendered
 /// by PostgreSQL (see [`super::key_lock::key_sql`]). The caller decides which snapshot and
-/// mirror state to look through.
-#[cfg(feature = "pg")]
-pub(crate) fn cold_only_matching_rows(
-    table_oid: pgrx::pg_sys::Oid,
-    where_sql: &str,
-) -> Result<Vec<(String, serde_json::Value)>, String> {
-    cold_only_matching_rows_with_params(table_oid, where_sql, &[])
-}
-
-/// [`cold_only_matching_rows`] for a condition that refers to the statement's own parameters
+/// mirror state to look through. `where_sql` may refer to the statement's own parameters
 /// (`$1`, ...), as a join/sub-query probe does.
 #[cfg(feature = "pg")]
 pub(crate) fn cold_only_matching_rows_with_params(

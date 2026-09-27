@@ -246,18 +246,26 @@ The finalizer must use try-lock plus bounded retry rather than blocking while ho
 
 The final prune fence uses a short `SHARE ROW EXCLUSIVE` lock with a strict timeout.
 
-Correct lock order:
+Correct lock order (revised 2026-09-27; the original order took the slot lock before the source table lock, which formed a cycle with hydrating writers, see ADR-007):
 
 ```text
 1. Session-level table job lock — entire job.
-2. Try transaction-level slot lock.
-3. Try source-table SHARE ROW EXCLUSIVE lock with timeout.
-4. Capture durable WAL fence.
-5. Apply bounded WAL.
-6. Activate pass.
-7. Prune.
-8. Commit releases slot and source-table locks.
+2. Committed pre-lock catch-up passes (Short mode): slot lock per pass, released at each commit,
+   progress recorded like the background applier. No table lock held.
+3. Finalize transaction: write the manifest object with no lock held.
+4. Source-table SHARE ROW EXCLUSIVE lock with timeout (writers blocked from here).
+5. Try transaction-level slot lock, bounded wait (2 s).
+6. Activate the pass (catalog rows), broadcast invalidation.
+7. Capture durable WAL fence; apply bounded WAL.
+8. Prune.
+9. Commit releases slot and source-table locks.
 ```
+
+Table lock before slot lock, everywhere: a writer already holds ROW EXCLUSIVE on the table (taken at
+parse time) when it asks for the slot lock (hydrate-on-write fence), so any waiter that holds the slot
+lock while waiting for the table lock deadlocks with it. Catalog activation must also come after the
+table lock: it writes rows hydrating writers update, and running it first produced a second cycle
+(130+ deadlocks per stress run). Nested mode (no commit boundary) runs its catch-up inside step 5.
 
 Never hold the source-table lock while waiting indefinitely for the slot lock.
 

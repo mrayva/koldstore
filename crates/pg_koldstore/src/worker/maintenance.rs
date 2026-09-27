@@ -157,7 +157,7 @@ fn run_maintenance_worker(database_oid: u32) {
 
         // Brief interruptible grace amortizes fork/exit cost across a burst of
         // policy/recovery requests without making maintenance permanently resident.
-        if !BackgroundWorker::wait_latch(Some(IDLE_GRACE)) {
+        if !super::wait_latch_interruptible(Some(IDLE_GRACE)) {
             return;
         }
         if BackgroundWorker::sighup_received() {

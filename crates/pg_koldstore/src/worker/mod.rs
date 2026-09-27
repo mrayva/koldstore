@@ -39,3 +39,14 @@ pub(crate) use maintenance::register_maintenance_from_supervisor;
 pub(crate) use supervisor::register_if_shared_preload as register_supervisor_if_shared_preload;
 #[cfg(feature = "pg")]
 pub(crate) use wal::register_from_supervisor as register_wal_applier_from_supervisor;
+
+/// `BackgroundWorker::wait_latch` followed by `CHECK_FOR_INTERRUPTS`.
+///
+/// pgrx's wait never processes interrupts, so a worker idling in it never absorbed a
+/// `ProcSignalBarrier`: `DROP DATABASE ... WITH (FORCE)` (and anything else that emits a barrier)
+/// waited forever for an idle worker. Same return value as the pgrx call.
+pub(crate) fn wait_latch_interruptible(timeout: Option<std::time::Duration>) -> bool {
+    let keep_running = pgrx::bgworkers::BackgroundWorker::wait_latch(timeout);
+    pgrx::check_for_interrupts!();
+    keep_running
+}

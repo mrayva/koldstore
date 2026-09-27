@@ -69,7 +69,7 @@ pub extern "C-unwind" fn koldstore_spock_reconciler_main(argument: pgrx::pg_sys:
     pgrx::log!("koldstore spock reconciler: database={database} interval={}s", interval.as_secs());
 
     let mut delay = FIRST_RUN_DELAY;
-    while BackgroundWorker::wait_latch(Some(delay)) {
+    while super::wait_latch_interruptible(Some(delay)) {
         delay = interval;
         match super::txn::run_recoverable("spock reconciler", reconcile_once) {
             Ok(Some(summary)) => {

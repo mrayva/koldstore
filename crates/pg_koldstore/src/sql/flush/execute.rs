@@ -437,6 +437,12 @@ fn build_manifest_and_finalize(
         pending_segment_ids,
         manifest_path,
     } = streamed;
+    // Catch the mirror up in committed passes, each holding the slot lock only for its own
+    // transaction, before the finalize transaction takes the table lock (lock order: table, then
+    // slot). Nested mode has no commit boundary and catches up inside finalize instead.
+    if commit_style == FlushCommitStyle::Short {
+        run_committed_prelock_catchup(table_oid, prune_max_seq)?;
+    }
     commit_style.run_spi(|| {
         // PERFORMANCE: catalog is the source of truth for publishable segments.
         let manifest = manifest_from_publishable_cold_segments(
@@ -459,7 +465,7 @@ fn build_manifest_and_finalize(
             manifest_path,
             pending_segment_ids,
         };
-        finalize_flush(table_oid, ctx, &outcome, client)?;
+        finalize_flush(table_oid, ctx, &outcome, client, commit_style)?;
         Ok(outcome)
     })
 }
@@ -573,21 +579,41 @@ pub(super) fn finalize_flush(
     ctx: &FlushPreparedContext,
     outcome: &TableFlushBatchOutcome,
     client: &koldstore_storage::ObjectStoreClient,
+    commit_style: FlushCommitStyle,
 ) -> Result<(), String> {
-    // One critical section under slot-lock ownership: prelock catch-up,
-    // manifest write, activate, source fence, prune. Encode/upload already
-    // finished without the slot lock.
-    with_slot_lock_retry(|| {
-        let skip_through = run_async_prelock_catchup(table_oid, outcome.prune_max_seq)?;
-
-        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeManifestPublish)?;
-        pgrx::log!(
-            "koldstore flush: writing manifest path={} segments={} rows={}",
-            outcome.manifest_path,
-            outcome.manifest.segments.len(),
-            outcome.total_rows_flushed
-        );
-        write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
+    // Lock order everywhere: table lock, then slot lock. A hydrating writer already holds
+    // ROW EXCLUSIVE on the table (taken at parse time) when it asks for the slot lock, so a flush
+    // that held the slot lock while waiting for SHARE ROW EXCLUSIVE formed a cycle with it.
+    //
+    // So: the manifest object write needs neither lock and runs first (object-store I/O must never
+    // stall writers); then the table lock; then the slot lock with a short bounded wait (writers
+    // are blocked from here on); then catalog activation, the fence and the prune. Activation
+    // writes catalog rows that hydrating writers also update, so it must come after the table lock
+    // is held: at that point no writer is mid-transaction, and none can be waiting on this
+    // transaction's rows while this one waits on theirs (that cycle showed up as 130+ deadlocks per
+    // stress run when activation ran first).
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeManifestPublish)?;
+    pgrx::log!(
+        "koldstore flush: writing manifest path={} segments={} rows={}",
+        outcome.manifest_path,
+        outcome.manifest.segments.len(),
+        outcome.total_rows_flushed
+    );
+    write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
+    // Manifest object published; no lock is held, so concurrent writers still run here.
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterManifestPublish)?;
+    if outcome.prune_max_seq > 0 {
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSourceLock)?;
+        lock_source_table_share_row_exclusive(table_oid)?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSourceLock)?;
+    }
+    with_slot_lock_retry(SLOT_LOCK_WAIT_UNDER_TABLE_LOCK, || {
+        // Committed passes already caught up (Short); Nested had no commit boundary for them.
+        let skip_through = if commit_style == FlushCommitStyle::Nested {
+            run_async_prelock_catchup(table_oid, outcome.prune_max_seq)?
+        } else {
+            None
+        };
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeActivate)?;
         let expected_generation = manifest_generation(table_oid)?;
         activate_flush_segments(
@@ -602,7 +628,6 @@ pub(super) fn finalize_flush(
         // while still planning as hot-only (count/LIMIT → 0). Relcache
         // invalidation requires an open txn (this finalize SPI boundary).
         crate::catalog::cache::invalidate_table_globally(table_oid);
-        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterManifestPublish)?;
         run_async_prune_fence(table_oid, outcome.prune_max_seq, skip_through)?;
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeHotCleanup)?;
         pgrx::log!(
@@ -647,11 +672,14 @@ pub(super) fn finalize_flush(
 /// Callers run finalize fence work while the lock is held. Nested apply uses
 /// [`apply_bounded_locked`] so we do not depend on re-entrant blocking lock.
 /// The WAL applier also try-locks and yields when this waiter holds the lock.
-fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    use crate::mirror::lifecycle::{try_lock_slot, SLOT_LOCK_WAIT};
+fn with_slot_lock_retry<T>(
+    wait: std::time::Duration,
+    body: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use crate::mirror::lifecycle::try_lock_slot;
 
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    let deadline = std::time::Instant::now() + SLOT_LOCK_WAIT;
+    let deadline = std::time::Instant::now() + wait;
     const SLEEP_MS: u64 = 50;
     crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSlotLock)?;
     loop {
@@ -693,7 +721,7 @@ pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
 fn catch_up_mirror_before_select(commit_style: FlushCommitStyle) -> Result<(), String> {
     match commit_style {
         FlushCommitStyle::Nested => Ok(()),
-        FlushCommitStyle::Short => with_slot_lock_retry(|| {
+        FlushCommitStyle::Short => with_slot_lock_retry(crate::mirror::lifecycle::SLOT_LOCK_WAIT, || {
             use crate::mirror::apply::{apply_bounded_locked, BoundedApplyRequest};
             let outcome = apply_bounded_locked(BoundedApplyRequest::available())?;
             if outcome.row_changes > 0 {
@@ -705,6 +733,66 @@ fn catch_up_mirror_before_select(commit_style: FlushCommitStyle) -> Result<(), S
             Ok(())
         }),
     }
+}
+
+/// Longest finalize waits for the slot lock while it already holds the table lock (writers are
+/// blocked meanwhile, so this is short; the flush job fails closed and is retried).
+const SLOT_LOCK_WAIT_UNDER_TABLE_LOCK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Phase-5.5, Short mode: finite catch-up after object upload, as committed apply passes.
+///
+/// Each pass takes the slot lock only for its own transaction and *records* its progress like the
+/// background applier, so the next pass (and the fence) resume after it. That keeps this work,
+/// which needs the slot lock but not the table lock, ahead of the table lock in the lock order,
+/// and leaves the fence under the table lock with only the small remaining delta.
+fn run_committed_prelock_catchup(
+    table_oid: pgrx::pg_sys::Oid,
+    prune_max_seq: i64,
+) -> Result<(), String> {
+    use crate::mirror::apply::{apply_bounded_locked, BoundedApplyRequest, PruneSeqFloor};
+
+    if prune_max_seq <= 0 {
+        return Ok(());
+    }
+    let max_passes = crate::guc::flush_prelock_max_passes();
+    let max_ms = crate::guc::flush_prelock_max_ms();
+    let started = std::time::Instant::now();
+    for pass in 1..=max_passes {
+        if started.elapsed().as_millis() as i64 >= max_ms {
+            return Err(format!(
+                "async flush pre-lock catch-up exceeded {max_ms}ms budget before relation lock"
+            ));
+        }
+        let remaining_ms = (max_ms - started.elapsed().as_millis() as i64).max(1);
+        let outcome = FlushCommitStyle::Short.run_spi(|| {
+            with_slot_lock_retry(crate::mirror::lifecycle::SLOT_LOCK_WAIT, || {
+                let fence = capture_durable_wal_fence()?;
+                apply_bounded_locked(BoundedApplyRequest {
+                    upper_bound: Some(fence),
+                    skip_through: None,
+                    acknowledge_durable_checkpoint: true,
+                    advance_slot_on_empty: false,
+                    target_prune_floor: Some((table_oid.to_u32(), PruneSeqFloor::new(prune_max_seq))),
+                    max_rows: Some(0),
+                    max_ms: Some(remaining_ms),
+                })
+            })
+        })?;
+        pgrx::log!(
+            "koldstore flush: committed pre-lock catch-up pass={pass}/{max_passes} row_changes={} budget_exhausted={}",
+            outcome.row_changes,
+            outcome.budget_exhausted
+        );
+        if outcome.row_changes == 0 && !outcome.budget_exhausted {
+            return Ok(());
+        }
+        if pass == max_passes && outcome.budget_exhausted {
+            return Err(format!(
+                "async flush pre-lock catch-up exhausted {max_passes} passes with WAL remaining"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Phase-5.5: finite pre-lock catch-up after object upload.
@@ -768,8 +856,8 @@ fn run_async_prelock_catchup(
     Ok(skip_through)
 }
 
-/// Phase-6 async prune fence: slot lock already held; take short source lock,
-/// catch mirror up through a durable WAL upper bound, then prune safely.
+/// Phase-6 async prune fence: source-table and slot locks already held by the caller; catch the
+/// mirror up through a durable WAL upper bound, then prune safely.
 fn run_async_prune_fence(
     table_oid: pgrx::pg_sys::Oid,
     prune_max_seq: i64,
@@ -781,10 +869,7 @@ fn run_async_prune_fence(
         return Ok(());
     }
 
-    // Lock order: session table job (held) → slot (held by caller) → source table.
-    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSourceLock)?;
-    lock_source_table_share_row_exclusive(table_oid)?;
-    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSourceLock)?;
+    // Lock order: session table job (held) → source table (held by caller) → slot (held by caller).
     let fence = capture_durable_wal_fence()?;
     pgrx::log!(
         "koldstore flush: async prune fence upto_lsn={} skip_through={:?} floor={}",

@@ -46,6 +46,8 @@ static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Opt
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
+static HYDRATE_SLOT_LOCK_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
+#[cfg(feature = "pg")]
 static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -233,6 +235,16 @@ pub fn define_gucs() {
         c"One background worker is started per listed database (typically the Spock database). Changing it requires a restart.",
         &SPOCK_RECONCILE_DATABASES,
         GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.hydrate_slot_lock_poll_ms",
+        c"Polls (instead of queueing) for the async-mirror slot lock during a hydrate-on-write fence, for at most this many milliseconds.",
+        c"0 (default) queues on the lock, so the deadlock detector resolves lock cycles. A positive value polls, which keeps the WAL applier and flush from being starved by many concurrent hydrating transactions (about 1.5-3x the throughput at 8 clients) but fails the statement with a retryable serialization_failure when the lock is still busy at the deadline.",
+        &HYDRATE_SLOT_LOCK_POLL_MS,
+        0,
+        60_000,
+        GucContext::Userset,
         flags,
     );
     GucRegistry::define_int_guc(
@@ -492,6 +504,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "",
         },
         GucDefinition {
+            name: HYDRATE_SLOT_LOCK_POLL_MS_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
             name: MAX_HYDRATE_ROWS_GUC,
             internal: false,
             default_value: "10000",
@@ -621,6 +638,7 @@ pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_r
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
 pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
 pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
+pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_poll_ms";
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
@@ -760,6 +778,20 @@ pub fn hydrate_take_job_lock() -> bool {
     #[cfg(not(feature = "pg"))]
     {
         false
+    }
+}
+
+/// Milliseconds a hydrate-on-write fence polls for the slot lock (0 = queue on it).
+#[must_use]
+pub fn hydrate_slot_lock_poll_ms() -> u64 {
+    #[cfg(feature = "pg")]
+    {
+        u64::try_from(HYDRATE_SLOT_LOCK_POLL_MS.get()).unwrap_or(0)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        0
     }
 }
 

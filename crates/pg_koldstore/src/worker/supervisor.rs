@@ -129,7 +129,7 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
             Instant::now(),
             unix_now_ms(),
         );
-        if !BackgroundWorker::wait_latch(wait) {
+        if !super::wait_latch_interruptible(wait) {
             // bgworker exit 0 disables restart; non-zero preserves the static
             // supervisor's postmaster bgw_restart_time contract.
             unsafe { pgrx::pg_sys::proc_exit(1) };
