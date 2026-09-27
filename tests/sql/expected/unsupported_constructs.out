@@ -120,3 +120,20 @@ DROP SCHEMA
  t
 (1 row)
 
+CREATE TABLE
+INSERT 0 2
+ u3_managed
+------------
+ t
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: refusing COPY sqlreg.u1 TO ... -- the plain table form of COPY exports the hot heap only, so it would silently omit this managed table's cold-only rows (upstream issue #126). Use COPY (SELECT * FROM sqlreg.u1) TO ..., which plans normally and sees cold data too
+1
+2
+7
+COPY 1
+ val2
+------
+ new
+(1 row)
+

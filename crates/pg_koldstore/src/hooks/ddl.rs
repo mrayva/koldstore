@@ -124,6 +124,8 @@ mod process_utility {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::CopyStmt>();
                         if !stmt.is_null() && (*stmt).is_from {
                             copy_from_oid = relation_oid_from_range_var((*stmt).relation);
+                        } else {
+                            reject_copy_table_to_with_cold_data(stmt);
                         }
                     }
                     pg_sys::NodeTag::T_TruncateStmt => {
@@ -340,6 +342,31 @@ mod process_utility {
             }
             for parent in crate::merge_scan::pg::literals::list_node_pointers((*stmt).inhRelations) {
                 reject_if_managed(parent.cast::<pg_sys::RangeVar>(), "CREATE TABLE ... INHERITS / PARTITION OF");
+            }
+        }
+    }
+
+    /// `COPY <table> TO ...` (upstream #126): unlike `COPY (SELECT ...) TO`, the plain table form
+    /// never goes through the planner, so it can never enter `KoldMergeScan` -- it exports the hot
+    /// heap only, silently omitting cold rows. Refused only when the table actually has cold data;
+    /// a `COPY (query) TO` (the `relation` field is null, `query` is set instead) is unaffected --
+    /// it plans normally and does see cold data.
+    unsafe fn reject_copy_table_to_with_cold_data(stmt: *mut pg_sys::CopyStmt) {
+        unsafe {
+            if stmt.is_null() || !(*stmt).query.is_null() {
+                return;
+            }
+            let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) else {
+                return;
+            };
+            if managed_with_cold_data(table_oid) {
+                let name = crate::txn_writes::relation_display_name(table_oid);
+                pgrx::error!(
+                    "koldstore: refusing COPY {name} TO ... -- the plain table form of COPY exports \
+                     the hot heap only, so it would silently omit this managed table's cold-only rows \
+                     (upstream issue #126). Use COPY (SELECT * FROM {name}) TO ..., which plans \
+                     normally and sees cold data too"
+                );
             }
         }
     }

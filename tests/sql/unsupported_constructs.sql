@@ -95,3 +95,21 @@ ALTER SCHEMA sqlreg RENAME TO sqlreg_renamed;
 SELECT count(*) AS u2_rows_after_move FROM sqlreg2.u2_renamed;
 DROP SCHEMA sqlreg2 CASCADE;
 SELECT to_regclass('sqlreg.u_child') IS NOT NULL AS child_still_there;
+
+-- --------------------------------------------------------------------- COPY
+-- `COPY <table> TO ...` never goes through the planner, so it can never enter
+-- KoldMergeScan and exports the hot heap only (upstream #126); `COPY (query) TO`
+-- plans normally and is unaffected.
+CREATE TABLE sqlreg.u3 (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.u3 VALUES (1), (2);
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.u3'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS u3_managed;
+COPY sqlreg.u1 TO STDOUT;
+COPY sqlreg.u3 TO STDOUT;
+COPY (SELECT count(*) FROM sqlreg.u1) TO STDOUT;
+COPY sqlreg.u1 (id, val2) FROM STDIN WITH (FORMAT csv);
+9001,new
+\.
+SELECT val2 FROM sqlreg.u1 WHERE id = 9001;

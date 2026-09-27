@@ -112,10 +112,12 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   unaffected. Other schema evolution can still apply in PostgreSQL before
   KoldStore discovers it is unsupported; defaults and constraints are not
   retroactively enforced on older Parquet rows.
-- `pg_dump --data-only -t table` and `COPY table TO` export the heap and can omit
-  cold-only rows. Only a planned query such as `COPY (SELECT ...) TO` can enter
-  `KoldMergeScan`, and coordinated backup/PITR is not shipped
-  ([#126](https://github.com/kalamdb/koldstore/issues/126)).
+- `COPY <table> TO ...` (the plain table form, including what `pg_dump --data-only -t table`
+  issues under the hood) never goes through the planner, so it can never enter `KoldMergeScan`
+  and would silently export the hot heap only. Refused when the table has cold data
+  ([#126](https://github.com/kalamdb/koldstore/issues/126)); use `COPY (SELECT * FROM table) TO ...`
+  instead, which plans normally and sees cold data too. Coordinated backup/PITR across hot and cold
+  storage is still not shipped.
 
 ### Compatibility matrix
 
@@ -142,6 +144,7 @@ any row or object is changed.
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
 | Renaming/moving-schema a managed table (or its schema) with cold data | refused | `unsupported_constructs` |
+| `COPY <table> TO ...` (plain table form) on a managed table with cold data | refused | `unsupported_constructs` |
 | Any valid identifier (spaces, quotes, dots, slashes, non-ASCII, leading digit, blanks, long names) in schema, table or column | supported | `odd_identifiers` |
 | `DROP TABLE` / `DROP SCHEMA` of managed tables | supported; helper objects removed | `drop_cleanup_objects` |
 
