@@ -1002,6 +1002,31 @@ fn push_typed_pk_array_arg(args: &mut Vec<DatumWithOid<'_>>, column: PkBindColum
     }
 }
 
+/// Applies committed WAL through a freshly captured fence so a read in this transaction
+/// sees the mirror caught up, **without** recording or acknowledging applied progress.
+///
+/// Unlike [`wait_for_async_mirror`], the applied rows live only in this (sub)transaction
+/// and the slot is never advanced, so an abort discards them and the same WAL is decoded
+/// again later. Used by hydrate-on-write, whose statement may fail after the fence.
+pub fn fence_for_read() -> Result<(), String> {
+    let fence = capture_durable_wal_fence()?;
+    loop {
+        let outcome = apply_bounded(BoundedApplyRequest {
+            upper_bound: Some(fence),
+            skip_through: None,
+            acknowledge_durable_checkpoint: false,
+            advance_slot_on_empty: false,
+            target_prune_floor: None,
+            max_rows: Some(0),
+            max_ms: Some(0),
+        })?;
+        if !outcome.budget_exhausted {
+            return Ok(());
+        }
+        pgrx::check_for_interrupts!();
+    }
+}
+
 /// Applies committed WAL available at the fence boundary and returns row changes.
 ///
 /// SQL contract: `koldstore.wait_for_async_mirror()` is an optional committed-

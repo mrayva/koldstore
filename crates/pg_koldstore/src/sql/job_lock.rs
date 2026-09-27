@@ -11,6 +11,9 @@
 //! open transaction (`GetCurrentTransactionId` / relcache asserts).
 
 /// Namespace for table-scoped flush/migration job locks (fits in 32 bits).
+/// Longest a cold-row write waits for a table's job lock before giving up.
+pub(crate) const WRITE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const TABLE_JOB_LOCK_NAMESPACE: i64 = 0x4b54_4a42;
 
 /// Packs namespace + table OID into one PostgreSQL bigint advisory-lock key.
@@ -40,6 +43,37 @@ impl TableJobLockGuard {
             table_oid,
             held: true,
         })
+    }
+
+    /// Acquires the lock, waiting at most `timeout`, polling instead of blocking.
+    ///
+    /// A blocking advisory-lock call can be chosen as the victim of PostgreSQL's
+    /// deadlock detector (a flush holds this lock while it needs row locks an updater
+    /// holds, and the updater is waiting here). The error is raised inside a
+    /// `DirectFunctionCall`, whose FFI boundary cannot unwind, so it aborts the whole
+    /// server. Polling with `try_lock` never enters the lock manager's wait queue, so a
+    /// cycle ends with an ordinary, catchable timeout error instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock is still held elsewhere after `timeout`.
+    pub fn lock_bounded(table_oid: pgrx::pg_sys::Oid, timeout: std::time::Duration) -> Result<Self, String> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(guard) = Self::try_lock(table_oid)? {
+                return Ok(guard);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "table oid {} is busy: a flush or maintenance job has held its job lock for more than {}s; retry",
+                    table_oid.to_u32(),
+                    timeout.as_secs()
+                ));
+            }
+            // SAFETY: plain sleep; then honour cancel/terminate requests while waiting.
+            unsafe { pgrx::pg_sys::pg_usleep(5_000) };
+            pgrx::check_for_interrupts!();
+        }
     }
 
     /// Attempts a non-blocking acquire.

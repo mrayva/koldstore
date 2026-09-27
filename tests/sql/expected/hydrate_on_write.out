@@ -192,12 +192,60 @@ BEGIN
 
 ROLLBACK
 CREATE TABLE
-INSERT 0 1
- join_delete_still_rejected
-----------------------------
- REJECTED scan matches=1
+INSERT 0 4
+ join_targets_before
+---------------------
+ 4
 (1 row)
 
+ join_delete
+-------------
+ ok: 1
+(1 row)
+
+ join_update
+-------------
+ ok: 1
+(1 row)
+
+ subquery_update
+-----------------
+ ok: 1
+(1 row)
+
+ exists_matching_nothing
+-------------------------
+ ok: 0
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+      join_results
+-------------------------
+ 17=v17,19=joined,21=sub
+(1 row)
+
+PREPARE
+INSERT 0 1
+ prepared_join_update
+----------------------
+ ok: 0
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ prepared_join_result
+----------------------
+ prep
+(1 row)
+
+DEALLOCATE
 CREATE TABLE
 CREATE FUNCTION
 CREATE TRIGGER
@@ -332,6 +380,51 @@ TRUNCATE TABLE
 -----------------------------------
                                  0
 (1 row)
+
+CREATE TABLE
+INSERT 0 6
+ ab_managed
+------------
+ t
+(1 row)
+
+ ab_flushed
+------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+SET
+DELETE 1
+BEGIN
+SAVEPOINT
+SET
+psql:<PATH>: ERROR:  koldstore: refusing this UPDATE/DELETE on managed table sqlreg.h_ab -- it matches 4 cold row(s), more than koldstore.max_hydrate_rows (1); narrow the statement or change the rows in batches with koldstore.update_row()/delete_row() (upstream issue #122)
+ROLLBACK
+DELETE 1
+COMMIT
+RESET
+ settle
+--------
+
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ id
+----
+  2
+  3
+  4
+  5
+(4 rows)
 
  flush_after_hydration
 -----------------------

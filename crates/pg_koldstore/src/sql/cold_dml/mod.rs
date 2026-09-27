@@ -59,6 +59,7 @@ use koldstore_common::QualifiedTableName;
 use pgrx::datum::DatumWithOid;
 
 pub(crate) mod guard;
+pub(crate) mod key_lock;
 
 /// Resolves `table_oid` to a safely quotable schema-qualified name.
 #[cfg(feature = "pg")]
@@ -282,8 +283,15 @@ pub fn hydrate_pk_pg(table_name: pgrx::PgRelation, pk: pgrx::JsonB) -> pgrx::Jso
     let table_oid = table_name.oid();
     crate::security::require_relation_owner_or_superuser(table_oid, "hydrate a row for this table");
     drop(table_name);
-    let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
+    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
         .unwrap_or_else(|error| pgrx::error!("hydrate_pk failed to acquire table lock: {error}"));
+    // Serialize with any other session hydrating this key, so a delete another transaction just
+    // committed is not undone by re-hydrating its stale cold copy.
+    key_lock::lock_keys_bounded(
+        table_oid,
+        &[key_lock::key_of_pk_json(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("hydrate_pk: {error}"))],
+    )
+    .unwrap_or_else(|error| pgrx::error!("hydrate_pk: {error}"));
     // The materializing INSERT below would otherwise trip this table's own
     // BEFORE INSERT cold-DML write guard (see `guard::plan_insert_guard`) --
     // that guard exists to catch *callers* duplicating a cold PK via plain
@@ -391,12 +399,19 @@ pub fn update_row_pg(
     let table_oid = table_name.oid();
     crate::security::require_relation_owner_or_superuser(table_oid, "update a row for this table");
     drop(table_name);
-    let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
+    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
         .unwrap_or_else(|error| pgrx::error!("update_row failed to acquire table lock: {error}"));
+    // Serialize with any other session hydrating this key, so a delete another transaction just
+    // committed is not undone by re-hydrating its stale cold copy.
+    key_lock::lock_keys_bounded(
+        table_oid,
+        &[key_lock::key_of_pk_json(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("update_row: {error}"))],
+    )
+    .unwrap_or_else(|error| pgrx::error!("update_row: {error}"));
     // Suspend the write guard for this call's own native statements --
     // see the identical comment on `hydrate_pk_pg`.
     let (affected, hydrated) = guard::with_guard_suspended(|| {
-        update_row_impl(table_oid, &pk.0, &patch.0, lookup_cold)
+        key_lock::with_current_view(|| update_row_impl(table_oid, &pk.0, &patch.0, lookup_cold))
             .unwrap_or_else(|error| pgrx::error!("update_row failed: {error}"))
     });
     pgrx::JsonB(serde_json::json!({
@@ -478,12 +493,19 @@ pub fn delete_row_pg(
     let table_oid = table_name.oid();
     crate::security::require_relation_owner_or_superuser(table_oid, "delete a row for this table");
     drop(table_name);
-    let _lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
+    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
         .unwrap_or_else(|error| pgrx::error!("delete_row failed to acquire table lock: {error}"));
+    // Serialize with any other session hydrating this key, so a delete another transaction just
+    // committed is not undone by re-hydrating its stale cold copy.
+    key_lock::lock_keys_bounded(
+        table_oid,
+        &[key_lock::key_of_pk_json(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("delete_row: {error}"))],
+    )
+    .unwrap_or_else(|error| pgrx::error!("delete_row: {error}"));
     // Suspend the write guard for this call's own native statements --
     // see the identical comment on `hydrate_pk_pg`.
     let (affected, hydrated) = guard::with_guard_suspended(|| {
-        delete_row_impl(table_oid, &pk.0, lookup_cold)
+        key_lock::with_current_view(|| delete_row_impl(table_oid, &pk.0, lookup_cold))
             .unwrap_or_else(|error| pgrx::error!("delete_row failed: {error}"))
     });
     pgrx::JsonB(serde_json::json!({

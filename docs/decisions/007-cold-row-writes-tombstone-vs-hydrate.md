@@ -209,9 +209,13 @@ Known limits of the prototype (all fail closed or are documented, none silent):
 
 - `REPEATABLE READ` / `SERIALIZABLE`: the transaction snapshot cannot be advanced,
   so the hook stays out and the write guards reject as before.
-- Only single-table statements whose `WHERE` clause `where_deparse` can reproduce;
-  joins, sub-queries, data-modifying CTEs and `MERGE` fall through to the guards
-  (which reject).
+- Single-table statements whose `WHERE` clause `where_deparse` can reproduce, plus joins
+  (`UPDATE ... FROM`, `DELETE ... USING`) and sub-queries (`IN`, `EXISTS`, ...) through the
+  planner hook's probe (2026-09-26): the probe is a `SELECT` of the target's primary key over
+  the statement's whole `FROM`/`WHERE`, and hydration looks for cold-only rows matching
+  `(pk) IN (probe)` with the statement's own parameters bound (prepared statements work).
+  Data-modifying CTEs and `MERGE` still fall through to the guards (which reject), as do
+  statements the probe cannot reproduce (volatile functions, `CURRENT OF`).
 - **User triggers (resolved 2026-09-26): the hydration `INSERT` no longer fires them.**
   The prototype originally fired user `AFTER INSERT` triggers for the hydrated row,
   so deleting one cold row logged `INSERT` then `DELETE`. Hydration now runs under
@@ -234,13 +238,29 @@ Known limits of the prototype (all fail closed or are documented, none silent):
   system-attribute error). `unmanage_table(..., true)`, which re-inserts every cold row,
   now runs as hydration too: it no longer fails on dangling children and no longer fires
   an `INSERT` trigger per row. `CHECK` and unique constraints still apply.
-- **Concurrency on one cold key.** Two sessions hydrating the same key serialize
-  on the primary-key conflict (the second waits for the first to finish).
-  If the first *updates*, the second's `DELETE` finds nothing and is then rejected
-  by the exact-primary-key guard (fail closed, no lost delete). If the first
-  *deletes*, the second re-hydrates and deletes again: the final state is right
-  but the second statement reports one deleted row where native PostgreSQL would
-  report zero.
+- **Concurrency on one cold key** (rewritten 2026-09-26 after stress testing; the original
+  "serialize on the primary-key conflict" behavior was not enough, see below). Protocol per
+  hydrating statement: a cheap first look with no fence and no locks (a stale mirror can only
+  add candidates, never hide one; no candidates is the common case of updating hot rows);
+  then, only with candidates, loop: fetch candidates through a fence, take per-key advisory
+  locks (`pg_try_advisory_xact_lock`, polled with a deadline: a blocking lock error cannot be
+  unwound from a `DirectFunctionCall` and aborted the server), fence and fetch again through a
+  fresh snapshot until every candidate key is locked. What is left is the set of cold rows still
+  alive once everyone who held those keys has finished. The explicit `update_row`/`delete_row`
+  functions take the same per-key locks.
+  The mirror fence is needed because a committed delete is not masked from cold reads until the
+  async mirror applies its tombstone: without it a second session resurrected the row
+  (`updates that succeeded AFTER the key was already deleted`, `keys deleted successfully more
+  than once`). The fence **must not record or acknowledge applied progress**
+  (`mirror::apply::fence_for_read`, like flush's prune fence): the first version reused
+  `wait_for_async_mirror()`, whose applied-LSN record lives in the calling transaction, so a
+  second fence in the same statement treated that uncommitted record as durable and advanced
+  the replication slot past WAL whose mirror rows a later abort rolled back. The delete's
+  tombstone was then lost forever and the row came back (regression case `h_child`, and
+  `h_ab` now covers a failed statement after the fence). Knobs: `koldstore.hydrate_fence_mirror`
+  (default on), `koldstore.hydrate_take_job_lock` (default off: taking the table job lock
+  serialized every hydration behind flush, ~10 tps, and is unnecessary because hydrated rows are
+  uncommitted and invisible to flush).
 - Data movement: N cold rows cost N heap inserts plus N deletes/updates.
 
 Side finding (fixed): `UPDATE`/`DELETE` inside a **data-modifying CTE** bypassed the
@@ -252,6 +272,15 @@ Test-harness lesson: `FROM ONLY t` is **not** a heap-only scan on a managed tabl
 (the merge-scan hook still applies). Use `pageinspect`, or the guard's own
 hot-only probe, to look at the heap.
 
-Open items before this could be defaulted on: the trigger decision, the
-double-delete row count, extending hydration to joins/sub-queries/CTEs (the probe
-already exists; it needs to return rows), and a concurrent flush stress test.
+Stress test (`scripts/stress-hydrate-on-write.sh`, pgbench, 8 clients + concurrent flushers):
+phase 1 hydrating updates against flush, phase 2 hydrating deletes, phase 3 mixed
+update/delete on 400 shared keys, then checks that every violation counter is 0
+(versions equal successful bumps, no deleted key visible, no key deleted twice, no update
+after a delete, impossible commit orderings). Final protocol: 0 violations in 5 repeated mixed
+runs and again after the fence fix (3 + 1 runs). Throughput is ~12 tps for phase 3 on the
+scratch instance; the fence and per-key locks cost only when a statement has cold candidates.
+The stress database accumulates many tiny segments, which inflates cold probe cost.
+
+Open items before this could be defaulted on: the double-delete row count (a statement racing a
+delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
+hydration, `REPEATABLE READ`, and a partitioned-table story.

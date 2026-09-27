@@ -11,11 +11,12 @@
 //!
 //! Limits of the prototype: `READ COMMITTED` only (the transaction snapshot of
 //! `REPEATABLE READ`/`SERIALIZABLE` cannot be advanced), single-table statements
-//! whose `WHERE` clause `hooks::where_deparse` can reproduce, and a transaction
+//! whose `WHERE` clause `hooks::where_deparse` can reproduce (joins and sub-queries go through
+//! the planner hook's probe, see `hooks::dml_planner`), and a transaction
 //! that has not already written the table. Everything else keeps falling through
-//! to the write guards, which reject it. The table job lock is held until the
-//! statement ends so a flush cannot move the hydrated rows back to cold before the
-//! scan reads them.
+//! to the write guards, which reject it. The table job lock is not held by default (the hydrated row is
+//! uncommitted, so a concurrent flush cannot see or prune it); `koldstore.hydrate_take_job_lock`
+//! turns that on, with a bounded wait.
 
 use std::cell::RefCell;
 
@@ -96,10 +97,29 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
         if !crate::catalog::cache::is_managed_relation(table_oid) {
             return;
         }
-        let Some(where_sql) =
-            crate::hooks::where_deparse::deparse_where((*planned).planTree, (*query_desc).params, table_oid)
-        else {
-            return;
+        // Single-table statements: the plan's own WHERE. Joins and sub-queries: the planner hook's
+        // probe, a SELECT of the target's primary keys over the statement's whole FROM/WHERE, used
+        // as `(pk) IN (probe)` so the same cold-only comparison applies.
+        let (where_sql, params) = if let Some(probe) = crate::hooks::dml_planner::probe_sql_of((*planned).planTree) {
+            let Some(params) = crate::hooks::dml_planner::collect_params((*query_desc).params) else {
+                return;
+            };
+            let Ok(pk_columns) = crate::sql::cold_dml::primary_key_columns(table_oid) else {
+                return;
+            };
+            let columns = pk_columns
+                .iter()
+                .map(|column| format!("t.{}", koldstore_common::sql::ident::quote_ident(column)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("({columns}) IN ({probe})"), params)
+        } else {
+            let Some(where_sql) =
+                crate::hooks::where_deparse::deparse_where((*planned).planTree, (*query_desc).params, table_oid)
+            else {
+                return;
+            };
+            (where_sql, Vec::new())
         };
         let has_cold = matches!(
             crate::catalog::cache::cached_manifest_planner_hint(table_oid),
@@ -112,13 +132,60 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
         }
 
         // Keep flush away from the hydrated rows until the statement has scanned them.
-        let lock = TableJobLockGuard::lock(table_oid).unwrap_or_else(|error| pgrx::error!("hydrate-on-write: {error}"));
-        HELD_LOCKS.with(|locks| locks.borrow_mut().push(lock));
+        // Optional: the hydrated row is uncommitted and therefore invisible to (and safe from) a
+        // concurrent flush, so the default is not to serialize behind flushes (see the GUC).
+        if crate::guc::hydrate_take_job_lock() {
+            let lock = TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
+                .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write: {error}"));
+            HELD_LOCKS.with(|locks| locks.borrow_mut().push(lock));
+        }
 
-        let rows = crate::sql::cold_dml::guard::cold_only_matching_rows(table_oid, &where_sql)
+        // Serialize per key, then look. A delete another transaction committed moments ago is not
+        // masked from cold reads until the async mirror applies its tombstone, and two sessions
+        // hydrating one key interleave badly (the second inserts its own copy once the first
+        // commits a delete). So: fetch candidates, lock their keys (waiting out any other
+        // transaction working on them), fence on the mirror, fetch again through a fresh
+        // snapshot, and repeat until every candidate key is locked. What remains is exactly the
+        // cold rows still alive after everyone who held those keys has finished.
+        //
+        // First a plain look, with no fence and no locks: a stale mirror can only make a row look
+        // cold that is really deleted (an extra candidate), never hide a real one, so no candidates
+        // here means nothing to hydrate, which is the common case (updating rows that are hot).
+        let probe = crate::sql::cold_dml::guard::cold_only_matching_rows_with_params(table_oid, &where_sql, &params)
             .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write failed: {error}"));
+        if probe.is_empty() {
+            return;
+        }
+        let mut locked = std::collections::HashSet::<String>::new();
+        let mut rows: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut settled = false;
+        for _ in 0..6 {
+            rows = crate::sql::cold_dml::key_lock::with_current_view(|| {
+                crate::sql::cold_dml::guard::cold_only_matching_rows_with_params(table_oid, &where_sql, &params)
+            })
+            .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write failed: {error}"));
+            let new_keys: Vec<String> =
+                rows.iter().map(|(key, _)| key.clone()).filter(|key| !locked.contains(key)).collect();
+            if new_keys.is_empty() {
+                settled = true;
+                break;
+            }
+            if locked.len() + new_keys.len() > crate::guc::max_hydrate_rows() {
+                break; // over the cap: reported below
+            }
+            crate::sql::cold_dml::key_lock::lock_keys_bounded(table_oid, &new_keys)
+                .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write: {error}"));
+            locked.extend(new_keys);
+        }
         if rows.is_empty() {
             return;
+        }
+        if !settled && rows.len() <= crate::guc::max_hydrate_rows() {
+            pgrx::error!(
+                "koldstore: hydrate-on-write could not settle on a stable set of cold rows for {} (heavy \
+                 concurrent changes to the same keys); retry",
+                crate::txn_writes::relation_display_name(table_oid)
+            );
         }
         let cap = crate::guc::max_hydrate_rows();
         if rows.len() > cap {
@@ -130,6 +197,7 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
                 rows.len()
             );
         }
+        let rows: Vec<serde_json::Value> = rows.into_iter().map(|(_, row)| row).collect();
         crate::sql::cold_dml::hydrate_rows(table_oid, &rows)
             .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write failed: {error}"));
         crate::txn_writes::record_managed_write(table_oid);

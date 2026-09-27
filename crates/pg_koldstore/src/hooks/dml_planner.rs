@@ -6,7 +6,7 @@
 //! statement's join would have matched is silently skipped. Detecting that needs
 //! the statement's own conditions, which only the parse tree still has intact,
 //! so this hook -- before planning consumes the tree -- turns the statement into
-//! the equivalent `SELECT DISTINCT <target primary key> ...` over the same
+//! the equivalent `SELECT <target primary key> ...` over the same
 //! `FROM`/`WHERE`, deparses it to SQL, and carries the text on the plan (a
 //! marker constant in the `ModifyTable` node's `qual` list, which the executor
 //! never evaluates) so it survives plan caching and reaches `ExecutorEnd`, where
@@ -41,7 +41,11 @@ unsafe extern "C-unwind" fn planner(
 ) -> *mut pg_sys::PlannedStmt {
     unsafe {
         // Must run before planning: the planner rewrites the tree in place.
-        let probe = if crate::guc::guard_scan_writes() { build_probe_sql(parse) } else { None };
+        let probe = if crate::guc::guard_scan_writes() || crate::guc::hydrate_on_write() {
+            build_probe_sql(parse)
+        } else {
+            None
+        };
         let planned = match PREVIOUS_PLANNER_HOOK {
             Some(previous) => previous(parse, query_string, cursor_options, bound_params),
             None => pg_sys::standard_planner(parse, query_string, cursor_options, bound_params),
@@ -147,7 +151,7 @@ unsafe fn build_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
             return None;
         }
         let inner = CStr::from_ptr(text).to_string_lossy().into_owned();
-        Some(format!("SELECT count(*) FROM (SELECT DISTINCT * FROM ({inner}) AS koldstore_probe_rows) AS koldstore_probe"))
+        Some(inner)
     }
 }
 

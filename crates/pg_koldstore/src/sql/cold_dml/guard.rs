@@ -163,24 +163,47 @@ pub(crate) fn count_cold_only_matches(table_oid: pgrx::pg_sys::Oid, where_sql: &
     Ok(merged - hot)
 }
 
-/// The full rows (as jsonb objects) of the cold-only matches of `where_sql`
-/// (a condition over the table aliased `t`): rows of the merged hot+cold view
-/// whose primary key the heap-only view does not have. Used by hydrate-on-write.
+/// The cold-only matches of `where_sql` (a condition over the table aliased `t`) as
+/// `(lock key, full row as a jsonb object)`: rows of the merged hot+cold view whose primary
+/// key the heap-only view does not have. Used by hydrate-on-write. The key text is rendered
+/// by PostgreSQL (see [`super::key_lock::key_sql`]). The caller decides which snapshot and
+/// mirror state to look through.
 #[cfg(feature = "pg")]
 pub(crate) fn cold_only_matching_rows(
     table_oid: pgrx::pg_sys::Oid,
     where_sql: &str,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    cold_only_matching_rows_with_params(table_oid, where_sql, &[])
+}
+
+/// [`cold_only_matching_rows`] for a condition that refers to the statement's own parameters
+/// (`$1`, ...), as a join/sub-query probe does.
+#[cfg(feature = "pg")]
+pub(crate) fn cold_only_matching_rows_with_params(
+    table_oid: pgrx::pg_sys::Oid,
+    where_sql: &str,
+    params: &[crate::hooks::dml_planner::ProbeParam],
+) -> Result<Vec<(String, serde_json::Value)>, String> {
     let relation = super::qualified_relation(table_oid)?;
     let pk_columns = super::primary_key_columns(table_oid)?;
     let sql = format!(
-        "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) FROM {} AS t WHERE {where_sql}",
+        "SELECT coalesce(jsonb_agg(jsonb_build_object('r', to_jsonb(t), 'k', {})), '[]'::jsonb) \
+         FROM {} AS t WHERE {where_sql}",
+        super::key_lock::key_sql(&pk_columns, "t"),
         relation.quoted()
     );
-    let fetch = |sql: &str| -> Result<Vec<serde_json::Value>, String> {
-        let rows = pgrx::Spi::get_one::<pgrx::JsonB>(sql).map_err(|error| error.to_string())?;
-        Ok(match rows.map(|json| json.0) {
-            Some(serde_json::Value::Array(rows)) => rows,
+    let fetch = |sql: &str| -> Result<Vec<(String, serde_json::Value)>, String> {
+        let rows = spi_first_value_text(sql, params)?
+            .map(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|error| error.to_string()))
+            .transpose()?;
+        Ok(match rows {
+            Some(serde_json::Value::Array(items)) => items
+                .into_iter()
+                .filter_map(|item| {
+                    let key = item.get("k")?.as_str()?.to_string();
+                    Some((key, item.get("r")?.clone()))
+                })
+                .collect(),
             _ => Vec::new(),
         })
     };
@@ -189,12 +212,8 @@ pub(crate) fn cold_only_matching_rows(
         let _hot_only = crate::merge_scan::pg::HotOnlyRelation::new(table_oid);
         crate::txn_writes::with_check_suppressed(|| fetch(&sql))?
     };
-    let key = |row: &serde_json::Value| -> String {
-        serde_json::to_string(&pk_columns.iter().map(|column| row.get(column).cloned()).collect::<Vec<_>>())
-            .unwrap_or_default()
-    };
-    let hot_keys: std::collections::HashSet<String> = hot.iter().map(key).collect();
-    Ok(merged.into_iter().filter(|row| !hot_keys.contains(&key(row))).collect())
+    let hot_keys: std::collections::HashSet<String> = hot.into_iter().map(|(key, _)| key).collect();
+    Ok(merged.into_iter().filter(|(key, _)| !hot_keys.contains(key)).collect())
 }
 
 /// Runs `sql` (a `SELECT count(*)` over the statement's join, see
@@ -218,7 +237,15 @@ pub(crate) fn count_join_cold_only_matches(
 
 #[cfg(feature = "pg")]
 fn run_count_with_params(sql: &str, params: &[crate::hooks::dml_planner::ProbeParam]) -> Result<i64, String> {
-    use std::ffi::{c_char, CString};
+    let wrapped = format!("SELECT count(*) FROM (SELECT DISTINCT * FROM ({sql}) AS koldstore_probe_rows) AS koldstore_probe");
+    Ok(spi_first_value_text(&wrapped, params)?.and_then(|text| text.parse().ok()).unwrap_or(0))
+}
+
+/// Runs a read-only `sql` with the statement's own parameters and returns the first column of
+/// its single row rendered as text (`None` for NULL).
+#[cfg(feature = "pg")]
+fn spi_first_value_text(sql: &str, params: &[crate::hooks::dml_planner::ProbeParam]) -> Result<Option<String>, String> {
+    use std::ffi::{c_char, CStr, CString};
 
     use pgrx::pg_sys;
 
@@ -245,12 +272,11 @@ fn run_count_with_params(sql: &str, params: &[crate::hooks::dml_planner::ProbePa
                 return Err(format!("cold-match probe failed (SPI code {code})"));
             }
             let tuptable = &*pg_sys::SPI_tuptable;
-            let mut is_null = false;
-            let datum = pg_sys::SPI_getbinval(*tuptable.vals, tuptable.tupdesc, 1, &mut is_null);
-            if is_null {
-                return Ok(0);
+            let text = pg_sys::SPI_getvalue(*tuptable.vals, tuptable.tupdesc, 1);
+            if text.is_null() {
+                return Ok(None);
             }
-            Ok(<i64 as pgrx::FromDatum>::from_datum(datum, false).unwrap_or(0))
+            Ok(Some(CStr::from_ptr(text).to_string_lossy().into_owned()))
         }
     })
 }

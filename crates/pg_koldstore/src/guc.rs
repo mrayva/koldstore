@@ -34,6 +34,10 @@ static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static HYDRATING: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static HYDRATE_TAKE_JOB_LOCK: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
+static HYDRATE_FENCE_MIRROR: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
 static CAPTURE_REPLICATED_CHANGES: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
@@ -178,6 +182,22 @@ pub fn define_gucs() {
         c"EXPERIMENTAL: lets UPDATE/DELETE change cold-only rows by hydrating them first.",
         c"Before a single-table UPDATE/DELETE on a managed table scans, the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED only; other statements keep being rejected by the write guards (upstream #122).",
         &HYDRATE_ON_WRITE,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.hydrate_fence_mirror",
+        c"Applies committed WAL to the async mirror before hydrate-on-write looks for cold rows.",
+        c"A delete that committed moments ago is not masked from cold reads until the asynchronous mirror applies its tombstone; without this fence a hydrating statement in that window sees the stale cold copy, re-hydrates it and acts on a row that is already gone (an UPDATE succeeds after the DELETE, or a deleted row reappears). The fence costs a mirror apply pass per hydrating statement. Turn off only if you accept that window.",
+        &HYDRATE_FENCE_MIRROR,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.hydrate_take_job_lock",
+        c"Makes hydrate-on-write hold the table's flush/maintenance job lock for the statement.",
+        c"Off by default: a hydrated row is uncommitted, so a concurrent flush cannot see or prune it, and holding the lock serializes every hydrating statement behind any running flush (measured: ~10 tps against ~16000 tps with a continuously running flusher). Turn on to be conservative; waits are bounded (5 s) and fail with an ordinary error.",
+        &HYDRATE_TAKE_JOB_LOCK,
         GucContext::Userset,
         flags,
     );
@@ -442,6 +462,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: HYDRATE_FENCE_MIRROR_GUC,
+            internal: false,
+            default_value: "on",
+        },
+        GucDefinition {
+            name: HYDRATE_TAKE_JOB_LOCK_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
             name: HYDRATING_GUC,
             internal: false,
             default_value: "off",
@@ -595,6 +625,8 @@ pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interv
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
+pub const HYDRATE_TAKE_JOB_LOCK_GUC: &str = "koldstore.hydrate_take_job_lock";
+pub const HYDRATE_FENCE_MIRROR_GUC: &str = "koldstore.hydrate_fence_mirror";
 pub const REJECT_SERIALIZABLE_COLD_READS_GUC: &str = "koldstore.reject_serializable_cold_reads";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
@@ -700,6 +732,34 @@ pub fn spock_reconcile_databases() -> Vec<String> {
     #[cfg(not(feature = "pg"))]
     {
         Vec::new()
+    }
+}
+
+/// Whether hydrate-on-write fences on the async mirror before locating cold rows.
+#[must_use]
+pub fn hydrate_fence_mirror() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        HYDRATE_FENCE_MIRROR.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
+    }
+}
+
+/// Whether hydrate-on-write holds the table job lock for the statement.
+#[must_use]
+pub fn hydrate_take_job_lock() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        HYDRATE_TAKE_JOB_LOCK.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
     }
 }
 

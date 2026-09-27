@@ -139,10 +139,24 @@ BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 18$$) AS repeatable_read_delete;
 ROLLBACK;
 
--- statements it cannot reproduce still hit the write guards
-CREATE TABLE sqlreg.h_src (id bigint PRIMARY KEY);
-INSERT INTO sqlreg.h_src VALUES (18);
-SELECT sqlreg.try($$DELETE FROM sqlreg.h1 USING sqlreg.h_src s WHERE h1.id = s.id$$) AS join_delete_still_rejected;
+-- joins and sub-queries hydrate through the planner hook's probe: the cold rows the join
+-- matches (and only those) are pulled into the heap first
+CREATE TABLE sqlreg.h_src (id bigint PRIMARY KEY, tag text);
+INSERT INTO sqlreg.h_src VALUES (22, 'a'), (19, 'b'), (21, 'c'), (9999, 'no-such-row');
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id IN (22, 19, 21, 17)$$) AS join_targets_before;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 USING sqlreg.h_src s WHERE h1.id = s.id AND s.tag = 'a'$$) AS join_delete;
+SELECT sqlreg.try($$UPDATE sqlreg.h1 SET val = 'joined' FROM sqlreg.h_src s WHERE h1.id = s.id AND s.tag = 'b'$$) AS join_update;
+SELECT sqlreg.try($$UPDATE sqlreg.h1 SET val = 'sub' WHERE id IN (SELECT id FROM sqlreg.h_src WHERE tag = 'c')$$) AS subquery_update;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE EXISTS (SELECT 1 FROM sqlreg.h_src s WHERE s.id = h1.id AND s.tag = 'nope')$$) AS exists_matching_nothing;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT string_agg(id || '=' || val, ',' ORDER BY id) FROM sqlreg.h1 WHERE id IN (17, 19, 21, 22)$$) AS join_results;
+-- with a bound parameter (generic and custom plans)
+PREPARE h_join(text) AS UPDATE sqlreg.h1 SET val = 'prep' FROM sqlreg.h_src s WHERE h1.id = s.id AND s.tag = $1;
+INSERT INTO sqlreg.h_src VALUES (17, 'd');
+SELECT sqlreg.try($$EXECUTE h_join('d')$$) AS prepared_join_update;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT val FROM sqlreg.h1 WHERE id = 17$$) AS prepared_join_result;
+DEALLOCATE h_join;
 
 -- User triggers: the hydration INSERT must not fire ordinary triggers (the row already
 -- exists logically); the user's own DELETE does. A trigger marked ENABLE ALWAYS still
@@ -209,6 +223,31 @@ TRUNCATE sqlreg.h_log;
 SELECT koldstore.unmanage_table('sqlreg.h_child'::regclass, true) IS NOT NULL AS child_unmanaged;
 SELECT count(*) AS child_rows_after_unmanage FROM sqlreg.h_child;
 SELECT count(*) AS insert_triggers_fired_by_unmanage FROM sqlreg.h_log;
+
+-- A statement that fails after its mirror fence must not lose an earlier committed delete: the
+-- fence's applied progress is never recorded or acknowledged, so the rolled-back work is
+-- decoded again instead of being skipped by an advanced slot.
+CREATE TABLE sqlreg.h_ab (id bigint PRIMARY KEY, v text);
+INSERT INTO sqlreg.h_ab SELECT g, 'r' || g FROM generate_series(1, 6) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_ab'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS ab_managed;
+SELECT sqlreg.flush_table('sqlreg.h_ab'::regclass) IS NOT NULL AS ab_flushed;
+SELECT sqlreg.settle();
+SET koldstore.hydrate_on_write = on;
+DELETE FROM sqlreg.h_ab WHERE id = 1;
+BEGIN;
+SAVEPOINT s;
+SET LOCAL koldstore.max_hydrate_rows = 1;
+DELETE FROM sqlreg.h_ab WHERE id BETWEEN 2 AND 5;
+ROLLBACK TO s;
+DELETE FROM sqlreg.h_ab WHERE id = 6;
+COMMIT;
+RESET koldstore.hydrate_on_write;
+SELECT sqlreg.settle();
+SELECT sqlreg.settle();
+SELECT id FROM sqlreg.h_ab ORDER BY id;
 
 -- the job lock is released after the statements: a flush still runs
 SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;
