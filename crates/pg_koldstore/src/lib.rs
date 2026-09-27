@@ -49,7 +49,17 @@ pub mod pg_test {
             // Merge-scan hooks + supervisor must exist in every backend.
             "shared_preload_libraries=koldstore",
             // Supervisor + persistent WAL appliers + ephemeral workers need headroom.
-            "max_worker_processes=16",
+            "max_worker_processes=48",
+            "max_replication_slots=48",
+            "max_wal_senders=48",
+            // Every #[pg_test] runs its whole body in one uncommitted transaction (pgrx-tests
+            // wraps each in START TRANSACTION / ROLLBACK), so a fixture that seeds rows, manages
+            // and flushes the table, then reads it back always writes and reads the same table in
+            // one transaction -- exactly what upstream #121's same-transaction guard exists to
+            // refuse for real callers. These tests exercise scan planning, not #121 itself (which
+            // has its own dedicated coverage in tests/sql/txn_local_visibility.sql); accept the
+            // documented staleness risk cluster-wide here rather than annotating every fixture.
+            "koldstore.allow_same_txn_cold_reads=on",
         ]
     }
 }

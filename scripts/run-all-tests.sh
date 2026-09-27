@@ -223,7 +223,20 @@ run_local_pg_test() {
   step "#[pg_test] via cargo nextest (PostgreSQL ${pg})"
   # Mirror the env `cargo pgrx test` passes into its inner `cargo test`, but run
   # nextest directly — setting CARGO=shim fails because outer cargo resets CARGO.
-  CARGO_TARGET_DIR="${target_dir}" \
+  # --test-threads 1 is required, not just faster-and-safer: koldstore's async
+  # mirror infrastructure (slot, publication, supervisor) is provisioned once per
+  # *database*, and every #[pg_test] shares one database in this harness, so
+  # concurrent tests race provisioning/state and fail with spurious "requires
+  # logical slot" / "could not obtain test mutex" errors (confirmed live: the
+  # exact same 92 tests are 100% flaky above 1 thread and 100% reliable at 1).
+  # RUSTUP_TOOLCHAIN=nightly is a defensive pin: cargo-pgrx's own `cargo metadata`
+  # probe (spawned per test process under nextest, unlike a single `cargo pgrx
+  # test` process) does not always pick up this repo's rust-toolchain.toml,
+  # failing with "the option `Z` is only accepted on the nightly compiler" if the
+  # environment's rustup default is stable (confirmed live in a sandbox whose
+  # default toolchain was stable despite this file).
+  RUSTUP_TOOLCHAIN=nightly \
+    CARGO_TARGET_DIR="${target_dir}" \
     PGRX_FEATURES="${features}" \
     PGRX_NO_DEFAULT_FEATURES=true \
     PGRX_ALL_FEATURES=false \
