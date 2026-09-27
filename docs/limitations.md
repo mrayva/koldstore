@@ -75,6 +75,10 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   `CASCADE`) is refused before anything is changed. `SERIALIZABLE` runs, but it
   is not a PostgreSQL-equivalent guarantee for cold reads;
   `koldstore.reject_serializable_cold_reads = on` makes such reads fail instead.
+- Foreign keys that reference a managed table with cold data: deleting or re-keying a
+  parent row is refused (the referential-integrity scan of the child needs row locks,
+  which cold rows do not support, #125), so parent rows cannot be removed while such a
+  child has cold rows. Foreign keys are enforced on hot rows only.
 - Only ordinary, permanent tables that take no part in a partition or
   inheritance hierarchy can be managed: `manage_table` refuses partitioned
   tables, partitions, inheritance parents and children, foreign, temporary and

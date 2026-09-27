@@ -41,7 +41,12 @@ pub(super) fn unmanage_table_pg_impl(
     // grants that step's TRUNCATE against koldstore's own ProcessUtility
     // guard).
     let deactivated =
-        crate::sql::cold_dml::guard::with_guard_suspended(|| execute_demigration_statements(&plan, table_oid))?;
+        // The re-insert of every cold row is hydration too: run it with user triggers and
+        // referential-integrity triggers off, like `hydrate_pk`, so unmanaging neither
+        // fires an INSERT trigger per row nor fails on a cold child whose parent is gone.
+        crate::sql::cold_dml::as_hydration(|| {
+            crate::sql::cold_dml::guard::with_guard_suspended(|| execute_demigration_statements(&plan, table_oid))
+        })?;
 
     let source = koldstore_common::QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
     for statement in crate::sql::cold_dml::guard::plan_insert_guard_teardown(&source) {

@@ -174,5 +174,41 @@ SELECT koldstore.update_row('sqlreg.h1'::regclass, '{"id": 17}', '{"val": "expli
 SELECT op, id FROM sqlreg.h_log ORDER BY op, id;
 DROP TRIGGER h_after ON sqlreg.h1;
 
+-- foreign keys. A cold child whose parent is gone: the hydration insert must not trip the
+-- FK (referential-integrity triggers are off under hydration), while the FK itself still
+-- refuses an ordinary insert. The FK is added after management (the child heap is empty
+-- then) because manage_table refuses foreign keys on flush-enabled tables.
+CREATE TABLE sqlreg.h_parent (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.h_parent VALUES (1), (2);
+CREATE TABLE sqlreg.h_child (id bigint PRIMARY KEY, pid bigint NOT NULL, v text);
+INSERT INTO sqlreg.h_child SELECT g, 1, 'c' || g FROM generate_series(1, 30) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_child'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS child_managed;
+SELECT sqlreg.flush_table('sqlreg.h_child'::regclass) IS NOT NULL AS child_flushed;
+SELECT sqlreg.settle();
+ALTER TABLE sqlreg.h_child ADD CONSTRAINT h_child_pid_fk FOREIGN KEY (pid) REFERENCES sqlreg.h_parent (id);
+-- deleting the parent runs an RI scan of the child with FOR KEY SHARE, which cannot see cold rows
+SELECT sqlreg.try($$DELETE FROM sqlreg.h_parent WHERE id = 1$$, true) AS delete_parent_with_cold_children;
+-- remove it the way a replicated delete would (RI triggers off), leaving cold children dangling
+BEGIN;
+SET LOCAL session_replication_role = replica;
+DELETE FROM sqlreg.h_parent WHERE id = 1;
+COMMIT;
+SELECT sqlreg.try($$INSERT INTO sqlreg.h_child VALUES (100, 1, 'new')$$, true) AS ordinary_insert_refused_by_fk;
+SELECT koldstore.delete_row('sqlreg.h_child'::regclass, '{"id": 3}') ->> 'deleted' AS delete_row_dangling_child;
+DELETE FROM sqlreg.h_child WHERE id IN (4, 5) RETURNING id;
+SELECT sqlreg.try($$UPDATE sqlreg.h_child SET v = 'dangling' WHERE id = 6$$, true) AS update_dangling_child_fk_recheck;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_child WHERE id IN (3, 4, 5)$$) AS deleted_children_remaining;
+SELECT sqlreg.val($$SELECT v FROM sqlreg.h_child WHERE id = 6$$) AS child_6_unchanged;
+-- unmanaging with the cold rows pulled back is hydration too: no FK failure, no trigger per row
+CREATE TRIGGER h_child_trg AFTER INSERT ON sqlreg.h_child FOR EACH ROW EXECUTE FUNCTION sqlreg.h_trg();
+TRUNCATE sqlreg.h_log;
+SELECT koldstore.unmanage_table('sqlreg.h_child'::regclass, true) IS NOT NULL AS child_unmanaged;
+SELECT count(*) AS child_rows_after_unmanage FROM sqlreg.h_child;
+SELECT count(*) AS insert_triggers_fired_by_unmanage FROM sqlreg.h_log;
+
 -- the job lock is released after the statements: a flush still runs
 SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;

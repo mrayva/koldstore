@@ -222,8 +222,18 @@ Known limits of the prototype (all fail closed or are documented, none silent):
   changes trigger firing only, so the insert is still logged, decoded and replicated
   (verified on the Spock mesh). Referential-integrity triggers are skipped too, which
   should stop a cold child whose parent is gone from blocking its own delete; that part
-  is untested (the FK opt-in `allow_fk_hot_only` is not reachable through
-  `manage_table` arguments). `CHECK` and unique constraints still apply.
+  is now tested (2026-09-26, scratch instance and the shared cluster): the FK is added
+  after management, because `manage_table` refuses foreign keys on flush-enabled
+  tables and `allow_fk_hot_only` is not reachable through its arguments. With the
+  parent removed, `delete_row` and a hydrate-on-write `DELETE` of a cold child succeed,
+  while an ordinary `INSERT` of a child still violates the FK. Two consequences to know:
+  an `UPDATE` of a hydrated dangling child fails the FK recheck (PostgreSQL rechecks a
+  row inserted by the current transaction) and changes nothing; and deleting a parent
+  row is refused while the child has cold data, because the RI scan uses
+  `FOR KEY SHARE`, which cold rows cannot support (#125, previously an obscure
+  system-attribute error). `unmanage_table(..., true)`, which re-inserts every cold row,
+  now runs as hydration too: it no longer fails on dangling children and no longer fires
+  an `INSERT` trigger per row. `CHECK` and unique constraints still apply.
 - **Concurrency on one cold key.** Two sessions hydrating the same key serialize
   on the primary-key conflict (the second waits for the first to finish).
   If the first *updates*, the second's `DELETE` finds nothing and is then rejected

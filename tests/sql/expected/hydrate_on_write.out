@@ -250,6 +250,89 @@ TRUNCATE TABLE
 (1 row)
 
 DROP TRIGGER
+CREATE TABLE
+INSERT 0 2
+CREATE TABLE
+INSERT 0 30
+ child_managed
+---------------
+ t
+(1 row)
+
+ child_flushed
+---------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ALTER TABLE
+                                                                               delete_parent_with_cold_children
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.h_child while it has cold data (upstream issue #125)
+(1 row)
+
+BEGIN
+SET
+DELETE 1
+COMMIT
+                                ordinary_insert_refused_by_fk
+---------------------------------------------------------------------------------------------
+ ERROR: insert or update on table "h_child" violates foreign key constraint "h_child_pid_fk"
+(1 row)
+
+ delete_row_dangling_child
+---------------------------
+ true
+(1 row)
+
+ id
+----
+  4
+  5
+(2 rows)
+
+DELETE 2
+                              update_dangling_child_fk_recheck
+---------------------------------------------------------------------------------------------
+ ERROR: insert or update on table "h_child" violates foreign key constraint "h_child_pid_fk"
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ deleted_children_remaining
+----------------------------
+ 0
+(1 row)
+
+ child_6_unchanged
+-------------------
+ c6
+(1 row)
+
+CREATE TRIGGER
+TRUNCATE TABLE
+ child_unmanaged
+-----------------
+ t
+(1 row)
+
+ child_rows_after_unmanage
+---------------------------
+                        27
+(1 row)
+
+ insert_triggers_fired_by_unmanage
+-----------------------------------
+                                 0
+(1 row)
+
  flush_after_hydration
 -----------------------
  t
