@@ -23,6 +23,19 @@ INSERT 0 2
 
 (1 row)
 
+BEGIN
+DECLARE CURSOR
+ id
+----
+ 11
+(1 row)
+
+ update_current_of_cursor
+--------------------------
+ REJECTED unverifiable
+(1 row)
+
+ROLLBACK
      delete_between
 -------------------------
  REJECTED scan matches=2
@@ -361,16 +374,28 @@ INSERT 0 1
 (1 row)
 
 ROLLBACK
- gap_volatile_subquery
------------------------
+ volatile_function_in_subquery
+-------------------------------
+ REJECTED unverifiable
+(1 row)
+
+ cte_used_as_join_source
+-------------------------
+ REJECTED unverifiable
+(1 row)
+
+ volatile_function_single_table
+--------------------------------
+ REJECTED unverifiable
+(1 row)
+
+SET
+ volatile_function_guard_off
+-----------------------------
  ok: 0
 (1 row)
 
- gap_cte_source
-----------------
- ok: 0
-(1 row)
-
+RESET
   cte_delete_cold_range
 -------------------------
  REJECTED scan matches=2

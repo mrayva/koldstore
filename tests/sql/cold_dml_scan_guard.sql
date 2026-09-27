@@ -4,7 +4,13 @@
 -- function, no WHERE at all). The exact-primary-key guard covers equality
 -- shapes; this one is the fallback for everything else.
 --
--- try() reports "REJECTED scan matches=<n>" for a rejection by this guard.
+-- A WHERE clause that cannot even be *reproduced* as a probe at all -- a
+-- volatile function, WHERE CURRENT OF, or a join/sub-query shape the planner
+-- hook itself declines (a CTE used as a source) -- fails closed too, rather
+-- than silently skip verification (`enforce_unverifiable_scan_guard`).
+--
+-- try() reports "REJECTED scan matches=<n>" for the generic guard, and
+-- "REJECTED unverifiable" for a WHERE shape that could not be reproduced at all.
 
 \set VERBOSITY terse
 
@@ -28,6 +34,8 @@ EXCEPTION WHEN OTHERS THEN
     RETURN 'ERROR: ' || msg;
   ELSIF msg LIKE 'koldstore: refusing INSERT%' THEN
     RETURN 'REJECTED insert';
+  ELSIF msg LIKE '%cannot be verified against cold storage%' THEN
+    RETURN 'REJECTED unverifiable';
   ELSIF msg LIKE 'koldstore: refusing this UPDATE/DELETE on managed table%' THEN
     RETURN 'REJECTED scan matches=' || substring(msg from 'also matches ([0-9]+) cold');
   ELSIF msg LIKE 'koldstore: refusing this MERGE on managed table%' THEN
@@ -59,6 +67,15 @@ SELECT sqlreg.settle();
 -- ids 1..10 are cold-only; 11 and 12 are hot
 INSERT INTO sqlreg.s1 VALUES (11, 'h11', 1), (12, 'h12', 0);
 SELECT sqlreg.settle();
+
+-- WHERE CURRENT OF: the cursor's own row is always hot (a merge-scan tuple has
+-- no real ctid to position on), but the guard cannot know that from the shape
+-- alone, so it fails closed whenever the table has any cold data at all.
+BEGIN;
+DECLARE cur CURSOR FOR SELECT id FROM sqlreg.s1 WHERE id = 11 FOR UPDATE;
+FETCH cur;
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'x' WHERE CURRENT OF cur$$) AS update_current_of_cursor;
+ROLLBACK;
 
 -- ------------------------------------------------ primary-key range shapes
 SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id BETWEEN 1 AND 2$$) AS delete_between;
@@ -212,9 +229,15 @@ INSERT INTO sqlreg.s1 VALUES (70, 'h70', 0);
 SELECT sqlreg.try($$DELETE FROM sqlreg.s1 USING sqlreg.s_other o WHERE s1.id = o.id$$) AS delete_using_after_write_in_txn;
 ROLLBACK;
 
--- still unguarded: statements whose conditions cannot be re-run faithfully
-SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE random() < 2)$$) AS gap_volatile_subquery;
-SELECT sqlreg.try($$WITH c AS (SELECT id FROM sqlreg.s_other) DELETE FROM sqlreg.s1 USING c WHERE s1.id = c.id$$) AS gap_cte_source;
+-- WHERE shapes that cannot be reproduced as a probe at all fail closed
+-- (enforce_unverifiable_scan_guard) rather than silently skip verification.
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE random() < 2)$$) AS volatile_function_in_subquery;
+SELECT sqlreg.try($$WITH c AS (SELECT id FROM sqlreg.s_other) DELETE FROM sqlreg.s1 USING c WHERE s1.id = c.id$$) AS cte_used_as_join_source;
+SELECT sqlreg.try($$UPDATE sqlreg.s1 SET val = 'x' WHERE id = 3 AND random() < 2$$) AS volatile_function_single_table;
+-- the switch also covers the unverifiable-shape guard
+SET koldstore.guard_scan_writes = off;
+SELECT sqlreg.try($$DELETE FROM sqlreg.s1 WHERE id IN (SELECT id FROM sqlreg.s_other WHERE random() < 2)$$) AS volatile_function_guard_off;
+RESET koldstore.guard_scan_writes;
 
 -- UPDATE/DELETE inside a data-modifying CTE: the top-level statement is a SELECT,
 -- so the guard inspects the sub-plan's ModifyTable nodes

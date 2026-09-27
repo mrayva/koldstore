@@ -53,13 +53,17 @@ PostgreSQL operation keeps its normal semantics across both tiers.
     the clause also matches any cold-only row; the check counts cold matches
     with a second read of cold storage, so it costs a cold scan for such
     statements on a table that has cold data (`koldstore.guard_scan_writes`,
-    default on, turns it off). It is skipped, not rejected, when it cannot be
-    trusted: the clause cannot be reproduced (volatile functions, CTEs,
-    `WHERE CURRENT OF`), or the transaction already wrote the table.
+    default on, turns it off). It is skipped, not rejected, when the
+    transaction already wrote the table (uncommitted work is invisible to the
+    async mirror, so a stale cold copy could be miscounted).
     Joins, `USING` and sub-queries are handled too: the statement is turned into
-    an equivalent `SELECT DISTINCT <primary key>` at plan time and counted the
+    an equivalent `SELECT <primary key>` at plan time and counted the
     same way, with the target table read hot-only and every other managed table
-    read hot + cold.
+    read hot + cold. A clause that cannot be reproduced at all -- a volatile
+    function, `WHERE CURRENT OF`, a CTE used as a join source, or any other
+    shape the plan-time probe declines -- fails closed instead of silently
+    skipping: rejected whenever the table has cold data at all, regardless of
+    whether the statement would actually have matched a cold row.
   - A `MERGE` that updates or deletes target rows through a multi-row join is
     rejected when the table has cold data, because the join only matches hot
     rows and the source keys are gone once it ends. `INSERT`-only and
@@ -125,7 +129,7 @@ any row or object is changed.
 | `UPDATE`/`DELETE` by range, `NOT IN`, `OR`, non-key column, function, no `WHERE` | refused if it also matches cold-only rows | `cold_dml_scan_guard` |
 | `UPDATE`/`DELETE` with a join, `USING` or sub-query (`IN`, `EXISTS`, `NOT IN`, self-join, another managed table as source) | refused if it also matches cold-only target rows | `cold_dml_scan_guard` |
 | `UPDATE`/`DELETE` inside a data-modifying CTE (`WITH d AS (DELETE ... RETURNING ...)`) | refused if it also matches cold-only rows | `cold_dml_scan_guard` |
-| A join/sub-query statement with volatile functions, a CTE *source*, or `WHERE CURRENT OF` | **not guarded** (only hot rows change) | `cold_dml_scan_guard` |
+| A statement whose WHERE clause cannot be reproduced at all (a volatile function, `WHERE CURRENT OF`, a CTE used as a join source) | refused whenever the table has cold data | `cold_dml_scan_guard` |
 | Plain `UPDATE`/`DELETE` on cold-only rows, single table (experimental, `koldstore.hydrate_on_write = on`) | supported by hydrating the rows first, up to `koldstore.max_hydrate_rows`; `READ COMMITTED` only; user insert triggers fire for the hydrated rows | `hydrate_on_write` |
 | `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |

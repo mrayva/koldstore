@@ -56,6 +56,11 @@ mod live {
         /// The statement joins or uses a sub-query: the probe SQL prepared at plan
         /// time (`hooks::dml_planner`) and the statement's parameter values.
         join_probe: Option<(String, Vec<crate::hooks::dml_planner::ProbeParam>)>,
+        /// `CMD_MERGE`, as opposed to `UPDATE`/`DELETE`. MERGE has its own
+        /// unverifiable-shape guard (`enforce_unverifiable_merge_guard`), which alone
+        /// knows to ignore an insert-only/`DO NOTHING` MERGE that never touches an
+        /// existing row.
+        is_merge: bool,
     }
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -189,6 +194,7 @@ mod live {
                     prior_write: crate::txn_writes::was_written(table_oid),
                     merge_changes_rows: false,
                     join_probe: None,
+                    is_merge: false,
                 });
             }
             candidates
@@ -338,6 +344,7 @@ mod live {
                 prior_write: crate::txn_writes::was_written(table_oid),
                 merge_changes_rows: (*query_desc).operation == pg_sys::CmdType::CMD_MERGE
                     && merge_changes_target_rows((*planned).planTree),
+                is_merge: (*query_desc).operation == pg_sys::CmdType::CMD_MERGE,
             })
         }
     }
@@ -365,6 +372,7 @@ mod live {
         enforce_generic_cold_match_guard(candidate);
         enforce_join_cold_match_guard(candidate);
         enforce_unverifiable_merge_guard(candidate);
+        enforce_unverifiable_scan_guard(candidate);
     }
 
     /// The same check for a statement that joins or uses a sub-query: counts the
@@ -427,6 +435,48 @@ mod live {
              Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or \
              INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts \
              the risk (upstream issue #122)"
+        );
+    }
+
+    /// UPDATE/DELETE whose WHERE clause neither the generic probe nor the join probe could
+    /// reproduce at all -- a volatile function, `WHERE CURRENT OF`, or a join/sub-query shape
+    /// the planner hook itself declined (a CTE used as a join source, a data-modifying CTE
+    /// source, or anything else `hooks::dml_planner::build_probe_sql` bails on). Both probes
+    /// already fail open by returning `None` rather than guessing (see their module docs), so
+    /// nothing else in this guard has ruled out a cold-only match. Rather than silently allow a
+    /// statement that might skip matching cold rows, fail closed here -- symmetrical with
+    /// `enforce_unverifiable_merge_guard`'s treatment of the same problem for MERGE (upstream
+    /// #122).
+    ///
+    /// Never fires for MERGE (`is_merge`; that command has its own guard above, which alone
+    /// knows to let an insert-only/`DO NOTHING` MERGE through) or when the exact-PK guard
+    /// already resolved the statement (this function only runs after that one declined).
+    fn enforce_unverifiable_scan_guard(candidate: &GuardCandidate) {
+        if candidate.is_merge
+            || candidate.where_sql.is_some()
+            || candidate.join_probe.is_some()
+            || candidate.prior_write
+            || crate::sql::cold_dml::guard::suspended()
+            || !crate::guc::guard_scan_writes()
+        {
+            return;
+        }
+        let has_cold = matches!(
+            crate::catalog::cache::cached_manifest_planner_hint(candidate.table_oid),
+            Ok(Some((segments, _))) if segments > 0
+        );
+        if !has_cold {
+            return;
+        }
+        let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
+            .unwrap_or_else(|_| "?".to_string());
+        pgrx::error!(
+            "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- its WHERE clause (a \
+             volatile function, WHERE CURRENT OF, or a join/sub-query shape this guard cannot safely re-run, \
+             such as a CTE used as a source) cannot be verified against cold storage, so a matching cold row \
+             could be silently left unmodified. Narrow it to a plain literal predicate, change rows one key at \
+             a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to \
+             accept the risk (upstream issue #122)"
         );
     }
 

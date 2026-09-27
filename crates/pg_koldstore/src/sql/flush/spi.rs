@@ -519,31 +519,39 @@ fn execute_seq_range_cleanup(
     use pgrx::datum::DatumWithOid;
 
     let cleanup_arg = [DatumWithOid::from(max_seq)];
-    crate::merge_scan::pg::with_custom_scan_disabled(|| {
-        pgrx::Spi::connect_mut(|client| -> Result<(i64, i64), String> {
-            client
-                .update("SET LOCAL session_replication_role = replica", None, &[])
-                .map_err(|error| error.to_string())?;
-            // Keep the database-scoped origin set through COMMIT. pgoutput
-            // emits ORIGIN from the commit record's origin; restoring before
-            // commit leaves PG15 prune DELETEs without an ORIGIN message.
-            arm_flush_replication_origin()?;
-            let tuples = client
-                .update(&plan.statement.sql, None, &cleanup_arg)
-                .map_err(|error| error.to_string())?;
-            if tuples.is_empty() {
-                return Ok((0_i64, 0_i64));
-            }
-            let row = tuples.first();
-            let mirror_pruned = row
-                .get_by_name::<i64, &str>("mirror_pruned")
-                .map_err(|error| error.to_string())?
-                .unwrap_or(0);
-            let hot_pruned = row
-                .get_by_name::<i64, &str>("hot_pruned")
-                .map_err(|error| error.to_string())?
-                .unwrap_or(0);
-            Ok((mirror_pruned, hot_pruned))
+    // The prune statement is a real `DELETE ... USING removed_mirror` (a CTE source) against the
+    // managed table -- structurally identical to a user join/CTE statement the cold-DML write
+    // guard cannot safely re-verify (`hooks::executor::enforce_unverifiable_scan_guard`), and that
+    // guard is a C-level ExecutorEnd hook, so `session_replication_role = replica` (which only
+    // suppresses ordinary triggers) does not exempt it. Confirmed live: without this, flush's own
+    // prune failed every time a managed table had cold data -- exactly the case it needs to prune.
+    crate::sql::cold_dml::guard::with_guard_suspended(|| {
+        crate::merge_scan::pg::with_custom_scan_disabled(|| {
+            pgrx::Spi::connect_mut(|client| -> Result<(i64, i64), String> {
+                client
+                    .update("SET LOCAL session_replication_role = replica", None, &[])
+                    .map_err(|error| error.to_string())?;
+                // Keep the database-scoped origin set through COMMIT. pgoutput
+                // emits ORIGIN from the commit record's origin; restoring before
+                // commit leaves PG15 prune DELETEs without an ORIGIN message.
+                arm_flush_replication_origin()?;
+                let tuples = client
+                    .update(&plan.statement.sql, None, &cleanup_arg)
+                    .map_err(|error| error.to_string())?;
+                if tuples.is_empty() {
+                    return Ok((0_i64, 0_i64));
+                }
+                let row = tuples.first();
+                let mirror_pruned = row
+                    .get_by_name::<i64, &str>("mirror_pruned")
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or(0);
+                let hot_pruned = row
+                    .get_by_name::<i64, &str>("hot_pruned")
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or(0);
+                Ok((mirror_pruned, hot_pruned))
+            })
         })
     })
 }
