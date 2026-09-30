@@ -8,8 +8,14 @@
 //! 1. Resolve OIDs with `NoLock` (do not hold relation locks across waits)
 //! 2. Signal cooperative cancel (`table_cancel_requests`)
 //! 3. Wait for the table-job advisory lock (flush holds it for the statement)
-//! 4. Catalog + object-store cleanup, then allow PostgreSQL DROP
+//! 4. Catalog cleanup (transactional) + stage cold-object keys for deletion,
+//!    then allow PostgreSQL DROP
 //! 5. Drop the change-log mirror after the heap is gone
+//!
+//! The object-store objects themselves are not deleted here: they are staged via
+//! `pending_cold_delete` and physically removed only after this transaction commits,
+//! so a later statement failure or `ROLLBACK` in the same transaction (or a crash
+//! before commit) leaves both the catalog rows and the cold objects intact (#100).
 
 use std::ffi::{CStr, CString};
 
@@ -144,15 +150,13 @@ fn cleanup_one_managed_table_before_drop(
     }
 
     let objects = client.list(&prefix).map_err(|error| error.to_string())?;
-    for object in &objects {
-        client
-            .delete(&object.key)
-            .map_err(|error| error.to_string())?;
-    }
+    let staged = objects.len();
+    let keys: Vec<String> = objects.into_iter().map(|object| object.key).collect();
+    crate::pending_cold_delete::stage(storage, table_oid.to_u32(), keys);
     pgrx::log!(
-        "koldstore drop: table_oid={} deleted_objects={} prefix={}",
+        "koldstore drop: table_oid={} staged_for_post_commit_deletion={} prefix={}",
         table_oid.to_u32(),
-        objects.len(),
+        staged,
         prefix
     );
 

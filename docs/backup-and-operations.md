@@ -44,14 +44,24 @@ The end-to-end backup, restore, PITR, and unsafe-dump contract is tracked in
 
 ## Object lifecycle
 
-Current `DROP TABLE` cleanup deletes cold objects inline before the PostgreSQL
-DDL transaction commits. Because object storage does not roll back with
-PostgreSQL, aborting the transaction can leave restored catalog state pointing
-at missing objects. Durable, asynchronous post-commit garbage collection is
-tracked in [#100](https://github.com/kalamdb/koldstore/issues/100).
+`DROP TABLE`/`DROP SCHEMA` cleanup and `unmanage_table`'s `drop_cold` option
+both stage the table's cold objects for deletion, then physically delete them
+only after the enclosing PostgreSQL transaction commits (a background xact
+callback, matching PostgreSQL's own pending-delete pattern for relation
+files). If that transaction later aborts, the staged deletion is discarded and
+the objects are left in place, alongside the catalog rows PostgreSQL itself
+rolled back -- closing the [#100](https://github.com/kalamdb/koldstore/issues/100)
+gap where an aborted DROP could leave catalog state pointing at objects that
+were already gone. Object-store deletion is still not itself transactional
+(a crash between commit and the post-commit callback running can leave
+orphaned objects, and a delete that fails partway through a prefix is logged
+and skipped rather than retried), so this closes the silent-data-loss-on-
+rollback case, not every durability edge around cold GC.
 
-The `drop_cold` argument to `unmanage_table` is currently planned by the SQL
-surface but is not executed. Do not use it as a retention guarantee.
+The `drop_cold` argument to `unmanage_table` deletes the table's cold objects
+(staged the same way) after a successful rehydrate; it is refused with
+`rehydrate => false`, since that combination would destroy the only copy of
+rows never brought back into the heap.
 
 ## Available diagnostics and planned APIs
 

@@ -33,12 +33,14 @@ pub(super) fn unmanage_table_pg_impl(
     let plan = plan_demigration(context, options).map_err(|error| error.to_string())?;
     // Resolve while the table is still active: catalog rows this reads are cleared by the
     // deactivation statements below (mirrors `hooks::drop_cleanup`'s DROP TABLE ordering, the only
-    // other place koldstore deletes cold objects). `drop_cold` only deletes after `execute_
-    // demigration_statements` succeeds, so a failed rehydrate never touches storage. The prefix is
-    // recomputed from the storage registration's actual `regular_path_tmpl` here rather than trusting
-    // `plan.cold_artifact_action`'s prefix, which `koldstore-migrate` (no catalog access) can only
-    // guess at the *default* template -- a custom one would otherwise delete the wrong location, or
-    // nothing at all.
+    // other place koldstore stages cold-object deletion). `drop_cold` only stages objects after
+    // `execute_demigration_statements` succeeds, so a failed rehydrate never touches storage, and the
+    // staged keys are only physically deleted post-commit (`pending_cold_delete`, #100) so an abort
+    // after this point leaves the objects in place alongside the rolled-back catalog rows. The prefix
+    // is recomputed from the storage registration's actual `regular_path_tmpl` here rather than
+    // trusting `plan.cold_artifact_action`'s prefix, which `koldstore-migrate` (no catalog access) can
+    // only guess at the *default* template -- a custom one would otherwise delete the wrong location,
+    // or nothing at all.
     let storage_prefix = match &plan.cold_artifact_action {
         ColdArtifactAction::DeleteAfterRehydrate { .. } => {
             let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
@@ -87,9 +89,9 @@ pub(super) fn unmanage_table_pg_impl(
     Ok(deactivated)
 }
 
-/// Deletes every object under `prefix` in `storage` (best-effort: logs and continues on a
-/// single-object failure rather than leaving the table stuck half-torn-down after the heap has
-/// already been rebuilt -- the same tradeoff `hooks::drop_cleanup` makes for DROP TABLE).
+/// Stages every object under `prefix` in `storage` for deletion once this transaction
+/// commits (`pending_cold_delete`, #100) -- physical deletion before commit would leave
+/// the objects gone even if this `unmanage_table` statement later rolls back.
 #[cfg(feature = "pg")]
 fn delete_cold_artifacts(
     storage: &koldstore_catalog::decode::FlushStorageContext,
@@ -106,20 +108,11 @@ fn delete_cold_artifacts(
     )
     .map_err(|error| error.to_string())?;
     let objects = client.list(prefix).map_err(|error| error.to_string())?;
-    let mut deleted = 0_usize;
-    for object in &objects {
-        if let Err(error) = client.delete(&object.key) {
-            pgrx::warning!(
-                "koldstore unmanage: table_oid={table_oid_u32} failed to delete cold object {}: {error}",
-                object.key
-            );
-            continue;
-        }
-        deleted += 1;
-    }
+    let staged = objects.len();
+    let keys: Vec<String> = objects.into_iter().map(|object| object.key).collect();
+    crate::pending_cold_delete::stage(storage.clone(), table_oid_u32, keys);
     pgrx::log!(
-        "koldstore unmanage: table_oid={table_oid_u32} deleted_objects={deleted}/{} prefix={prefix}",
-        objects.len()
+        "koldstore unmanage: table_oid={table_oid_u32} staged_for_post_commit_deletion={staged} prefix={prefix}"
     );
     Ok(())
 }

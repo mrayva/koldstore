@@ -364,11 +364,13 @@ SELECT koldstore.unmanage_table(
 `drop_cold` deletes the table's cold objects from storage after a successful
 rehydrate (refused with `rehydrate => false`: that combination would destroy
 the only copy of rows never brought back into the heap). Like `DROP TABLE`'s
-own cold-object deletion, this happens outside the surrounding PostgreSQL
-transaction and cannot be rolled back with it -- see the `DROP TABLE` section
-below and [#100](https://github.com/kalamdb/koldstore/issues/100). A single
-object's delete failure is logged and skipped rather than aborting the whole
-call, so a stubborn object can leave a partial prefix behind; re-running
+own cold-object deletion (see the `DROP TABLE` section below), the objects are
+staged now and only physically deleted once the surrounding PostgreSQL
+transaction commits, so a rollback of this statement leaves the objects in
+place alongside the catalog rows PostgreSQL itself restores
+([#100](https://github.com/kalamdb/koldstore/issues/100)). A single object's
+delete failure is logged and skipped rather than retried, so a stubborn
+object can leave a partial prefix behind; re-running
 `unmanage_table(..., drop_cold => true)` on an already-unmanaged table is not
 supported (there is no active managed table left to unmanage), so a
 leftover object from a failed delete needs the storage backend's own
@@ -533,15 +535,20 @@ If cancel is observed after cold publish already committed, the job finishes as
 unpublished).
 
 `DROP TABLE` on a managed relation cancels active jobs, waits for any in-flight
-flush/migrate advisory lock to release, deactivates catalog metadata, deletes
-cold objects under the table prefix, drops the change-log mirror, and records a
-completed `drop_table_cleanup` job before PostgreSQL removes the heap.
+flush/migrate advisory lock to release, deactivates catalog metadata, stages
+cold objects under the table prefix for deletion, drops the change-log mirror,
+and records a completed `drop_table_cleanup` job before PostgreSQL removes the
+heap.
 
-Cold-object deletion currently happens before the surrounding PostgreSQL DDL
-transaction commits and cannot be rolled back with it. An aborted `DROP TABLE`
-can therefore restore catalog rows whose cold objects are gone; see
-[#100](https://github.com/kalamdb/koldstore/issues/100). `unmanage_table`'s
-`drop_cold` option (above) has the same property.
+Staged cold objects are only physically deleted after the surrounding
+PostgreSQL DDL transaction commits; an aborted `DROP TABLE` discards the staged
+deletion instead, so the objects stay in place alongside the catalog rows
+PostgreSQL restores ([#100](https://github.com/kalamdb/koldstore/issues/100)).
+`unmanage_table`'s `drop_cold` option (above) has the same property. Object-
+store deletion itself is still not transactional with PostgreSQL's commit --
+a crash between commit and the post-commit deletion running can leave objects
+orphaned -- so this closes the rollback case, not every cold-GC durability
+edge.
 
 ### `koldstore.table_status`
 

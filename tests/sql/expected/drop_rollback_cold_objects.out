@@ -1,0 +1,91 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 5
+ cold100_managed
+-----------------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+ has_cold_rows_before
+----------------------
+ t
+(1 row)
+
+ objects_exist_before_drop
+---------------------------
+ t
+(1 row)
+
+BEGIN
+DROP TABLE
+ROLLBACK
+ objects_still_exist_after_rollback
+------------------------------------
+ t
+(1 row)
+
+ count
+-------
+     5
+(1 row)
+
+ still_has_cold_rows_after_rollback
+------------------------------------
+ t
+(1 row)
+
+DROP TABLE
+ objects_after_committed_drop
+------------------------------
+                            0
+(1 row)
+
+CREATE TABLE
+INSERT 0 5
+ cold100b_managed
+------------------
+ t
+(1 row)
+
+ flushed_b
+-----------
+ t
+(1 row)
+
+ has_cold_rows_before_b
+------------------------
+ t
+(1 row)
+
+BEGIN
+ unmanage_table
+----------------
+              1
+(1 row)
+
+ROLLBACK
+ objects_still_exist_after_unmanage_rollback
+---------------------------------------------
+ t
+(1 row)
+
+ still_managed_after_unmanage_rollback
+---------------------------------------
+ t
+(1 row)
+
+ unmanage_table
+----------------
+              1
+(1 row)
+
+ objects_after_committed_unmanage
+----------------------------------
+                                0
+(1 row)
+

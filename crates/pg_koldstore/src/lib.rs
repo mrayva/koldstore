@@ -14,6 +14,8 @@ pub mod merge_scan;
 pub mod mirror;
 pub mod object_store;
 pub mod observability;
+/// Defers cold-object-store deletion (DROP/unmanage cleanup) to transaction commit.
+pub mod pending_cold_delete;
 #[cfg(feature = "pg")]
 pub mod preload;
 pub mod row_counter_cache;
@@ -128,6 +130,7 @@ pub extern "C" fn _PG_init() {
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();
     sql::flush::spi::register_flush_origin_xact_callback();
+    pending_cold_delete::register_xact_callback();
     worker::register_supervisor_if_shared_preload();
     worker::spock_reconciler::register_if_shared_preload();
 }

@@ -83,7 +83,7 @@ are not supported until storage identity is detached from mutable names
 | `ALTER TABLE db1.messages RENAME TO events` | `db1.events` | Mirror is rehomed, but published cold paths still use the old name; unsupported after cold publish |
 | `ALTER TABLE db1.messages SET SCHEMA db2` | `db2.messages` | Mirror is rehomed, but published cold paths still use the old schema; unsupported after cold publish |
 | `ALTER SCHEMA db1 RENAME TO db2` | Every managed table moves from `db1.*` to `db2.*` | Mirrors are rehomed; tables with published cold data are unsupported |
-| `DROP TABLE db1.messages` | Relation gone | Catalog deactivated; cold objects deleted inline; mirror dropped |
+| `DROP TABLE db1.messages` | Relation gone | Catalog deactivated; cold objects staged for post-commit deletion; mirror dropped |
 | `DROP SCHEMA db1 CASCADE` | Every managed table in `db1` gone | Same per-table cleanup before PostgreSQL removes the heaps |
 | `ALTER DATABASE old RENAME TO new` | Same relations in the same database OID | No mirror rename is needed |
 
@@ -93,13 +93,16 @@ the database OID and its contained schemas/relations, so no source identity used
 by a mirror changes. In the issue terminology, names such as `db1.messages`
 refer to schemas, not separate PostgreSQL databases.
 
-The current `DROP TABLE` cleanup performs object-store deletion before the
-PostgreSQL DDL transaction commits. Object deletion is not transactional, so a
-later rollback can leave catalog state referring to missing files. Durable
-post-commit garbage collection is tracked in
-[#100](https://github.com/kalamdb/koldstore/issues/100). The `drop_cold`
-argument to `unmanage_table` is also not executed by the current implementation;
-do not rely on it for retention or deletion.
+`DROP TABLE` cleanup stages cold-object deletion and performs it only after the
+PostgreSQL DDL transaction commits (a background xact callback), so a later
+rollback leaves the objects in place alongside the catalog rows PostgreSQL
+itself restores -- closing the rollback-visible half of
+[#100](https://github.com/kalamdb/koldstore/issues/100). Deletion itself is
+still not transactional with PostgreSQL's commit record: a crash between
+commit and the post-commit callback running can leave objects orphaned, and a
+per-object delete failure is logged and skipped rather than retried. The
+`drop_cold` argument to `unmanage_table` stages and defers its deletion the
+same way.
 
 Other `ALTER TABLE` changes run a post-DDL schema refresh. Because PostgreSQL
 has already applied the DDL when that refresh runs, an unsupported refresh can
