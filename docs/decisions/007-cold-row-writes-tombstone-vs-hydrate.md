@@ -356,6 +356,39 @@ runs and again after the fence fix (3 + 1 runs). Throughput is ~12 tps for phase
 scratch instance; the fence and per-key locks cost only when a statement has cold candidates.
 The stress database accumulates many tiny segments, which inflates cold probe cost.
 
+Throughput, tried and reverted: defer-to-applier fence batching (2026-09-30). The natural next
+step after the shared watermark's "no clear win" result seemed to be making it actually pay off:
+instead of a hydrator checking the watermark once and, if it isn't there yet, immediately
+competing with the applier for the slot lock, have it wake the applier and poll the watermark
+(cheap, no lock) for a short bound first, so any number of concurrently-waiting hydrators collapse
+onto whichever fence the applier's next pass reaches -- batching the *requests*, not just the
+*progress* (`koldstore.hydrate_wait_for_applier_ms`, default 20, wake via `worker::wal::wake`,
+fall back to the unchanged direct-apply path on timeout or no live applier).
+
+Measured on a clean 20k-row fixture (hot_row_limit 10, single-table random-key updates, the same
+shape as the `restart_lsn` table above), lever off vs on, back to back on the same instance:
+
+| clients | off (baseline) | on (20ms) |
+|---|---|---|
+| 1 | 10.3-11.1 tps | 7.4-8.3 tps |
+| 8 | 8.9 tps | 6.5 tps |
+
+A consistent regression, not noise -- reproduced at wait bounds of 2ms, 5ms, and 20ms, and in both
+the 1-client (no contention at all, so no possible benefit, pure added latency) and 8-client cases
+(where contention exists and a win should have been possible). Root cause: a direct timing check
+(`UPDATE ...; SELECT koldstore.wait_for_async_mirror();`) showed a single apply pass costs 40-80ms
+end to end even for a tiny amount of new WAL -- the cost is dominated by fixed per-invocation
+overhead (slot peek setup, SPI, decode initialization), not by how much there is to decode. That
+fixed cost is larger than any poll window worth paying, so the applier essentially never finishes
+a fresh pass inside the wait; every hydrator pays the full poll cost and then still falls back to
+doing the same direct-apply work it would have done anyway. The "redundant decode work" this
+theory assumed concurrent hydrators duplicate turns out to be small next to this fixed cost, so
+there is little to actually batch away. Reverted in full (guc.rs, mirror/apply.rs) rather than
+shipped disabled-by-default -- a mechanism measured as a pure loss in every configuration tested
+is not worth keeping as a dead opt-in knob. The slot-lock contention itself (not just restart_lsn
+lag) remains unaddressed; a future attempt should look at reducing the applier's own fixed
+per-pass cost first, since that is what makes deferring to it a bad trade today.
+
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
 delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
 hydration, `REPEATABLE READ`, and a partitioned-table story.
