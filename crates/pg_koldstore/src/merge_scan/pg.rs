@@ -536,6 +536,35 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         },
         &raw const PATH_METHODS,
     );
+
+    // Join-order sizing (upstream #124, continued). `RelOptInfo.rows` -- not any
+    // individual path's `.rows` -- is what `calc_joinrel_size_estimate` reads when
+    // this table takes part in a join, and PostgreSQL finishes computing every base
+    // rel's `.rows` (`set_base_rel_sizes`, over the whole range table) before it
+    // calls `set_rel_pathlist_hook` for *any* rel (`set_base_rel_pathlists`, a
+    // separate later pass) -- so a write here is not stale by the time join sizing
+    // reads it a few steps later in the same planning pass.
+    //
+    // Deliberately not touching `rel->tuples`/`rel->pages` for this (which an
+    // earlier revision of this fix considered): those feed the *native* hot child
+    // paths' own per-tuple CPU cost (`cost_seqscan`/`cost_index` scale their CPU
+    // term by `baserel->tuples`, the physical heap size), already computed by the
+    // time this hook fires. Inflating them would inflate the hot child's own
+    // reported cost by the same cold-row factor -- exactly backwards, since the hot
+    // child never touches a single cold row, and for a large cold tail over a tiny
+    // pruned hot heap this swing is not cosmetic (a 10-row hot scan reporting
+    // millions of cost units because a sibling cold store holds a million rows).
+    // Only the already-finalized `rel->rows` is adjusted here, after any native
+    // paths -- and this scan's own CustomPath wrappers, which already carry their
+    // own correct per-strategy row estimate from the untouched original value --
+    // have been built.
+    //
+    // Skipped for an exact primary-key equality, matching `add_custom_wrapper`'s
+    // own strategy-dependent choice: a unique-key lookup matches at most one row
+    // across hot+cold, so the native estimate (already ~1) is correct as-is.
+    if !exact_full_primary_key_equality && cold_row_count > 0.0 {
+        (*rel).rows = pg_sys::clamp_row_est((*rel).rows + cold_row_count);
+    }
 }
 
 /// Fails a plan before it runs when a query construct cannot be honoured over

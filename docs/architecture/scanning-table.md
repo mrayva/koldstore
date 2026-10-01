@@ -138,12 +138,28 @@ cold-side column statistics to estimate selectivity with, only row totals.
 across hot+cold), so it keeps the hot child's own estimate unchanged rather
 than inflating a point lookup by however much cold data exists.
 
-This does **not** fix join-order sizing: `calc_joinrel_size_estimate` reads
-`RelOptInfo.rows`, set earlier in planning (`set_baserel_size_estimates`,
-before `set_rel_pathlist` runs), so a join over a managed table still sizes
-off the hot child alone. Fixing that needs a `get_relation_info_hook`
-adjusting `rel->tuples` before PostgreSQL computes `rel->rows`, not
-implemented yet.
+Join-order sizing is fixed too, but not via `CustomPath.path.rows` (no
+individual path's `.rows` feeds join sizing). `calc_joinrel_size_estimate`
+reads `RelOptInfo.rows`, and `set_rel_pathlist` (whose hook this is) runs
+*after* `set_base_rel_sizes` has already finished computing `.rows` for every
+base rel in the query, but *before* `make_rel_from_joinlist` does any
+join-size math -- PostgreSQL completes the "size every rel" pass and the
+"build every rel's pathlist" pass separately, over the whole range table,
+before touching joins at all. So the same hook that installs the `KoldMergeScan`
+portfolio also directly overwrites `rel->rows` (same exact-PK exemption as
+above) right after `install_path_portfolio` returns: too late to affect any
+path already built from the original value, but well in time for the later
+join-sizing pass to read it.
+
+Deliberately not touching `rel->tuples`/`rel->pages` for this (an earlier
+revision of this fix considered a `get_relation_info_hook` adjusting those
+instead): they feed the *native* hot child paths' own per-tuple CPU cost
+(`cost_seqscan`/`cost_index` scale by `baserel->tuples`, the physical heap
+size), already computed by the time `set_rel_pathlist` fires. Inflating them
+would inflate the hot child's own reported cost by the same cold-row factor
+-- backwards, since the hot child never touches a single cold row, and for
+koldstore's usual shape (a large cold tail over a tiny pruned hot heap) the
+swing is not cosmetic.
 
 ## KoldMergeScan shape
 

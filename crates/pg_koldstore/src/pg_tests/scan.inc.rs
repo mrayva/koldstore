@@ -1778,3 +1778,71 @@ fn explain_row_estimate_includes_active_cold_rows_for_broad_scans_not_exact_pk_l
          plan={pk_plan}"
     );
 }
+
+#[pg_test]
+fn explain_join_row_estimate_scales_with_active_cold_rows_not_exact_pk_lookups() {
+    // Continuation of #124: the scan-level row estimate alone (the test above)
+    // does not help join planning, because PostgreSQL finishes sizing every base
+    // rel (`RelOptInfo.rows`, what join-size estimation reads) before any
+    // `CustomPath` -- koldstore's own included -- is even built for that rel.
+    let suffix = unique_suffix("planner_join_row_estimate");
+    let schema = format!("pgtest_{suffix}");
+    let facts = format!("{schema}.facts");
+    let accounts = format!("{schema}.accounts");
+    let storage = register_temp_storage(&suffix);
+
+    Spi::run(&format!("CREATE SCHEMA {schema}")).expect("create schema");
+    Spi::run(&format!(
+        "CREATE TABLE {facts} (id bigint PRIMARY KEY, acct_id bigint NOT NULL, val text NOT NULL)"
+    ))
+    .expect("create facts");
+    Spi::run(&format!(
+        "INSERT INTO {facts} SELECT g, (g % 5) + 1, 'v'||g FROM generate_series(1, 20) g"
+    ))
+    .expect("seed facts");
+    manage_for_cold_flush(&facts, &storage);
+    let flushed = flush_table_rows_completed(&facts, 15);
+    assert!(flushed >= 15, "expected most facts rows to flush cold, got {flushed}");
+
+    Spi::run(&format!(
+        "CREATE TABLE {accounts} (acct_id bigint PRIMARY KEY, name text NOT NULL)"
+    ))
+    .expect("create accounts");
+    Spi::run(&format!(
+        "INSERT INTO {accounts} SELECT g, 'acct'||g FROM generate_series(1, 5) g"
+    ))
+    .expect("seed accounts");
+    Spi::run(&format!("ANALYZE {accounts}")).expect("analyze accounts");
+
+    let cold_rows = spi_get_i64(&format!(
+        "SELECT (koldstore.table_status('{facts}'::regclass)->>'cold_row_count')::bigint"
+    ));
+    assert!(cold_rows >= 15, "expected cold_row_count to reflect the flush, got {cold_rows}");
+
+    // Broad join: the Hash/Nested Loop node's own row estimate must scale with the
+    // inflated `facts` side, not just the (tiny, post-flush) hot heap alone. Assert
+    // loosely (a fraction of cold_rows, not an exact value) since the precise
+    // number depends on PostgreSQL's own hash-equality selectivity math; the point
+    // is that it must be far above what zero cold-row contribution would produce.
+    let broad_plan = spi_get_explain(&format!(
+        "EXPLAIN SELECT * FROM {facts} JOIN {accounts} USING (acct_id)"
+    ));
+    let join_rows = extract_plan_rows(&broad_plan);
+    assert!(
+        join_rows >= cold_rows / 5,
+        "join row estimate must scale with facts' inflated row count: join_rows={join_rows} \
+         cold_rows={cold_rows} plan={broad_plan}"
+    );
+
+    // Exact primary-key filter on the managed side: the join must not inherit an
+    // inflated estimate it was never supposed to have.
+    let pk_plan = spi_get_explain(&format!(
+        "EXPLAIN SELECT * FROM {facts} JOIN {accounts} USING (acct_id) WHERE {facts}.id = 1"
+    ));
+    let pk_join_rows = extract_plan_rows(&pk_plan);
+    assert!(
+        pk_join_rows <= 2,
+        "exact primary-key join must not be inflated by cold_row_count: \
+         pk_join_rows={pk_join_rows} plan={pk_plan}"
+    );
+}
