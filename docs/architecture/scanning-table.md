@@ -120,6 +120,31 @@ portfolio normally advertises an unordered logical path and PostgreSQL adds a
 ordered-progressive early-stop optimization. Do not infer a strategy from SQL
 alone—inspect `Strategy` in `EXPLAIN ANALYZE`.
 
+### Row and cost estimates (#124)
+
+Total cost layers a flat per-active-segment estimate on top of the hot
+child's own cost (`general_merge_total_cost`); it is not reduced by predicate
+selectivity, on the assumption that a broad-scan strategy may need to open
+every active segment.
+
+The row estimate (`CustomPath.path.rows`, what `EXPLAIN` reports and what a
+`LIMIT`/non-join aggregate directly above the scan costs against) follows the
+same worst-case assumption for every strategy except `ExactPrimaryKey`: it
+adds the active cold row total (`sum(row_count)` over
+`koldstore.cold_segments` for this table/scope, index-only, no join) to the
+hot child's own estimate, unscaled by selectivity -- koldstore has no
+cold-side column statistics to estimate selectivity with, only row totals.
+`ExactPrimaryKey` is a unique-key equality lookup (matches at most one row
+across hot+cold), so it keeps the hot child's own estimate unchanged rather
+than inflating a point lookup by however much cold data exists.
+
+This does **not** fix join-order sizing: `calc_joinrel_size_estimate` reads
+`RelOptInfo.rows`, set earlier in planning (`set_baserel_size_estimates`,
+before `set_rel_pathlist` runs), so a join over a managed table still sizes
+off the hot child alone. Fixing that needs a `get_relation_info_hook`
+adjusting `rel->tuples` before PostgreSQL computes `rel->rows`, not
+implemented yet.
+
 ## KoldMergeScan shape
 
     KoldMergeScan

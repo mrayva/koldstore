@@ -51,6 +51,9 @@ pub(crate) struct PortfolioInstallArgs {
     pub exact_full_primary_key_equality: bool,
     /// Published cold segment count for costing.
     pub segment_count: usize,
+    /// Sum of `row_count` across active cold segments, for the row estimate
+    /// (upstream #124). `0.0` when there is no cold data yet.
+    pub cold_row_count: f64,
     /// Single-scope key; default `""`.
     pub scope_key: String,
 }
@@ -166,6 +169,7 @@ pub(crate) unsafe fn install_path_portfolio(
         strategy: &fallback_strategy,
         scope_key: &args.scope_key,
         segment_count: args.segment_count,
+        cold_row_count: args.cold_row_count,
         copy_pathkeys: false,
         order_descending: false,
         methods,
@@ -194,6 +198,7 @@ pub(crate) unsafe fn install_path_portfolio(
             strategy: &strategy,
             scope_key: &args.scope_key,
             segment_count: args.segment_count,
+            cold_row_count: args.cold_row_count,
             copy_pathkeys: true,
             order_descending: path_leading_descending(hot_child),
             methods,
@@ -208,6 +213,7 @@ struct CustomWrapperArgs<'a> {
     strategy: &'a KoldPathStrategy,
     scope_key: &'a str,
     segment_count: usize,
+    cold_row_count: f64,
     copy_pathkeys: bool,
     order_descending: bool,
     methods: *const pg_sys::CustomPathMethods,
@@ -220,6 +226,7 @@ unsafe fn add_custom_wrapper(args: CustomWrapperArgs<'_>) {
         strategy,
         scope_key,
         segment_count,
+        cold_row_count,
         copy_pathkeys,
         order_descending,
         methods,
@@ -238,7 +245,23 @@ unsafe fn add_custom_wrapper(args: CustomWrapperArgs<'_>) {
     (*custom_path).path.parent = rel;
     (*custom_path).path.pathtarget = (*rel).reltarget;
     (*custom_path).path.param_info = (*hot_child).param_info;
-    (*custom_path).path.rows = (*hot_child).rows;
+    // `ExactPrimaryKey` is a unique-key equality lookup: it matches at most one row
+    // across hot+cold, and the hot child's own estimate (an equality selectivity
+    // against a unique/PK column, already ~1) is correct as-is -- adding cold_row_count
+    // here would wrongly inflate a point lookup by however much cold data exists.
+    // Every other strategy is a broader scan that can genuinely return cold matches
+    // too, so fold the active cold row count in -- unscaled by selectivity, matching
+    // this scan's own cost model, which already charges a flat per-segment cost
+    // rather than a selectivity-reduced one (see `general_merge_total_cost`): both
+    // assume "may need to touch every active segment," not "will see only a filtered
+    // slice of it." Flagged, not solved, by upstream #124: without per-column cold
+    // statistics (Parquet-side histograms, not just row totals) there is no principled
+    // way to do better than this worst-case-sized estimate yet.
+    let row_estimate = match strategy {
+        KoldPathStrategy::ExactPrimaryKey => (*hot_child).rows,
+        _ => pg_sys::clamp_row_est((*hot_child).rows + cold_row_count),
+    };
+    (*custom_path).path.rows = row_estimate;
     (*custom_path).path.startup_cost = startup_cost;
     (*custom_path).path.total_cost = total_cost;
     (*custom_path).path.parallel_safe = false;

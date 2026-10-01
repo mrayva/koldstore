@@ -30,7 +30,8 @@ mod tests {
     use pgrx::prelude::*;
 
     use super::fixture::{
-        assert_finishes_under, change_log_mirror_relation, create_messages_table, flush_table_rows,
+        assert_finishes_under, change_log_mirror_relation, create_messages_table,
+        extract_plan_rows, flush_table_rows, flush_table_rows_completed,
         hold_apply_lock_for_populated_manage, jsonb_obj, manage_for_cold_flush, manage_shared,
         preprovision_async_mirror, register_temp_storage, setup_cold_typed_join_fixture,
         spi_get_explain, spi_get_i64, spi_get_text, spi_succeeds, unique_suffix, COLD_FACT_IDS,

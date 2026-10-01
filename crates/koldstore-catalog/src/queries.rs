@@ -409,6 +409,33 @@ LIMIT 1
     )
 }
 
+/// Builds a lean active-cold-row-count hint for merge-scan row-estimate planning
+/// (upstream #124).
+///
+/// Sums `row_count` across this table's currently active cold segments. Answered
+/// by an index-only scan of `cold_segments_active_scope_seq_idx`, which already
+/// covers `row_count` for `status = 'active'` rows keyed by `(table_oid,
+/// scope_key)` -- no join, no segment metadata/credentials load. A table with no
+/// active segments (not yet flushed, or between generations) sums to `0`, the
+/// same row-estimate contribution as today's hot-only behavior.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_row_count_hint() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve active cold row count hint",
+        r#"
+SELECT coalesce(sum(row_count), 0)::bigint AS cold_row_count
+FROM koldstore.cold_segments
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND status = 'active'
+"#,
+        [SqlParamType::Oid],
+    )
+}
+
 /// Builds the latest published manifest scan context for merge-scan planning.
 ///
 /// Returns one JSON text row with table prefix, generation, storage base path,

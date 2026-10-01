@@ -156,9 +156,21 @@ do not advertise this surface as database-enforced tenant isolation. Management
 API privilege hardening is tracked in
 [#120](https://github.com/kalamdb/koldstore/issues/120).
 
-Planner cardinality and cost estimates are also a preview limitation. Current
-estimates can reflect the hot child rather than the logical hot+cold row set;
-cold-aware statistics work is tracked in
+Planner cardinality and cost estimates are also a preview limitation, partially
+addressed. `KoldMergeScan`'s own row estimate now adds the active cold row
+total to the hot child's estimate for broad scans (the strategies other than
+an exact primary-key equality lookup, which correctly stays a ~1-row point
+estimate regardless of how much cold data exists) -- `EXPLAIN` and anything
+costed directly on top of the scan (a `LIMIT`, a non-join aggregate, a `Sort`)
+now see a realistic total instead of hot-only. Not yet addressed: the
+addition is not reduced by `WHERE`-clause selectivity (koldstore has no
+cold-side column statistics to estimate that with, only row totals), so a
+highly selective filter over a broad-scan strategy still estimates as if it
+might match everything cold; and **join-order sizing still only sees the hot
+child**, because `RelOptInfo.rows` (what `calc_joinrel_size_estimate` reads)
+is set earlier in planning, before `KoldMergeScan`'s own path is even built --
+fixing that needs a `get_relation_info_hook` adjusting `rel->tuples` up front,
+not attempted yet. Tracked in
 [#124](https://github.com/kalamdb/koldstore/issues/124).
 
 ## Unique and Foreign Key Constraints

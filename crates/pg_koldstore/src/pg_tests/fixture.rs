@@ -172,6 +172,23 @@ pub(crate) fn spi_get_explain(sql: &str) -> String {
     })
 }
 
+/// Extracts the first `rows=N` planned-row estimate from a plain-text `EXPLAIN`
+/// plan (no `ANALYZE`/`COSTS OFF` needed) -- the outermost node's estimate.
+pub(crate) fn extract_plan_rows(plan: &str) -> i64 {
+    const MARKER: &str = "rows=";
+    let start = plan
+        .find(MARKER)
+        .unwrap_or_else(|| panic!("plan has no rows= estimate: {plan}"))
+        + MARKER.len();
+    let digits: String = plan[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("rows= value is not a valid integer in: {plan}"))
+}
+
 /// Returns a single i64 column from a one-row query.
 pub(crate) fn spi_get_i64(sql: &str) -> i64 {
     Spi::get_one::<i64>(sql)

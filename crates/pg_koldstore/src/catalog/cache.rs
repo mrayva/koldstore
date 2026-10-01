@@ -192,6 +192,8 @@ static SEGMENT_INDEX_CANDIDATE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "pg")]
 type ManifestPlannerHintCache = OptionalLookupCache<u32, (usize, u64)>;
+#[cfg(feature = "pg")]
+type ColdRowCountHintCache = OptionalLookupCache<u32, i64>;
 
 #[cfg(feature = "pg")]
 thread_local! {
@@ -200,6 +202,8 @@ thread_local! {
     static MANIFEST_SCAN_CACHE: std::cell::RefCell<ManifestScanCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
     static MANIFEST_PLANNER_HINT_CACHE: std::cell::RefCell<ManifestPlannerHintCache> =
+        std::cell::RefCell::new(OptionalLookupCache::default());
+    static COLD_ROW_COUNT_HINT_CACHE: std::cell::RefCell<ColdRowCountHintCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         BoundedOidCache<Arc<koldstore_migrate::ExistingTableCatalog>>,
@@ -319,6 +323,9 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
     MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
         cache.borrow_mut().retain(|table_oid| *table_oid != key);
     });
+    COLD_ROW_COUNT_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().retain(|table_oid| *table_oid != key);
+    });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().invalidate(key);
     });
@@ -351,6 +358,9 @@ pub fn invalidate_all() {
         cache.borrow_mut().clear();
     });
     MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
+    COLD_ROW_COUNT_HINT_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
@@ -654,6 +664,43 @@ fn load_manifest_planner_hint(
         )
         .map_err(|error| error.to_string())?;
         Ok(row)
+    })?
+}
+
+/// Sum of `row_count` across this table's currently active cold segments, for
+/// merge-scan row-estimate planning (upstream #124).
+///
+/// `0` for a table with no active cold segments (not yet flushed, or between
+/// generations) -- the same row-estimate contribution as today's hot-only
+/// behavior, so a cache miss or catalog error fails open to the pre-#124
+/// estimate rather than inflating or shrinking it.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution fails.
+#[cfg(feature = "pg")]
+pub fn cached_cold_row_count_hint(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    let key = table_oid.to_u32();
+    if let Some(cached) = COLD_ROW_COUNT_HINT_CACHE.with(|cache| cache.borrow_mut().get(&key)) {
+        return Ok(cached.unwrap_or(0));
+    }
+    let count = load_cold_row_count_hint(table_oid)?;
+    COLD_ROW_COUNT_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, Some(count));
+    });
+    Ok(count)
+}
+
+#[cfg(feature = "pg")]
+fn load_cold_row_count_hint(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    super::owner::with_extension_owner(|| {
+        let statement = koldstore_catalog::queries::plan_cold_row_count_hint()
+            .map_err(|error| error.to_string())?;
+        let count = select_one::<i64>(&statement, &[pgrx::datum::DatumWithOid::from(table_oid)])
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0)
+            .max(0);
+        Ok(count)
     })?
 }
 

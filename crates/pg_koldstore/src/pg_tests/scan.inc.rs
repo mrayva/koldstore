@@ -1728,3 +1728,53 @@ fn unordered_limit_uses_hot_first_and_defers_cold() {
         "hot-first LIMIT should return hot bodies before opening cold: {bodies}"
     );
 }
+
+#[pg_test]
+fn explain_row_estimate_includes_active_cold_rows_for_broad_scans_not_exact_pk_lookups() {
+    // Upstream #124: the planner's row estimate for a managed table used to be
+    // the hot child's own estimate only, no matter how much data was cold.
+    let suffix = unique_suffix("planner_row_estimate");
+    let schema = format!("pgtest_{suffix}");
+    let table = "t";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    Spi::run(&format!("CREATE SCHEMA {schema}")).expect("create schema");
+    Spi::run(&format!(
+        "CREATE TABLE {relation} (id bigint PRIMARY KEY, val text NOT NULL)"
+    ))
+    .expect("create table");
+    Spi::run(&format!(
+        "INSERT INTO {relation} SELECT g, 'v'||g FROM generate_series(1, 20) g"
+    ))
+    .expect("seed rows");
+    manage_for_cold_flush(&relation, &storage);
+    let flushed = flush_table_rows_completed(&relation, 15);
+    assert!(flushed >= 15, "expected most seeded rows to flush cold, got {flushed}");
+    let cold_rows = spi_get_i64(&format!(
+        "SELECT (koldstore.table_status('{relation}'::regclass)->>'cold_row_count')::bigint"
+    ));
+    assert!(cold_rows >= 15, "expected cold_row_count to reflect the flush, got {cold_rows}");
+
+    // Broad scan: nothing narrows the WHERE clause, so the estimate should now
+    // include the active cold row total, not just the (tiny, post-flush) hot heap.
+    let broad_plan = spi_get_explain(&format!("EXPLAIN SELECT * FROM {relation}"));
+    let broad_rows = extract_plan_rows(&broad_plan);
+    assert!(
+        broad_rows >= cold_rows,
+        "broad scan row estimate must include active cold rows: estimate={broad_rows} \
+         cold_rows={cold_rows} plan={broad_plan}"
+    );
+
+    // Exact primary-key equality matches at most one row across hot+cold. Adding
+    // the full cold total here would badly inflate what must stay a ~1-row
+    // point-lookup estimate (and would misprice any join using this as the inner
+    // side of a nested loop keyed on the same column).
+    let pk_plan = spi_get_explain(&format!("EXPLAIN SELECT * FROM {relation} WHERE id = 1"));
+    let pk_rows = extract_plan_rows(&pk_plan);
+    assert!(
+        pk_rows <= 2,
+        "exact primary-key lookup must not be inflated by cold_row_count: estimate={pk_rows} \
+         plan={pk_plan}"
+    );
+}

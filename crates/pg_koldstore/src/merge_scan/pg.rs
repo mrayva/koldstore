@@ -498,6 +498,14 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     reject_unsupported_cold_read_features(root, rti, rte, table_oid);
 
     let segment_count = known_manifest.map_or(0, |(segment_count, _)| segment_count);
+    // Row-estimate contribution of the active cold segments (upstream #124). A cache/SPI
+    // error fails open to 0 -- the pre-#124 hot-only estimate -- rather than blocking the
+    // plan or guessing; this is a cost-model input, not a correctness gate.
+    let cold_row_count = with_hook_disabled(|| {
+        crate::catalog::cache::cached_cold_row_count_hint(table_oid)
+    })
+    .unwrap_or(0)
+    .max(0) as f64;
     let primary_key_attnums = snapshot
         .as_ref()
         .map(|snap| {
@@ -523,6 +531,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
             segment_order_attnum,
             exact_full_primary_key_equality,
             segment_count,
+            cold_row_count,
             scope_key: koldstore_common::DEFAULT_SCOPE_KEY.to_string(),
         },
         &raw const PATH_METHODS,
