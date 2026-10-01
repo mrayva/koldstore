@@ -369,8 +369,8 @@ pub fn define_gucs() {
     );
     GucRegistry::define_int_guc(
         c"koldstore.async_apply_watchdog_interval_ms",
-        c"Safety watchdog for commit-driven async mirror wakeups.",
-        c"Managed commits normally wake the database worker immediately. This timeout recovers missed notifications without periodic short-interval decoding. Clamped to 1000..=300000 milliseconds.",
+        c"Idle wake interval for the persistent WAL applier; also its missed-wake safety net.",
+        c"Managed commits normally wake the database worker immediately; this interval only matters while it is otherwise idle. Two roles: (1) recovers a missed in-memory notification (COMMIT PREPARED, a lost wake), and (2) bounds how far this database's slot can fall behind unrelated WAL from other databases on the same PostgreSQL instance (logical decoding reads and filters the whole shared WAL stream, so an idle koldstore database still pays to skip past it eventually) by running a normal drain pass on every idle wake too, not just when this database has its own work due -- a no-op pass is cheap, so this only ever pays for a real backlog, in bounded per-wake increments instead of one unbounded catch-up on this database's own next commit. Lower for a tighter backlog bound on a busy shared instance; raise to reduce idle wakeups. SET / ALTER SYSTEM + reload; the worker picks up changes on SIGHUP. Clamped to 1000..=300000 milliseconds.",
         &ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
         settings::MIN_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
         settings::MAX_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
@@ -1083,7 +1083,8 @@ pub fn flush_execution_mode() -> settings::FlushExecutionMode {
     }
 }
 
-/// Safety watchdog interval for commit-driven async mirror wakeups.
+/// Idle wake interval for the persistent WAL applier (missed-wake safety net and
+/// idle-backlog-bounding nudge interval; see the GUC's own registration doc).
 #[must_use]
 pub fn async_apply_watchdog_interval_ms() -> u64 {
     #[cfg(feature = "pg")]

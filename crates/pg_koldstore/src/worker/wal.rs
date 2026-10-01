@@ -19,7 +19,6 @@ use crate::mirror::apply::{apply_bounded_locked, capture_durable_wal_fence, Boun
 use crate::mirror::lifecycle::try_lock_slot;
 
 const WAL_APPLIER_FUNCTION: &str = "koldstore_wal_applier_main";
-const WAL_APPLIER_WATCHDOG: Duration = Duration::from_secs(30);
 const APPLY_RETRY_MIN: Duration = Duration::from_millis(100);
 const APPLY_RETRY_MAX: Duration = Duration::from_secs(5);
 /// Pause when flush finalize holds the slot lock so try-lock waiters can run.
@@ -255,13 +254,33 @@ fn run_wal_applier(database_oid: u32) {
             continue;
         }
 
-        // Latch wakes are latency hints. The long timeout is only a recovery
-        // watchdog for COMMIT PREPARED or a missed in-memory signal; there is no
-        // normal polling transaction while the worker is idle.
-        if !BackgroundWorker::wait_latch(Some(WAL_APPLIER_WATCHDOG)) {
+        // Latch wakes are latency hints. The watchdog timeout is a safety net for a
+        // missed in-memory signal (COMMIT PREPARED, a lost wake). It also bounds how
+        // long this database's slot can go without a drain pass of its own:
+        // PostgreSQL WAL is one physical stream shared by every database in the
+        // cluster, so a koldstore database that commits rarely can still fall behind
+        // by however much *unrelated* WAL other databases produce while it sits idle
+        // -- `wal_due` never becomes true for any of that. Run the same drain pass
+        // used for real work on every idle wake too, not a shortcut that skips
+        // ahead without decoding: `drain_wal_through_fixed_fence` already decodes
+        // and applies anything genuinely new before ever advancing past it, and
+        // costs next to nothing when there is truly nothing to catch up on (a
+        // handful of sub-millisecond SPI round trips, confirmed live), so calling
+        // it unconditionally here only pays for real backlog, in bounded per-wake
+        // increments instead of one unbounded catch-up whenever this database's own
+        // next commit arrives (confirmed live: a multi-second catch-up after tens
+        // of seconds of unrelated same-cluster activity, immediately followed by
+        // sub-5ms passes once caught up).
+        if !BackgroundWorker::wait_latch(Some(watchdog_interval())) {
             return;
         }
         process_sighup();
+        if let Err(error) = drain_wal_through_fixed_fence() {
+            crate::observability::record_async_apply_error();
+            pgrx::warning!(
+                "koldstore WAL applier db={database_oid} idle catch-up deferred: {error}"
+            );
+        }
     }
 }
 
@@ -287,6 +306,16 @@ fn process_sighup() {
     if BackgroundWorker::sighup_received() {
         unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
     }
+}
+
+/// How long the applier sleeps between idle wakes (also the missed-wake safety net
+/// and, now, the idle-backlog-bounding drain interval -- see its call site).
+///
+/// `koldstore.async_apply_watchdog_interval_ms` existed before this function did but was
+/// never actually read by this worker, which used a hardcoded 30s instead (same default,
+/// so no prior behavior changes by wiring it up here).
+fn watchdog_interval() -> Duration {
+    Duration::from_millis(crate::guc::async_apply_watchdog_interval_ms())
 }
 
 /// Drains all WAL visible at one fixed durable fence while respecting bounded

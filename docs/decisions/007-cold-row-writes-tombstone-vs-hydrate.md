@@ -389,6 +389,49 @@ is not worth keeping as a dead opt-in knob. The slot-lock contention itself (not
 lag) remains unaddressed; a future attempt should look at reducing the applier's own fixed
 per-pass cost first, since that is what makes deferring to it a bad trade today.
 
+Correction to the above (2026-09-30, later): the "40-80ms fixed per-invocation overhead" diagnosis
+was itself wrong, found by actually instrumenting `apply_bounded_locked` with per-phase timers
+(`Instant::now()` + `pgrx::log!`) instead of inferring cost from `psql`-level wall-clock
+measurements. With the measured calls kept to a single warm backend and the real persistent
+applier paused (`kill -STOP`) so it could not race the same replication slot, every fixed-overhead
+sub-step -- slot-exists check, `wait_until_slot_inactive`, the durable/seq reads,
+`acknowledge_committed_apply`, `open_decode_cursor` -- logged sub-millisecond, and a full pass
+applying one real row change totaled 2.8-4.6ms. There is no large per-call
+`ReplicationSlotAcquire`/`CreateDecodingContext` tax to eliminate with a persistent-decoding-context
+rewrite; that idea would not have helped. What the same log DID catch: two early passes on an
+otherwise-idle database logged `fetch_decode_loop applied=0` at 122ms and 1.93s. Root cause:
+PostgreSQL WAL is one physical stream shared by every database in the cluster, so a
+koldstore-managed database that sits idle must still decode-and-filter whatever *unrelated* WAL
+other databases produce once it finally gets a fence to apply -- and nothing before this pointed
+the slot forward in the meantime, since `wal_due` only reflects this database's own generation.
+The original 40-80ms `psql`-level numbers were this same effect at smaller scale (unrelated
+regression/stress runs on the same shared pgrx test cluster in between calls), not a fixed
+per-invocation cost -- so the earlier A/B against `hydrate_wait_for_applier_ms` above was measured
+honestly but its *explanation* was wrong; the regression it found was real regardless (added
+latency with nothing to batch), just not for the reason given.
+
+Fixed: the persistent WAL applier's idle wait (`worker::wal::run_wal_applier`) now runs its normal
+`drain_wal_through_fixed_fence` drain pass on every idle wake too, not only when this database's
+own `wal_due`/`recovery_apply_due` are set -- bounding backlog-from-other-databases to one
+watchdog interval's worth instead of an unbounded amount, at near-zero added cost when truly idle
+(the same sub-millisecond-dominated pass measured above). `koldstore.async_apply_watchdog_interval_ms`
+(existed already, default 30s, documented as a "safety watchdog") was wired into this wait for the
+first time -- the worker had been using a hardcoded 30s constant instead, same default so no
+behavior change from that part alone.
+
+A first attempt at this fix was wrong and caught by the regression suite, not shipped: calling
+`acknowledge_slot_lsn` (a raw `pg_replication_slot_advance`) directly on every idle wake, skipping
+straight to the current WAL position without decoding it first. That silently discarded any
+genuinely new committed change that happened to land in the skipped range -- the same "lost
+tombstone" bug class fixed earlier this session for the read-fence path, reintroduced here for the
+idle-wake path. Caught immediately: every `odd_identifiers.sql` sub-case and `hydrate_on_write.sql`
+showed exactly one row surviving a `DELETE` that should have removed it, 100% reproducible. Fixed
+by reusing `drain_wal_through_fixed_fence` itself (the existing, already-correct decode-then-apply
+pass) instead of a shortcut -- it is safe to call unconditionally because it only ever advances
+past WAL it has actually decoded and found irrelevant, never past WAL it has not looked at.
+Verified: full 18-case SQL suite x2, full 95-test `#[pg_test]` suite, and the hydrate-on-write
+correctness stress script (0 violations), all green after the fix.
+
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
 delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
 hydration, `REPEATABLE READ`, and a partitioned-table story.
