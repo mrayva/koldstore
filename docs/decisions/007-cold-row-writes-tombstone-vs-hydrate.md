@@ -432,6 +432,53 @@ past WAL it has actually decoded and found irrelevant, never past WAL it has not
 Verified: full 18-case SQL suite x2, full 95-test `#[pg_test]` suite, and the hydrate-on-write
 correctness stress script (0 violations), all green after the fix.
 
+Throughput, tried and reverted: give-way slot-lock priority (2026-09-30, later still). Direct
+attempt at the slot-lock contention itself, rather than reducing fixed cost (the previous entry)
+or batching requests (the entry before that, also reverted). Idea: `koldstore.hydrate_slot_lock_poll_ms`'s
+polling mode still has concurrent hydrators numerically outcompete the applier (N hydrator tries
+vs. one applier try per cycle), so have the applier announce "I am acquiring or using the lock"
+(a new shared flag, set for the whole attempt via an RAII guard) and have polling hydrators check
+it before every `try_lock_slot` attempt, skipping their own try entirely while it is set --
+converting an unfair numerical race into the applier always winning when it is actually trying.
+
+First cut had a real bug caught by its own benchmark before being shipped: it checked the
+free-skip watermark once before the poll loop, not inside it, so a hydrator giving way through
+several of the applier's passes could never notice the watermark had already caught up to its own
+fence -- it just kept deferring until the poll deadline and errored. Fixed by rechecking the
+watermark every loop iteration (returning early, lock never taken, when it catches up). This fixed
+*that* bug, but not the throughput: 8-client polling-mode success collapsed to ~7% transactions
+either way (93% failed on the retryable `serialization_failure`, tps 0.23 vs. ~5-8 for every other
+mode measured the same session), while 1 client only lost ~8%. The pattern pointed at the real
+cause: under sustained concurrent load `wal_due` is continuously true, so the outer applier loop
+re-enters `drain_wal_through_fixed_fence` back to back with no gap -- the "wants the lock" flag is
+*effectively always set*, so hydrators almost never even attempt the lock themselves, leaving one
+serial applier process as the sole worker for all 8 hydrators' commits. A single applier pass costs
+only ~3-5ms (see the fixed-overhead correction above), but that is still one pass at a time; 8
+hydrators' demand outpaces what one serial consumer can clear, and removing hydrators' own
+(previously parallel, if contended) direct-apply contribution left strictly less total apply
+capacity in the system, not more. This is the same root cause the earlier defer-to-applier
+experiment hit by a different mechanism (a bounded wait with a self-apply fallback that never won
+the race) -- channeling more of the work through the one serial applier is a loss under concurrent
+hydrate-on-write load regardless of which specific mechanism is used to do the channeling, because
+PostgreSQL's single-owner replication slot means there is no way to actually parallelize the
+decode+apply work itself; the lock's role is to pick *who* does it serially, and "always the
+applier" is a worse pick than "whoever's statement happens to be running" once there is enough
+concurrent demand that one process cannot keep up with all of it alone. Reverted in full
+(`koldstore-wal-mirror`'s new flag, both `apply.rs` and `worker/wal.rs` changes) for the same
+reason the earlier attempt was reverted: measured as a regression under the exact concurrent
+scenario it was meant to help, with no configuration where it beat the status quo. Kept: the
+`async_apply_watchdog_interval_ms` doc-table fix and the newly-added `hydrate_slot_lock_poll_ms`
+GUC table entry (`docs/sql-api.md`), both independently correct regardless of this reversion.
+
+Lesson for a future attempt at the slot-lock contention itself: any fix that increases how much of
+the apply work funnels through the single background applier process, instead of leaving
+hydrators free to do their own small decode+apply directly (contended, but parallel across
+backends), will likely lose under enough concurrency -- the applier's serial throughput ceiling,
+not the cost of any one pass, is the real limit. A fix would need to either genuinely parallelize
+decode (not possible against one PostgreSQL replication slot without a from-scratch sharing
+mechanism neither attempt here built) or accept the serialization and focus purely on fairness
+between waiters (closer to what plain polling already does) rather than priority.
+
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
 delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
 hydration, `REPEATABLE READ`, and a partitioned-table story.
