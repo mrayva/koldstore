@@ -207,8 +207,9 @@ What worked:
 
 Known limits of the prototype (all fail closed or are documented, none silent):
 
-- `REPEATABLE READ` / `SERIALIZABLE`: the transaction snapshot cannot be advanced,
-  so the hook stays out and the write guards reject as before.
+- `REPEATABLE READ` / `SERIALIZABLE`: fixed 2026-10-01, see the dated entry near the end of this
+  file. `SERIALIZABLE` still falls through to the write guards when
+  `koldstore.reject_serializable_cold_reads` is on (its default).
 - Single-table statements whose `WHERE` clause `where_deparse` can reproduce, plus joins
   (`UPDATE ... FROM`, `DELETE ... USING`) and sub-queries (`IN`, `EXISTS`, ...) through the
   planner hook's probe (2026-09-26): the probe is a `SELECT` of the target's primary key over
@@ -481,4 +482,47 @@ between waiters (closer to what plain polling already does) rather than priority
 
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
 delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
-hydration, `REPEATABLE READ`, and a partitioned-table story.
+hydration, and a partitioned-table story. (`REPEATABLE READ`/`SERIALIZABLE` closed 2026-10-01,
+see below.)
+
+`REPEATABLE READ` / `SERIALIZABLE` support (2026-10-01). The "transaction snapshot cannot be
+advanced" framing above turned out to conflate two different things. PostgreSQL's own-transaction
+tuple visibility (`cmin`/`curcid`) is independent of isolation level -- only the *other*
+transactions' snapshot (`xmin`/`xmax`/`xip`) is frozen for `REPEATABLE READ`/`SERIALIZABLE`.
+Confirmed with a pure-SQL probe before touching any koldstore code: a `BEFORE STATEMENT` trigger's
+own `INSERT`, run right before the triggering statement's own scan (the same timing as this hook),
+is invisible to that scan under all three isolation levels with no hack at all -- so the existing
+`CommandCounterIncrement()` + manual `curcid` mutation is genuinely necessary even for `READ
+COMMITTED`, confirming it's not something PostgreSQL does automatically. The open question was
+whether forcing `curcid` is *safe* under `REPEATABLE READ`/`SERIALIZABLE`, since those levels reuse
+the same cached transaction-snapshot object for the rest of the transaction rather than refetching
+one per statement.
+
+Verified live (isolated pgrx dev cluster, isolation guard temporarily lifted for the experiment):
+same-statement self-visibility works under `REPEATABLE READ`; a second statement in the same
+transaction sees the hydrated row with a consistent row count (no double-count); a cursor declared
+*before* the hydrating statement and fetched *after* it still shows the pre-hydration state (the
+curcid mutation does not leak into an already-opened portal's own snapshot); and two concurrent
+`REPEATABLE READ` transactions hydrating the same cold row produce PostgreSQL's ordinary
+first-committer-wins `could not serialize access due to concurrent update`, not corruption or a
+hang.
+
+`SERIALIZABLE` has one more wrinkle, found while designing the fix (not from the curcid question):
+the probe that decides which rows to hydrate reads cold data through `with_check_suppressed`,
+which also bypasses `koldstore.reject_serializable_cold_reads` -- the GUC that exists precisely
+because cold rows take no SSI predicate locks (upstream #125). Lifting the isolation guard for
+`SERIALIZABLE` unconditionally would silently reintroduce that exact gap for the probe's read,
+regardless of the GUC. The fix ties `SERIALIZABLE` support to that same GUC instead of inventing a
+new policy: hydration proceeds under `SERIALIZABLE` only when
+`koldstore.reject_serializable_cold_reads` is off (the user has already accepted the weaker
+guarantee for ordinary cold reads, so extending it to the probe adds no new risk); left on (the
+default), a `SERIALIZABLE` statement here still falls straight through to the write guards, same as
+before this fix. With the GUC off, a classic write-skew probe (two concurrent `SERIALIZABLE`
+transactions, each reading one cold row and then hydrating+updating a different cold row based on
+that read) correctly got `could not serialize access due to read/write dependencies among
+transactions` from PostgreSQL's SSI on commit, with the loser's update left fully unapplied and no
+double-hydration -- but that probe used rows that turned out to still be hot at test time on a
+first pass (a cold flush silently no-opped under `koldstore.flush_execution`'s default queued mode
+with a worker-process-starved dev cluster), so it is not conclusive proof for the genuinely-cold
+case and is not the basis for the fix above; it is recorded here only as a secondary sanity check
+that curcid-forcing does not globally disable SSI tracking for a transaction.

@@ -9,12 +9,26 @@
 //! The native statement then runs unchanged, including triggers, foreign keys,
 //! row-level security and `RETURNING`.
 //!
-//! Limits of the prototype: `READ COMMITTED` only (the transaction snapshot of
-//! `REPEATABLE READ`/`SERIALIZABLE` cannot be advanced), single-table statements
-//! whose `WHERE` clause `hooks::where_deparse` can reproduce (joins and sub-queries go through
-//! the planner hook's probe, see `hooks::dml_planner`), and a transaction
-//! that has not already written the table. Everything else keeps falling through
-//! to the write guards, which reject it. The table job lock is not held by default (the hydrated row is
+//! Isolation levels: own-transaction visibility (`cmin`/`curcid`) is independent of
+//! isolation level in PostgreSQL -- only the *other-transactions* snapshot (xmin/xmax)
+//! is frozen for `REPEATABLE READ`/`SERIALIZABLE`, so forcing `curcid` forward on the
+//! statement's own snapshot to reveal a just-hydrated row works the same way under all
+//! three levels (confirmed live: same-statement visibility, cross-statement consistency
+//! within one transaction, an already-declared cursor's own portal snapshot unaffected,
+//! and normal first-committer-wins conflict detection on a concurrently hydrated row).
+//! `SERIALIZABLE` has one additional wrinkle: the probe that decides which rows to
+//! hydrate reads cold data without taking SSI predicate locks (same reason
+//! `koldstore.reject_serializable_cold_reads` exists for ordinary reads, upstream #125).
+//! So `SERIALIZABLE` only hydrates when that GUC is off -- the same accepted-weaker-
+//! guarantee the GUC already grants ordinary reads, not a new risk; left on (the
+//! default), a `SERIALIZABLE` statement here just falls through to the write guards,
+//! same as before.
+//!
+//! Other limits of the prototype: single-table statements whose `WHERE` clause
+//! `hooks::where_deparse` can reproduce (joins and sub-queries go through the planner
+//! hook's probe, see `hooks::dml_planner`), and a transaction that has not already
+//! written the table. Everything else keeps falling through to the write guards, which
+//! reject it. The table job lock is not held by default (the hydrated row is
 //! uncommitted, so a concurrent flush cannot see or prune it); `koldstore.hydrate_take_job_lock`
 //! turns that on, with a bounded wait.
 
@@ -71,8 +85,21 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
             pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
         ) || eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int) != 0
             || crate::sql::cold_dml::guard::suspended()
-            // The transaction snapshot of REPEATABLE READ / SERIALIZABLE cannot be advanced.
-            || pg_sys::XactIsoLevel != pg_sys::XACT_READ_COMMITTED as std::ffi::c_int
+            // READ COMMITTED and REPEATABLE READ always qualify (own-transaction
+            // visibility is isolation-level independent); SERIALIZABLE only when the
+            // probe's cold read is allowed to run without SSI predicate locks, i.e. the
+            // same condition that already permits an ordinary SERIALIZABLE cold read.
+            || match pg_sys::XactIsoLevel {
+                level if level == pg_sys::XACT_SERIALIZABLE as std::ffi::c_int => {
+                    crate::guc::reject_serializable_cold_reads()
+                }
+                level if level == pg_sys::XACT_READ_COMMITTED as std::ffi::c_int
+                    || level == pg_sys::XACT_REPEATABLE_READ as std::ffi::c_int =>
+                {
+                    false
+                }
+                _ => true,
+            }
             || pg_sys::ParallelWorkerNumber >= 0
         {
             return;

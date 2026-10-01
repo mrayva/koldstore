@@ -184,13 +184,71 @@ RESET
  0
 (1 row)
 
+CREATE TABLE
+INSERT 0 6
+ iso_managed
+-------------
+ t
+(1 row)
+
+ iso_flushed
+-------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
 BEGIN
-    repeatable_read_delete
--------------------------------
- REJECTED write pk={"id":"18"}
+ repeatable_read_delete
+------------------------
+ ok: 1
+(1 row)
+
+COMMIT
+ settle
+--------
+
+(1 row)
+
+ row_1_after_repeatable_read
+-----------------------------
+ 0
+(1 row)
+
+BEGIN
+ serializable_delete_guard_on
+------------------------------
+ REJECTED write pk={"id":"2"}
 (1 row)
 
 ROLLBACK
+ row_2_after_serializable_guard_on
+-----------------------------------
+ 1
+(1 row)
+
+SET
+BEGIN
+ serializable_delete_guard_off
+-------------------------------
+ ok: 1
+(1 row)
+
+COMMIT
+RESET
+ settle
+--------
+
+(1 row)
+
+ row_2_after_serializable_guard_off
+------------------------------------
+ 0
+(1 row)
+
 CREATE TABLE
 INSERT 0 4
  join_targets_before

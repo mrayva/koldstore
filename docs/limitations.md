@@ -139,7 +139,7 @@ any row or object is changed.
 | `UPDATE`/`DELETE` with a join, `USING` or sub-query (`IN`, `EXISTS`, `NOT IN`, self-join, another managed table as source) | refused if it also matches cold-only target rows | `cold_dml_scan_guard` |
 | `UPDATE`/`DELETE` inside a data-modifying CTE (`WITH d AS (DELETE ... RETURNING ...)`) | refused if it also matches cold-only rows | `cold_dml_scan_guard` |
 | A statement whose WHERE clause cannot be reproduced at all (a volatile function, `WHERE CURRENT OF`, a CTE used as a join source) | refused whenever the table has cold data | `cold_dml_scan_guard` |
-| Plain `UPDATE`/`DELETE` on cold-only rows, single table (experimental, `koldstore.hydrate_on_write = on`) | supported by hydrating the rows first, up to `koldstore.max_hydrate_rows`; `READ COMMITTED` only; user insert triggers fire for the hydrated rows | `hydrate_on_write` |
+| Plain `UPDATE`/`DELETE` on cold-only rows, single table (experimental, `koldstore.hydrate_on_write = on`) | supported by hydrating the rows first, up to `koldstore.max_hydrate_rows`; `READ COMMITTED`/`REPEATABLE READ` always, `SERIALIZABLE` only when `koldstore.reject_serializable_cold_reads` is off; user insert triggers fire for the hydrated rows | `hydrate_on_write` |
 | `MERGE` changing target rows through a multi-row source | refused when the table has cold data | `cold_dml_scan_guard` |
 | Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |

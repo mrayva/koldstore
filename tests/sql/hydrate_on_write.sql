@@ -134,10 +134,41 @@ RESET plan_cache_mode;
 SELECT sqlreg.settle();
 SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id IN (11, 12, 15)$$) AS rows_11_12_15_after;
 
--- other isolation levels fall back to the guards (the snapshot cannot be advanced)
+-- Isolation levels: a dedicated fixture so these cases cannot collide with h1's ids,
+-- which every other case in this file also reaches into.
+CREATE TABLE sqlreg.h_iso (id bigint PRIMARY KEY, v text);
+INSERT INTO sqlreg.h_iso SELECT g, 'r' || g FROM generate_series(1, 6) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_iso'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10,
+  min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS iso_managed;
+SELECT sqlreg.flush_table('sqlreg.h_iso'::regclass) IS NOT NULL AS iso_flushed;
+SELECT sqlreg.settle();
+
+-- REPEATABLE READ hydrates and runs normally (own-transaction visibility is
+-- isolation-level independent; only other transactions' snapshot is frozen)
 BEGIN ISOLATION LEVEL REPEATABLE READ;
-SELECT sqlreg.try($$DELETE FROM sqlreg.h1 WHERE id = 18$$) AS repeatable_read_delete;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h_iso WHERE id = 1$$) AS repeatable_read_delete;
+COMMIT;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_iso WHERE id = 1$$) AS row_1_after_repeatable_read;
+
+-- SERIALIZABLE falls back to the guards by default: the probe that finds candidate
+-- rows reads cold data without SSI predicate locks, the same reason
+-- koldstore.reject_serializable_cold_reads refuses an ordinary cold read
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h_iso WHERE id = 2$$) AS serializable_delete_guard_on;
 ROLLBACK;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_iso WHERE id = 2$$) AS row_2_after_serializable_guard_on;
+
+-- turning the guard off accepts the same weaker guarantee for hydration too
+SET koldstore.reject_serializable_cold_reads = off;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT sqlreg.try($$DELETE FROM sqlreg.h_iso WHERE id = 2$$) AS serializable_delete_guard_off;
+COMMIT;
+RESET koldstore.reject_serializable_cold_reads;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_iso WHERE id = 2$$) AS row_2_after_serializable_guard_off;
 
 -- joins and sub-queries hydrate through the planner hook's probe: the cold rows the join
 -- matches (and only those) are pulled into the heap first
