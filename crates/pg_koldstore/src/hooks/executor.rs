@@ -61,6 +61,14 @@ mod live {
         /// knows to ignore an insert-only/`DO NOTHING` MERGE that never touches an
         /// existing row.
         is_merge: bool,
+        /// This candidate is one of several result relations in the same statement
+        /// (a partitioned/inherited target, ADR-008) rather than the lone target of
+        /// an ordinary single-table statement. `raw`/`where_sql`/`join_probe` are
+        /// always `None` for one of these (see `cold_only_update_delete_candidate`'s
+        /// doc comment for why a precise per-leaf recount isn't attempted yet), so
+        /// it always falls through to the unverifiable-shape guards, just with a
+        /// message naming the real reason instead of their default wording.
+        multi_relation: bool,
     }
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -100,7 +108,7 @@ mod live {
             // `previous`/`standard_ExecutorEnd` may free the executor state
             // those pointers reference. See `pk_predicate`'s module doc
             // comment for why this can't be a single pass.
-            let cold_guard_candidate = cold_only_update_delete_candidate(query_desc);
+            let cold_guard_candidates = cold_only_update_delete_candidate(query_desc);
             // `UPDATE`/`DELETE` inside a data-modifying CTE live in the plan's sub-plans; the
             // top-level statement is a SELECT (or an INSERT), so they need their own look.
             let cte_guard_candidates = cold_only_cte_candidates(query_desc);
@@ -125,8 +133,8 @@ mod live {
             crate::memory::release_process_heap_if_pending();
             crate::hooks::hydrate_on_write::release_locks();
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.
-            if let Some(candidate) = cold_guard_candidate {
-                enforce_cold_only_update_delete_guard(&candidate);
+            for candidate in &cold_guard_candidates {
+                enforce_cold_only_update_delete_guard(candidate);
             }
             for candidate in &cte_guard_candidates {
                 enforce_cold_only_update_delete_guard(candidate);
@@ -195,6 +203,7 @@ mod live {
                     merge_changes_rows: false,
                     join_probe: None,
                     is_merge: false,
+                    multi_relation: false,
                 });
             }
             candidates
@@ -203,17 +212,52 @@ mod live {
 
     /// Phase 1 of the cold-DML write guard for UPDATE/DELETE/MERGE (see
     /// the `executor_end` call site and `hooks::pk_predicate`'s module doc
-    /// comment). Returns the target relation OID and the raw
-    /// `attnum -> [value, ...]` equalities extracted from its WHERE/ON
-    /// clause, but only when this statement is a plausible guard
-    /// candidate at all: `CMD_UPDATE`/`CMD_DELETE`/`CMD_MERGE`, a single
-    /// managed target relation, the write guard not currently suspended
-    /// for this session (`sql::cold_dml::guard::suspended`), and -- for a
-    /// plain equality-only predicate, where "zero rows affected" and "the
-    /// one candidate wasn't hot" are the same fact -- the native statement
-    /// already affected zero rows. A predicate with an `IN (...)` column
-    /// is checked regardless of rows affected; see the comment at this
-    /// function's `es_processed` check for why.
+    /// comment). Returns one candidate per managed result relation, but
+    /// only when this statement is a plausible guard candidate at all:
+    /// `CMD_UPDATE`/`CMD_DELETE`/`CMD_MERGE` and the write guard not
+    /// currently suspended for this session (`sql::cold_dml::guard::suspended`).
+    ///
+    /// A plain single-table statement (`PlannedStmt.resultRelations.length
+    /// == 1`) gets the full precise treatment unchanged from before this
+    /// function returned a `Vec`: the raw `attnum -> [value, ...]`
+    /// equalities from its WHERE/ON clause, a deparsed WHERE/join probe, and
+    /// -- for a plain equality-only predicate, where "zero rows affected"
+    /// and "the one candidate wasn't hot" are the same fact -- an
+    /// early-skip based on the native statement's own affected-row count.
+    ///
+    /// A **partitioned/inherited target** (`resultRelations.length > 1`,
+    /// ADR-008) is a materially different shape PostgreSQL itself produces:
+    /// confirmed live that even a maximally selective, literal-valued WHERE
+    /// clause on the partition key (`WHERE id = 3 AND region = 'east'`,
+    /// where `region` is the partition key) still lists *every* partition
+    /// in `resultRelations` -- PostgreSQL relies on *runtime* partition
+    /// pruning to skip touching the others, not plan-time elimination from
+    /// this list, so there is no "N happens to be 1" shortcut to lean on in
+    /// practice. Modern PostgreSQL's `ModifyTable` also has a single child
+    /// plan (no more `plans`/one-subplan-per-result-relation list), so
+    /// there is no straightforward way to recover which part of that single
+    /// plan tree belongs to which specific result relation the way the
+    /// `resultRelations.length == 1` path does. Building a precise per-leaf
+    /// recount here would need its own investigation into that shape (an
+    /// `Append` over per-leaf scans tagged by a hidden `tableoid` junk
+    /// column at best) -- not attempted this round; tracked as the next
+    /// step in ADR-008.
+    ///
+    /// Until that exists, a managed relation among `resultRelations` gets a
+    /// candidate with `raw`/`where_sql`/`join_probe` all `None` --
+    /// deliberately unverifiable by construction, so it always falls
+    /// through to `enforce_unverifiable_scan_guard`/
+    /// `enforce_unverifiable_merge_guard`, which already fail closed
+    /// (blanket-refuse whenever the table has cold data at all) for any
+    /// other shape this guard cannot safely re-run. This is less precise
+    /// than the single-table recount -- it refuses a statement whose WHERE
+    /// clause provably could not have matched a cold row -- but it is
+    /// *correct*, and replaces today's silent "UPDATE 0, no error" with a
+    /// loud, actionable rejection, matching the imprecision level the
+    /// codebase already accepts for other hard-to-verify shapes.
+    /// `koldstore.hydrate_on_write` does not attempt one of these targets
+    /// either (same missing precise-probe mechanism) -- see
+    /// `hydrate_on_write`'s own `top_level_target`.
     ///
     /// `CMD_MERGE` reuses the exact same `extract_raw_attnum_equality`
     /// extraction as UPDATE/DELETE, not a MERGE-specific path -- confirmed
@@ -233,19 +277,20 @@ mod live {
     /// UPDATE/DELETE already do.
     unsafe fn cold_only_update_delete_candidate(
         query_desc: *mut pg_sys::QueryDesc,
-    ) -> Option<GuardCandidate> {
+    ) -> Vec<GuardCandidate> {
         unsafe {
+            let no_candidates = Vec::new();
             if crate::sql::cold_dml::guard::suspended() {
-                return None;
+                return no_candidates;
             }
             if query_desc.is_null() || (*query_desc).plannedstmt.is_null() || (*query_desc).estate.is_null() {
-                return None;
+                return no_candidates;
             }
             if !matches!(
                 (*query_desc).operation,
                 pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE | pg_sys::CmdType::CMD_MERGE
             ) {
-                return None;
+                return no_candidates;
             }
             let estate = (*query_desc).estate;
             // `EXPLAIN` without `ANALYZE` calls ExecutorStart+ExecutorEnd
@@ -256,30 +301,30 @@ mod live {
             // attempted. `es_top_eflags` carries EXEC_FLAG_EXPLAIN_ONLY
             // for exactly this case.
             if (*estate).es_top_eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int) != 0 {
-                return None;
+                return no_candidates;
             }
             let planned = (*query_desc).plannedstmt;
             let rtable = (*planned).rtable;
             let result_relations = (*planned).resultRelations;
-            if rtable.is_null() || result_relations.is_null() || (*result_relations).length != 1 {
-                // Multi-relation targets (partitioned tables) are out of
-                // scope for this pass -- never a false positive, just
-                // unguarded.
-                return None;
+            if rtable.is_null() || result_relations.is_null() || (*result_relations).length == 0 {
+                return no_candidates;
+            }
+            if (*result_relations).length > 1 {
+                return multi_relation_candidates(query_desc, planned, rtable, result_relations);
             }
             let range_table_index = (*(*result_relations).elements.add(0)).int_value;
             if range_table_index <= 0 || range_table_index > (*rtable).length {
-                return None;
+                return no_candidates;
             }
             let rte = (*(*rtable).elements.add((range_table_index - 1) as usize))
                 .ptr_value
                 .cast::<pg_sys::RangeTblEntry>();
             if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
-                return None;
+                return no_candidates;
             }
             let table_oid = (*rte).relid;
             if !crate::catalog::cache::is_managed_relation(table_oid) {
-                return None;
+                return no_candidates;
             }
             let raw = crate::hooks::pk_predicate::extract_raw_predicate_leaves(
                 (*planned).planTree,
@@ -334,7 +379,7 @@ mod live {
             } else {
                 None
             };
-            Some(GuardCandidate {
+            vec![GuardCandidate {
                 table_oid,
                 join_probe,
                 raw,
@@ -346,7 +391,55 @@ mod live {
                 merge_changes_rows: (*query_desc).operation == pg_sys::CmdType::CMD_MERGE
                     && merge_changes_target_rows((*planned).planTree),
                 is_merge: (*query_desc).operation == pg_sys::CmdType::CMD_MERGE,
-            })
+                multi_relation: false,
+            }]
+        }
+    }
+
+    /// The `resultRelations.length > 1` branch of
+    /// `cold_only_update_delete_candidate` (a partitioned/inherited DML
+    /// target, ADR-008): one deliberately-unverifiable candidate per
+    /// *managed* result relation, skipping any unmanaged sibling leaf
+    /// (e.g. an ordinary, unmanaged partition alongside a managed one).
+    unsafe fn multi_relation_candidates(
+        query_desc: *mut pg_sys::QueryDesc,
+        planned: *mut pg_sys::PlannedStmt,
+        rtable: *mut pg_sys::List,
+        result_relations: *mut pg_sys::List,
+    ) -> Vec<GuardCandidate> {
+        unsafe {
+            let is_merge = (*query_desc).operation == pg_sys::CmdType::CMD_MERGE;
+            let merge_changes_rows = is_merge && merge_changes_target_rows((*planned).planTree);
+            let mut candidates = Vec::new();
+            for index in 0..(*result_relations).length as usize {
+                let range_table_index = (*(*result_relations).elements.add(index)).int_value;
+                if range_table_index <= 0 || range_table_index > (*rtable).length {
+                    continue;
+                }
+                let rte = (*(*rtable).elements.add((range_table_index - 1) as usize))
+                    .ptr_value
+                    .cast::<pg_sys::RangeTblEntry>();
+                if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                    continue;
+                }
+                let table_oid = (*rte).relid;
+                if !crate::catalog::cache::is_managed_relation(table_oid) {
+                    continue;
+                }
+                candidates.push(GuardCandidate {
+                    table_oid,
+                    raw: None,
+                    where_sql: None,
+                    join_probe: None,
+                    single_valued: false,
+                    es_processed: 0,
+                    prior_write: crate::txn_writes::was_written(table_oid),
+                    merge_changes_rows,
+                    is_merge,
+                    multi_relation: true,
+                });
+            }
+            candidates
         }
     }
 
@@ -426,6 +519,11 @@ mod live {
     /// `koldstore.hydrate_on_write` hydrated before the native statement scanned is hot, not
     /// cold-only, so this blanket check would otherwise reject a MERGE that hydration already
     /// made safe to run.
+    ///
+    /// Also the catch-all for a MERGE whose target is partitioned/inherited (`multi_relation`,
+    /// ADR-008): no probe mechanism exists for that shape yet either, for a different reason
+    /// (PostgreSQL's own plan shape, not a join/sub-query this hook declined to reproduce) --
+    /// the message below says so precisely rather than blaming "a join".
     fn enforce_unverifiable_merge_guard(candidate: &GuardCandidate) {
         if !candidate.merge_changes_rows
             || candidate.join_probe.is_some()
@@ -443,12 +541,17 @@ mod live {
         }
         let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
             .unwrap_or_else(|_| "?".to_string());
+        let reason = if candidate.multi_relation {
+            "its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across \
+             multiple result relations"
+        } else {
+            "it updates or deletes target rows through a join, and the join only sees hot rows"
+        };
         pgrx::error!(
-            "koldstore: refusing this MERGE on managed table {table_name} -- it updates or deletes target rows \
-             through a join, and the join only sees hot rows, so matching cold rows would be silently skipped. \
-             Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or \
-             INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts \
-             the risk (upstream issue #122)"
+            "koldstore: refusing this MERGE on managed table {table_name} -- {reason}, so matching cold rows \
+             would be silently skipped. Use koldstore.update_row()/delete_row() for cold keys, MERGE a single \
+             row by primary key, or INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET \
+             koldstore.guard_scan_writes = off accepts the risk (upstream issue #122)"
         );
     }
 
@@ -465,6 +568,11 @@ mod live {
     /// Never fires for MERGE (`is_merge`; that command has its own guard above, which alone
     /// knows to let an insert-only/`DO NOTHING` MERGE through) or when the exact-PK guard
     /// already resolved the statement (this function only runs after that one declined).
+    ///
+    /// Also the catch-all for a partitioned/inherited UPDATE/DELETE target (`multi_relation`,
+    /// ADR-008), for the same reason as `enforce_unverifiable_merge_guard`'s MERGE case: no
+    /// per-leaf probe mechanism exists for that shape yet. The message below names that reason
+    /// specifically instead of the generic "volatile function/CTE/CURRENT OF" wording.
     fn enforce_unverifiable_scan_guard(candidate: &GuardCandidate) {
         if candidate.is_merge
             || candidate.where_sql.is_some()
@@ -484,13 +592,18 @@ mod live {
         }
         let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
             .unwrap_or_else(|_| "?".to_string());
+        let reason = if candidate.multi_relation {
+            "its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across \
+             multiple result relations"
+        } else {
+            "its WHERE clause (a volatile function, WHERE CURRENT OF, or a join/sub-query shape this guard \
+             cannot safely re-run, such as a CTE used as a source) cannot be verified against cold storage"
+        };
         pgrx::error!(
-            "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- its WHERE clause (a \
-             volatile function, WHERE CURRENT OF, or a join/sub-query shape this guard cannot safely re-run, \
-             such as a CTE used as a source) cannot be verified against cold storage, so a matching cold row \
-             could be silently left unmodified. Narrow it to a plain literal predicate, change rows one key at \
-             a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to \
-             accept the risk (upstream issue #122)"
+            "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- {reason}, so a matching \
+             cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the \
+             leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), \
+             or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)"
         );
     }
 

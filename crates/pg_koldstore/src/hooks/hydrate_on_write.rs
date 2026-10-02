@@ -191,6 +191,13 @@ unsafe fn top_level_target(
     unsafe {
         let result_relations = (*planned).resultRelations;
         let rtable = (*planned).rtable;
+        // A partitioned/inherited target (ADR-008) lists every potential leaf here, not
+        // just one -- confirmed live even for a literal, maximally selective WHERE clause
+        // on the partition key, since PostgreSQL relies on runtime pruning rather than
+        // eliminating siblings from this list at plan time. No probe mechanism exists for
+        // that shape yet (same gap `hooks::executor`'s write guard has), so it is left
+        // alone here too: the write guard now fails closed for it instead of silently
+        // doing nothing, which is the safe outcome in the absence of hydration.
         if rtable.is_null() || result_relations.is_null() || (*result_relations).length != 1 {
             return None;
         }

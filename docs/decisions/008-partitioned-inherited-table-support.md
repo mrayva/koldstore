@@ -2,18 +2,18 @@
 
 ## Status
 
-Option A, first slice shipped and live-verified (2026-10-02): a partition or
+Option A, two slices shipped and live-verified (2026-10-02): a partition or
 inheritance leaf can be `manage_table`'d like a plain table; the parent stays
 permanently unmanageable; `ATTACH PARTITION`/`INHERIT`/`DETACH PARTITION`
 work in either direction as long as the parent role isn't managed. Confirmed
 live: a plain `SELECT`/`INSERT` through the parent sees a managed leaf's hot
 and cold data correctly, with zero planner-level code added, exactly as this
-ADR predicted. **Not yet safe: `UPDATE`/`DELETE`/`MERGE` through the parent**
-when they'd touch a cold-only row -- confirmed live to silently report zero
-rows changed rather than erroring or hydrating (see "What shipped" below and
-`docs/limitations.md`). The write-guard/hydrate-on-write generalization and
-the partition-key-changing-`UPDATE` hydration case remain open, tracked
-below.
+ADR predicted. `UPDATE`/`DELETE`/`MERGE` through the parent are now refused
+whenever a managed leaf has cold data anywhere (a coarse, table-wide check,
+not a precise per-row recount) instead of silently doing nothing -- see
+"What shipped" below and `docs/limitations.md`. A precise per-leaf recount
+and the partition-key-changing-`UPDATE` hydration case remain open, tracked
+in "Next step".
 
 ## Date
 
@@ -105,9 +105,14 @@ What this requires building:
   until proven safe — leaning toward allow, since nothing about the leaf's
   own storage changes by gaining a parent.
 - **Write-guard / hydrate-on-write generalization.** Both need to loop over
-  `PlannedStmt.resultRelations` instead of assuming exactly one, running
-  today's single-table logic independently per affected leaf. This is a
-  mechanical widening of existing logic, not new logic.
+  `PlannedStmt.resultRelations` instead of assuming exactly one. Turned out
+  less mechanical than it looked from here: PostgreSQL lists *every*
+  partition in that list regardless of how selective the WHERE clause is
+  (runtime, not plan-time, pruning), and modern PostgreSQL's `ModifyTable`
+  has a single child plan rather than one subplan per result relation, so
+  there is no straightforward per-leaf WHERE clause to recover yet. Shipped
+  as a coarse, fail-closed "has cold data anywhere" check instead of a
+  precise recount -- see "What shipped" below.
 - **Cross-partition tuple routing.** PostgreSQL implements a partition-key
   `UPDATE` that moves a row to a different leaf as a `DELETE` on the old leaf
   plus an `INSERT` on the new one. If the row being moved is cold-only on the
@@ -194,28 +199,69 @@ which is better learned after Option A ships than guessed now.
   clippy clean.
 - **Confirmed, not just predicted, the open risk**: `UPDATE sqlreg.p_sales
   SET ... WHERE id = 3 AND region = 'east'` (a cold row, reached through the
-  parent with a partition-key literal that lets PostgreSQL's own plan-time
-  pruning resolve it to one leaf) returns `UPDATE 0` with no error, leaving
-  the cold row unchanged -- the exact silent-skip behavior #122 closed for a
-  plain single-table statement, now reachable again through a managed leaf's
-  parent, because the write guard and hydrate-on-write both still assume a
-  single result relation and this statement keeps PostgreSQL's nested
-  per-partition `ModifyTable` shape even after pruning. The identical
-  statement issued directly against the managed leaf (bypassing the parent)
-  is unaffected -- today's write guard already covers it correctly. New
-  regression case `parent_update_of_cold_row_known_gap_silently_succeeds` in
-  `tests/sql/partitioned_tables.sql` locks in today's (unsafe) behavior on
-  purpose, with a comment explaining it must flip to an error or a successful
-  hydration once the next slice lands -- not a surprise regression.
-  Documented in `docs/limitations.md` with the live-confirmed repro.
+  parent) returned `UPDATE 0` with no error, leaving the cold row unchanged
+  -- the exact silent-skip behavior #122 closed for a plain single-table
+  statement, now reachable again through a managed leaf's parent. The
+  identical statement issued directly against the managed leaf (bypassing
+  the parent) was unaffected -- today's write guard already covers it
+  correctly. Fixed in the second slice below.
+
+## What shipped (second slice, 2026-10-02, same day)
+
+Investigated the precise shape before writing any fix, via a temporary debug
+probe rather than assumption: **every partition is always listed in
+`PlannedStmt.resultRelations` for a parent-routed statement, even one with a
+literal, maximally selective WHERE clause on the partition key** --
+confirmed live (`UPDATE p_sales SET ... WHERE id = 3 AND region = 'east'`
+against a 2-partition table produced `resultRelations.length = 2`, not 1,
+even though `EXPLAIN` only displayed one reachable branch). PostgreSQL relies
+on *runtime* partition pruning to skip touching the others, not plan-time
+elimination from this list, so the "N happens to be 1" shortcut the first
+slice's "Next step" assumed does not actually occur in practice. Modern
+PostgreSQL's `ModifyTable` also has a single child plan (no more
+`plans`/one-subplan-per-result-relation list), so there is no
+straightforward way to recover a precise per-leaf WHERE clause from the plan
+tree the way the single-table path does -- that would need its own
+investigation into the single child plan's shape (an `Append` over per-leaf
+scans tagged by a hidden `tableoid` junk column, at a guess), not attempted
+this round.
+
+Given that, `cold_only_update_delete_candidate` (`hooks/executor.rs`) now
+returns one candidate per *managed* result relation instead of bailing
+outright when `resultRelations.length != 1`. Each multi-relation candidate
+is built with `raw`/`where_sql`/`join_probe` all deliberately `None` --
+unverifiable by construction -- so it falls through to
+`enforce_unverifiable_scan_guard`/`enforce_unverifiable_merge_guard`, the
+same fail-closed checks already used for other hard-to-verify shapes (a CTE
+join source, a volatile function): refuse whenever the leaf has cold data
+*anywhere*. Both guards' messages now name "a partitioned/inherited target"
+specifically instead of their generic wording. `hydrate-on-write`'s
+`top_level_target` (`hooks/hydrate_on_write.rs`) is unaffected -- it already
+bailed on `resultRelations.length != 1`, which is now the *safe* outcome
+(falls through to the corrected write guard) rather than the dangerous one
+(falls through to the old, silently-permissive guard gap).
+
+This is a real precision trade-off, confirmed and accepted rather than
+hidden: a parent-routed statement that would only touch a **hot** row is
+also refused, as long as that leaf has cold data elsewhere, because this
+guard cannot yet tell "this leaf has cold data" apart from "this specific
+row is cold" for a multi-relation target. New regression cases in
+`tests/sql/partitioned_tables.sql` cover all three outcomes: a cold-row
+parent-update now refused, a hot-row parent-update *also* refused (the
+coarse edge, confirmed on purpose), and a statement touching only an
+unmanaged sibling leaf correctly unaffected. Full SQL regression suite green
+(confirmed clean multiple times; a few runs hit the pre-existing, unrelated
+"flush finalize could not acquire slot lock before deadline" flakiness on
+random *other* files, not on `partitioned_tables`), clippy clean.
 
 ## Next step (not started)
 
-Extend the write guard (`executor.rs`'s `cold_only_update_delete_candidate`)
-and `hydrate-on-write`'s probe builder (`dml_planner.rs`) to loop over
-`PlannedStmt.resultRelations` instead of assuming exactly one, running
-today's single-table logic independently per affected leaf -- this closes
-the confirmed gap above. The partition-key-changing-`UPDATE` hydration case
+A **precise per-leaf recount** for a partitioned/inherited UPDATE/DELETE/
+MERGE, replacing the current coarse "has cold data anywhere" refusal --
+needs investigating modern PostgreSQL's single-child-plan shape for a
+multi-result-relation `ModifyTable` first (see "What shipped" above).
+`koldstore.hydrate_on_write` support for a partitioned target depends on the
+same missing mechanism. The partition-key-changing-`UPDATE` hydration case
 (moving a cold-only row across leaves via PostgreSQL's native DELETE+INSERT)
 is a separate, harder follow-on, not designed yet.
 

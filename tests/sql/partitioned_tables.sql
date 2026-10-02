@@ -84,15 +84,23 @@ BEGIN
   END IF;
 END $$;
 
--- ------------------------- known, tracked gap: UPDATE/DELETE/MERGE through
--- the parent (docs/limitations.md, ADR-008). The write guard and
--- hydrate-on-write both assume a single result relation; a parent-routed
--- statement keeps the nested-ModifyTable shape even when PostgreSQL's own
--- plan-time partition pruning leaves only one leaf reachable, so neither
--- mechanism recognizes it. Confirmed red on purpose: this must start
--- refusing (or hydrating and succeeding) once a later slice extends the
--- write guard/hydrate-on-write to multi-relation targets -- that is the
--- signal this comment and this case need updating, not a surprise failure.
+-- ------------------------- write guard now covers the parent, coarsely
+-- (docs/limitations.md, ADR-008). Confirmed live that PostgreSQL always
+-- lists every partition in PlannedStmt.resultRelations for a parent-routed
+-- statement -- even one with a literal, maximally selective WHERE clause on
+-- the partition key -- so there is no "N happens to be 1" shortcut to lean
+-- on the way the single-table/CTE cases do. Rather than attempt a precise
+-- per-leaf recount (needs its own investigation into how multiple result
+-- relations share one ModifyTable child plan in modern PostgreSQL, deferred
+-- as ADR-008's next step), a managed leaf among the result relations gets a
+-- deliberately unverifiable candidate, which falls through to the same
+-- fail-closed guards already used for other hard-to-verify shapes (a CTE
+-- join source, a volatile function): refuse whenever the leaf has cold data
+-- ANYWHERE, not just in the rows this specific statement would touch. This
+-- replaces the old silent "UPDATE 0, no error" with a loud rejection, at
+-- the cost of also refusing a parent-routed statement that would only have
+-- touched hot rows, as long as the leaf has cold data somewhere else too --
+-- confirmed and documented below, not an oversight.
 CREATE FUNCTION sqlreg.try(stmt text) RETURNS text
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -104,15 +112,32 @@ END
 $$;
 
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 3 AND region = 'east'$$)
-  AS parent_update_of_cold_row_KNOWN_GAP_silently_succeeds;
+  AS parent_update_of_cold_row_now_refused;
 SELECT amt FROM sqlreg.p_sales WHERE id = 3 AND region = 'east';
 
 -- The identical statement issued directly against the managed leaf (not
--- through the parent) is unaffected by the gap above -- today's
--- single-table write guard already covers it correctly.
+-- through the parent) is unaffected -- today's single-table write guard
+-- already covers it correctly, unchanged by this round.
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales_east SET amt = amt + 1 WHERE id = 4$$)
   AS leaf_update_of_cold_row_correctly_refused;
 SELECT amt FROM sqlreg.p_sales_east WHERE id = 4;
+
+-- The coarser edge, confirmed on purpose: a parent-routed UPDATE that would
+-- only ever touch a HOT row (id=999, inserted earlier in this file) is also
+-- refused, because the east leaf has cold data elsewhere -- this guard
+-- cannot yet tell "this leaf has cold data" apart from "this specific row
+-- is cold", the same imprecision level the codebase already accepts for
+-- other unverifiable shapes (see enforce_unverifiable_scan_guard's doc
+-- comment).
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 999 AND region = 'east'$$)
+  AS parent_update_of_hot_row_also_refused_coarsely;
+SELECT amt FROM sqlreg.p_sales WHERE id = 999 AND region = 'east';
+
+-- A parent-routed statement touching ONLY the unmanaged west leaf is
+-- unaffected -- west was never a candidate at all (not managed).
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 101 AND region = 'west'$$)
+  AS parent_update_of_unmanaged_leaf_unaffected;
+SELECT amt FROM sqlreg.p_sales WHERE id = 101 AND region = 'west';
 
 -- Detaching the managed leaf is an ordinary partition-maintenance operation,
 -- unaffected by its management status (ADR-008: a managed leaf's own

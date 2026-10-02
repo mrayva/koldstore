@@ -70,9 +70,9 @@ INSERT 0 1
 
 DO
 CREATE FUNCTION
- parent_update_of_cold_row_known_gap_silently_succeeds
--------------------------------------------------------
- ok
+                                                                                                                                                                                                                                       parent_update_of_cold_row_now_refused
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
 (1 row)
 
  amt
@@ -88,6 +88,26 @@ CREATE FUNCTION
  amt
 -----
   40
+(1 row)
+
+                                                                                                                                                                                                                                  parent_update_of_hot_row_also_refused_coarsely
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
+(1 row)
+
+ amt
+------
+ 9990
+(1 row)
+
+ parent_update_of_unmanaged_leaf_unaffected
+--------------------------------------------
+ ok
+(1 row)
+
+ amt
+------
+ 1011
 (1 row)
 
 ALTER TABLE
