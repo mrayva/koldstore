@@ -1,0 +1,103 @@
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+INSERT 0 6
+INSERT 0 3
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ flushed_east
+--------------
+ t
+(1 row)
+
+ east_leaf_count
+-----------------
+               6
+(1 row)
+
+ parent_total_count
+--------------------
+                  9
+(1 row)
+
+ region | region_count | region_sum
+--------+--------------+------------
+ east   |            6 |        210
+ west   |            3 |       3060
+(2 rows)
+
+ id | region | amt
+----+--------+-----
+  3 | east   |  30
+(1 row)
+
+ id  | region | amt
+-----+--------+------
+   1 | east   |   10
+   2 | east   |   20
+   3 | east   |   30
+   4 | east   |   40
+   5 | east   |   50
+   6 | east   |   60
+ 101 | west   | 1010
+ 102 | west   | 1020
+ 103 | west   | 1030
+(9 rows)
+
+ west_only_count
+-----------------
+               3
+(1 row)
+
+INSERT 0 1
+ amt
+------
+ 9990
+(1 row)
+
+ parent_total_after_insert
+---------------------------
+                        10
+(1 row)
+
+DO
+CREATE FUNCTION
+ parent_update_of_cold_row_known_gap_silently_succeeds
+-------------------------------------------------------
+ ok
+(1 row)
+
+ amt
+-----
+  30
+(1 row)
+
+                                                                                                                                                                                                      leaf_update_of_cold_row_correctly_refused
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its WHERE clause also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+ amt
+-----
+  40
+(1 row)
+
+ALTER TABLE
+ east_leaf_count_after_detach
+------------------------------
+                            7
+(1 row)
+
+ parent_total_after_detach
+---------------------------
+                         3
+(1 row)
+

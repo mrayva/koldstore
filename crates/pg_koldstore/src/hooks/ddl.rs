@@ -466,8 +466,14 @@ mod process_utility {
         }
     }
 
-    /// `ALTER TABLE ... INHERIT parent` and `ATTACH PARTITION` where either
-    /// side is managed.
+    /// `ALTER TABLE ... INHERIT parent` and `ATTACH PARTITION` where the
+    /// relation taking the **parent** role is managed (ADR-008 option A: a
+    /// managed table cannot itself be an inheritance/partition parent, since
+    /// it has no storage of its own to aggregate over). The relation taking
+    /// the **child**/leaf role is unaffected by either side's management
+    /// status -- a managed leaf's own hot/cold storage does not change by
+    /// gaining a parent, and an unmanaged leaf can still be `manage_table`'d
+    /// afterward, same as any standalone table.
     unsafe fn reject_alter_hierarchy_of_managed(stmt: *mut pg_sys::AlterTableStmt) {
         unsafe {
             if stmt.is_null() || (*stmt).cmds.is_null() {
@@ -480,15 +486,17 @@ mod process_utility {
                 }
                 match (*cmd).subtype {
                     pg_sys::AlterTableType::AT_AddInherit => {
-                        reject_if_managed((*stmt).relation, "ALTER TABLE ... INHERIT");
+                        // `stmt.relation` is the child becoming an inheritance
+                        // child (leaf) -- allowed. `cmd.def` is the parent --
+                        // still refused when managed.
                         reject_if_managed((*cmd).def.cast::<pg_sys::RangeVar>(), "ALTER TABLE ... INHERIT");
                     }
                     pg_sys::AlterTableType::AT_AttachPartition => {
+                        // `stmt.relation` is the partitioned parent -- still
+                        // refused when managed. The partition named in
+                        // `cmd.def` is the child/leaf becoming its partition
+                        // -- allowed.
                         reject_if_managed((*stmt).relation, "ALTER TABLE ... ATTACH PARTITION");
-                        let partition = (*cmd).def.cast::<pg_sys::PartitionCmd>();
-                        if !partition.is_null() {
-                            reject_if_managed((*partition).name, "ALTER TABLE ... ATTACH PARTITION");
-                        }
                     }
                     _ => {}
                 }

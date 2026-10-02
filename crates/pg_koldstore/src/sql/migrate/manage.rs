@@ -16,20 +16,27 @@ use koldstore_common::MigrationStatus;
 use koldstore_migrate::{introspection, MigrateTableRequest};
 #[cfg(feature = "pg")]
 use uuid::Uuid;
-/// Refuses everything but an ordinary, permanent heap table that takes no part
-/// in a partition or inheritance hierarchy (upstream #125): a cold row has no
-/// heap presence, so partition routing, inheritance scans, foreign or
-/// non-logged storage cannot be honoured over hot + cold data, and logical
-/// replication (which feeds the mirror) does not cover temporary or unlogged
-/// relations at all. Runs before anything is created.
+/// Refuses a relation that is itself a partitioned table or an inheritance
+/// *parent* (upstream #125, ADR-008 option A): such a relation has no storage
+/// of its own, so there is nothing for koldstore to flush or scan directly --
+/// supporting it would mean teaching the scan/write-guard/mirror layers to
+/// aggregate across every current and future child, a materially larger
+/// problem than managing one relation at a time. A partition or inheritance
+/// **child** (a leaf with its own heap, its own relfilenode, and its own rows)
+/// is allowed through this gate: it is managed exactly like any other plain
+/// table, and `set_rel_pathlist_hook` already fires per leaf during
+/// PostgreSQL's own `Append`/`MergeAppend` construction over a parent, so a
+/// plain `SELECT`/`INSERT`/`UPDATE`/`DELETE` through the parent sees cold data
+/// on a managed leaf with no planner-level change. Temporary, unlogged,
+/// foreign and other non-heap relation kinds are refused as before. Runs
+/// before anything is created.
 #[cfg(feature = "pg")]
 fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
-    let sql = "SELECT c.relkind::text, c.relpersistence::text, c.relispartition, \
-               EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid), \
-               EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid) \
+    let sql = "SELECT c.relkind::text, c.relpersistence::text, \
+               EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid) \
                FROM pg_catalog.pg_class c WHERE c.oid = $1";
     let args = [pgrx::datum::DatumWithOid::from(table_oid)];
-    let found = pgrx::Spi::connect(|client| -> Result<Option<(String, String, bool, bool, bool)>, pgrx::spi::Error> {
+    let found = pgrx::Spi::connect(|client| -> Result<Option<(String, String, bool)>, pgrx::spi::Error> {
         let table = client.select(sql, Some(1), &args)?;
         let Some(row) = table.into_iter().next() else {
             return Ok(None);
@@ -38,18 +45,14 @@ fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
             row.get::<String>(1)?.unwrap_or_default(),
             row.get::<String>(2)?.unwrap_or_default(),
             row.get::<bool>(3)?.unwrap_or(false),
-            row.get::<bool>(4)?.unwrap_or(false),
-            row.get::<bool>(5)?.unwrap_or(false),
         )))
     })
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let Some((relkind, persistence, is_partition, has_children, is_child)) = found else {
+    let Some((relkind, persistence, has_children)) = found else {
         return;
     };
     let reason = match relkind.as_str() {
-        "r" if is_partition => Some("it is a partition"),
         "r" if has_children => Some("it has inheritance children"),
-        "r" if is_child => Some("it inherits from another table"),
         "r" if persistence == "t" => Some("it is a temporary table"),
         "r" if persistence == "u" => Some("it is an unlogged table"),
         "r" => None,
@@ -67,8 +70,9 @@ fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
         let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
             .unwrap_or_else(|_| format!("(oid {})", table_oid.to_u32()));
         pgrx::error!(
-            "migrate table failed: cannot manage {relation}: {reason}; only ordinary, permanent tables outside \
-             any partition or inheritance hierarchy are supported (upstream issue #125)"
+            "migrate table failed: cannot manage {relation}: {reason}; a managed table cannot itself be a \
+             partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or \
+             inheritance child may still be managed on its own"
         );
     }
 }

@@ -85,13 +85,35 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   parent row is refused (the referential-integrity scan of the child needs row locks,
   which cold rows do not support, #125), so parent rows cannot be removed while such a
   child has cold rows. Foreign keys are enforced on hot rows only.
-- Only ordinary, permanent tables that take no part in a partition or
-  inheritance hierarchy can be managed: `manage_table` refuses partitioned
-  tables, partitions, inheritance parents and children, foreign, temporary and
-  unlogged tables, views, materialized views and sequences, and later `INHERIT`,
-  `ATTACH PARTITION`, `INHERITS (managed)` or `PARTITION OF managed` on a managed
-  table is refused
-  ([#125](https://github.com/kalamdb/koldstore/issues/125)).
+- A managed table cannot itself be a partitioned table or an inheritance
+  *parent* -- it has no storage of its own to flush or scan
+  ([#125](https://github.com/kalamdb/koldstore/issues/125),
+  [ADR-008](decisions/008-partitioned-inherited-table-support.md)). A
+  partition or inheritance **child/leaf** may be managed on its own, exactly
+  like a plain table, and `ATTACH PARTITION`/`INHERIT`/`DETACH PARTITION` work
+  normally in either direction as long as the relation taking the *parent*
+  role is not itself managed. A plain `SELECT` through the parent sees a
+  managed leaf's hot and cold data correctly (PostgreSQL's own
+  `Append`/`MergeAppend` construction calls the same per-relation scan hook
+  used for a standalone managed table) and a plain `INSERT` through the
+  parent routes to the leaf's hot heap exactly as it would for an unmanaged
+  partition -- both verified live. **`UPDATE`/`DELETE`/`MERGE` through the
+  parent are not yet safe when they would have to touch a cold-only row**:
+  the write guard and `koldstore.hydrate_on_write` were both written assuming
+  a single result relation, and a statement against the parent keeps that
+  shape even when PostgreSQL's own plan-time partition pruning leaves only
+  one leaf reachable (confirmed live: `UPDATE parent SET ... WHERE
+  <partition-key literal> AND <cold leaf PK>` returns `UPDATE 0` with no
+  error, silently leaving the cold row unchanged -- the same silent-skip
+  behavior #122 closed for a plain single-table statement, now reachable
+  again through a managed leaf's parent). Until this is extended, run
+  `UPDATE`/`DELETE`/`MERGE` directly against the managed leaf relation
+  instead of through the parent -- that path is unaffected and already
+  correctly guarded/hydrated, confirmed live. A partition-key-changing
+  `UPDATE` that would move a cold-only row to a different leaf (PostgreSQL
+  implements this as a `DELETE` + `INSERT` pair) is not designed yet either.
+  `manage_table` still refuses foreign, temporary and unlogged tables, views,
+  materialized views and sequences as before.
 - Schema, table and column names may be any valid PostgreSQL identifier:
   mixed case, reserved words, spaces, embedded quotes and dots, slashes,
   non-ASCII letters, a leading digit, and leading or trailing blanks. Names are
