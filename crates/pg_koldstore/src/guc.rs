@@ -182,7 +182,7 @@ pub fn define_gucs() {
     GucRegistry::define_bool_guc(
         c"koldstore.hydrate_on_write",
         c"EXPERIMENTAL: lets UPDATE/DELETE change cold-only rows by hydrating them first.",
-        c"Before a single-table UPDATE/DELETE on a managed table scans, the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED and REPEATABLE READ always qualify; SERIALIZABLE only when koldstore.reject_serializable_cold_reads is off. Other statements keep being rejected by the write guards (upstream #122).",
+        c"Before a single-table UPDATE/DELETE on a managed table scans -- the top-level statement, or a data-modifying CTE's own UPDATE/DELETE -- the cold-only rows its WHERE clause matches are inserted into the heap (up to koldstore.max_hydrate_rows) so the native statement can act on them. READ COMMITTED and REPEATABLE READ always qualify; SERIALIZABLE only when koldstore.reject_serializable_cold_reads is off. A join/sub-query (including inside a CTE) or MERGE keeps being rejected by the write guards (upstream #122).",
         &HYDRATE_ON_WRITE,
         GucContext::Userset,
         flags,

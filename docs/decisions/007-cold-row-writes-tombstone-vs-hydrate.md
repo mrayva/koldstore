@@ -215,7 +215,9 @@ Known limits of the prototype (all fail closed or are documented, none silent):
   planner hook's probe (2026-09-26): the probe is a `SELECT` of the target's primary key over
   the statement's whole `FROM`/`WHERE`, and hydration looks for cold-only rows matching
   `(pk) IN (probe)` with the statement's own parameters bound (prepared statements work).
-  Data-modifying CTEs and `MERGE` still fall through to the guards (which reject), as do
+  A single-table data-modifying CTE's own target is hydrated too (fixed 2026-10-02, see the
+  dated entry near the end of this file); a CTE with a join/sub-query source, and `MERGE`
+  (top-level or inside a CTE), still fall through to the guards (which reject), as do
   statements the probe cannot reproduce (volatile functions, `CURRENT OF`).
 - **User triggers (resolved 2026-09-26): the hydration `INSERT` no longer fires them.**
   The prototype originally fired user `AFTER INSERT` triggers for the hydrated row,
@@ -481,9 +483,31 @@ mechanism neither attempt here built) or accept the serialization and focus pure
 between waiters (closer to what plain polling already does) rather than priority.
 
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
-delete reports the same count native PostgreSQL would only sometimes), data-modifying CTE
-hydration, and a partitioned-table story. (`REPEATABLE READ`/`SERIALIZABLE` closed 2026-10-01,
-see below.)
+delete reports the same count native PostgreSQL would only sometimes), `MERGE` support, and a
+partitioned-table story. (`REPEATABLE READ`/`SERIALIZABLE` closed 2026-10-01, single-table
+data-modifying CTE hydration closed 2026-10-02, see below.)
+
+Data-modifying CTE hydration (2026-10-02). The hook gated entirely on the top-level statement's
+own `CmdType` being `UPDATE`/`DELETE`, so `WITH d AS (DELETE FROM t WHERE ... RETURNING ...)
+SELECT ...` was invisible to it (the top-level `CmdType` is `SELECT`) and fell through to the
+write guard's own (already-fixed, separately) CTE check, which rejects it outright whenever the
+table has cold data. Fixed the same way the write guard already finds these: a CTE's own
+`ModifyTable` node lives in `PlannedStmt.subplans`, not `planTree`, so it needs its own look,
+independent of (not instead of) the top-level check -- a statement can have both at once (`WITH d
+AS (DELETE FROM a ...) UPDATE b ... FROM d`). No new snapshot mechanics were needed: there is
+exactly one snapshot for the whole statement regardless of which node in the plan tree does the
+hydrating insert, so the existing `CommandCounterIncrement()`/`curcid` bump already covers a
+CTE-embedded scan just as well as the top-level one -- now done once, after every target (top-level
+and every CTE) has been examined, rather than once per target. Single-table only, matching the
+top-level case exactly: a CTE whose own `WHERE` joins or sub-queries never gets the planner hook's
+probe either, because that hook only runs on the outermost statement and declines outright on
+`hasModifyingCTE`/`cteList` (`hooks::dml_planner::build_probe_sql`) -- confirmed live, such a CTE
+still falls through to the write guard's unverifiable-scan rejection, unchanged. `MERGE` (top-level
+or inside a CTE) was explicitly not attempted: it has no probe mechanism at all today, a larger,
+separate piece of work. New regression cases (`tests/sql/hydrate_on_write.sql`, dedicated
+`sqlreg.h_cte`/`h_cte2` fixtures to avoid colliding with `h1`'s already-dense id space) cover a CTE
+`DELETE`, a CTE `UPDATE`, and a join-shaped CTE source (still correctly rejected, unhydrated). Full
+18-case SQL regression suite green, clippy clean.
 
 `REPEATABLE READ` / `SERIALIZABLE` support (2026-10-01). The "transaction snapshot cannot be
 advanced" framing above turned out to conflate two different things. PostgreSQL's own-transaction

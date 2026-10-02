@@ -98,9 +98,9 @@ DELETE 2
 (1 row)
 
 CREATE TABLE
-                                                                                                                                                                                                            cte_delete_matched
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.h1 -- its WHERE clause also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+ cte_delete_matched
+--------------------
+ 1
 (1 row)
 
  settle
@@ -110,12 +110,56 @@ CREATE TABLE
 
  row_14_after_cte_delete
 -------------------------
+ 0
+(1 row)
+
+CREATE TABLE
+INSERT 0 4
+ cte2_managed
+--------------
+ t
+(1 row)
+
+ cte2_flushed
+--------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ cte_update_cold
+-----------------
+ 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ row_1_after_cte_update
+------------------------
+ cte-upd
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+                                                                                                                                                                                                                                                           cte_join_delete_cold
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.h_cte2 -- its WHERE clause (a volatile function, WHERE CURRENT OF, or a join/sub-query shape this guard cannot safely re-run, such as a CTE used as a source) cannot be verified against cold storage, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
+(1 row)
+
+ row_2_after_cte_join_attempt
+------------------------------
  1
 (1 row)
 
  total_before_rollback
 -----------------------
- 17
+ 16
 (1 row)
 
 BEGIN
@@ -133,7 +177,7 @@ ROLLBACK
 
  total_after_rollback
 ----------------------
- 17
+ 16
 (1 row)
 
 BEGIN

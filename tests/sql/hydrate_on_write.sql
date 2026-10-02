@@ -95,12 +95,33 @@ DELETE FROM sqlreg.h1 WHERE id IN (5, 6) RETURNING id, val;
 SELECT sqlreg.settle();
 SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id IN (5, 6)$$) AS rows_5_6_after;
 
--- a data-modifying CTE is not seen by the ExecutorStart hook (its top-level
--- statement is a SELECT) and, separately, bypasses the write guards
+-- a data-modifying CTE's own DELETE is hydrated too (the top-level statement here is a
+-- SELECT, so its CmdType is irrelevant -- the CTE's own ModifyTable lives in the plan's
+-- sub-plans, found and hydrated the same way as the top-level case)
 CREATE TABLE sqlreg.h_cte_note (x int);
 SELECT sqlreg.val($$WITH d AS (DELETE FROM sqlreg.h1 WHERE id = 14 RETURNING id) SELECT count(*) FROM d$$) AS cte_delete_matched;
 SELECT sqlreg.settle();
 SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1 WHERE id = 14$$) AS row_14_after_cte_delete;
+
+-- a CTE UPDATE is hydrated the same way
+CREATE TABLE sqlreg.h_cte2 (id bigint PRIMARY KEY, v text);
+INSERT INTO sqlreg.h_cte2 SELECT g, 'c' || g FROM generate_series(1, 4) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_cte2'::regclass, storage => 'sqlreg_fs', hot_row_limit => 4,
+  min_flush_rows => 1, max_rows_per_file => 4, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS cte2_managed;
+SELECT sqlreg.flush_table('sqlreg.h_cte2'::regclass) IS NOT NULL AS cte2_flushed;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$WITH d AS (UPDATE sqlreg.h_cte2 SET v = 'cte-upd' WHERE id = 1 RETURNING id) SELECT count(*) FROM d$$) AS cte_update_cold;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT v FROM sqlreg.h_cte2 WHERE id = 1$$) AS row_1_after_cte_update;
+
+-- a CTE whose own WHERE joins or sub-queries never gets the planner hook's probe either (same
+-- limit as the top-level case): it falls through unhydrated, and the write guard still catches it
+CREATE TABLE sqlreg.h_cte2_src (id bigint PRIMARY KEY);
+INSERT INTO sqlreg.h_cte2_src VALUES (2);
+SELECT sqlreg.val($$WITH d AS (DELETE FROM sqlreg.h_cte2 USING sqlreg.h_cte2_src s WHERE sqlreg.h_cte2.id = s.id RETURNING sqlreg.h_cte2.id) SELECT count(*) FROM d$$) AS cte_join_delete_cold;
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_cte2 WHERE id = 2$$) AS row_2_after_cte_join_attempt;
 
 -- rollback leaves the cold rows exactly as they were (id 8 is cold-only)
 SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h1$$) AS total_before_rollback;
