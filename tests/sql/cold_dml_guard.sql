@@ -125,13 +125,37 @@ SELECT sqlreg.settle();
 SELECT id, val FROM sqlreg.g1 ORDER BY id;
 
 -- ----------------------------------------------------------------------- MERGE
+-- WHEN MATCHED only: PostgreSQL's planner collapses a single-row USING source into a plain
+-- parameterized IndexScan on the target (an inner join degenerates to that shape), so these go
+-- through the exact-PK guard, same as a plain UPDATE/DELETE equality -- unaffected by the
+-- join-probe fix below.
 SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (2, 'm')) AS s(id, val) ON t.id = s.id
                     WHEN MATCHED THEN DELETE$$) AS merge_delete_cold;
 SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (2, 'm')) AS s(id, val) ON t.id = s.id
                     WHEN MATCHED THEN UPDATE SET val = s.val$$) AS merge_update_cold;
+-- A WHEN NOT MATCHED branch forces a real join plan (PostgreSQL needs it to tell "no match"
+-- apart from "matched"), which the exact-PK guard can't collapse. The planner hook's MERGE
+-- probe (fixed 2026-10-02) now gives this a PRECISE cold-match recount instead of the old
+-- blanket "the table has cold data somewhere" rejection: id=11 doesn't exist at all, hot or
+-- cold, so the join matches no cold row and this one correctly succeeds (INSERT fires) --
+-- confirmed red (full blanket rejection) before the fix, green after.
 SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (11, 'm')) AS s(id, val) ON t.id = s.id
                     WHEN MATCHED THEN UPDATE SET val = s.val
                     WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val)$$) AS merge_new_key_inserts;
+-- Same join-plan shape, but id=1 genuinely is cold-only: the join can't see it (cold rows are
+-- invisible to a plain join), so NOT MATCHED fires and the INSERT it attempts hits the
+-- pre-existing, unrelated "primary key already exists (hot or cold)" insert guard first --
+-- this shape never reaches the new join-probe code at all, confirming the two guards still
+-- compose correctly (a second, independent catch, not a gap).
+SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (1, 'm')) AS s(id, val) ON t.id = s.id
+                    WHEN MATCHED THEN UPDATE SET val = s.val
+                    WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val)$$, true) AS merge_not_matched_insert_guard_catches_cold;
+-- A genuine multi-row source with WHEN MATCHED only (no INSERT branch at all, so the insert
+-- guard above never applies): this is the exact shape `enforce_unverifiable_merge_guard` was
+-- written for, and the one that actually exercises the new join-probe path end to end. Both
+-- id=1 and id=4 are cold-only.
+SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (1, 'm'), (4, 'm')) AS s(id, val) ON t.id = s.id
+                    WHEN MATCHED THEN UPDATE SET val = s.val$$, true) AS merge_multirow_matched_only_cold;
 SELECT sqlreg.try($$MERGE INTO sqlreg.g1 t USING (VALUES (7, 'mh')) AS s(id, val) ON t.id = s.id
                     WHEN MATCHED THEN UPDATE SET val = s.val$$) AS merge_update_hot;
 

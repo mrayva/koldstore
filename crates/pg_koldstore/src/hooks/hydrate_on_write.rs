@@ -1,5 +1,5 @@
 //! EXPERIMENTAL hydrate-on-write (ADR-007, option B): lets a plain single-table
-//! `UPDATE`/`DELETE` change cold-only rows.
+//! `UPDATE`/`DELETE`, or a row-changing `MERGE`, change cold-only rows.
 //!
 //! An `ExecutorStart` hook, before the statement's scan begins, finds the cold-only
 //! rows its `WHERE` clause matches (merged hot+cold view minus heap-only view),
@@ -42,10 +42,21 @@
 //! sub-queries never gets the planner hook's probe either (that hook only sees the
 //! outermost statement, and declines outright on `hasModifyingCTE`/`cteList`), so it falls
 //! through to the write guards unchanged, exactly like an unreproducible top-level clause
-//! does. `MERGE` -- top-level or inside a CTE -- is not attempted: it has no probe
-//! mechanism at all today (the write guard's `enforce_unverifiable_merge_guard` rejects it
-//! outright whenever cold data exists and the MERGE can change existing rows), and building
-//! one is a separate, larger piece of work.
+//! does.
+//!
+//! `MERGE` is hydrated too, through the SAME planner-hook probe mechanism (`hooks::dml_planner`
+//! builds a MERGE-specific probe: a `SELECT` of the target's primary keys joined to the
+//! `USING` source on the `ON` clause, since MERGE is inherently a join -- there is no
+//! single-table shape for it to fall back to). Only when some `WHEN MATCHED`/`WHEN NOT
+//! MATCHED BY SOURCE` action actually changes an existing row (`UPDATE`/`DELETE`, not
+//! `INSERT`/`DO NOTHING`): an insert-only MERGE never touches an existing row, so there is
+//! nothing to hydrate. A MERGE inside a CTE is not attempted -- the planner hook that builds
+//! the probe only runs on the outermost statement, same limit the CTE case above already has
+//! for a join/sub-query. The cold-DML write guard's own MERGE check
+//! (`enforce_unverifiable_merge_guard`) now also uses this probe for a precise recount instead
+//! of a blanket "the table has cold data somewhere" rejection, which is what makes hydration
+//! compose correctly here: without it, a MERGE hydration already made safe to run would still
+//! be wrongly rejected afterward.
 
 use std::cell::RefCell;
 
@@ -115,7 +126,10 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
         let planned = (*query_desc).plannedstmt;
         let mut hydrated_any = false;
 
-        if matches!((*query_desc).operation, pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE) {
+        if matches!(
+            (*query_desc).operation,
+            pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE | pg_sys::CmdType::CMD_MERGE
+        ) {
             if let Some(target) = top_level_target(query_desc, planned) {
                 hydrated_any |= hydrate_target(&target);
             }
@@ -167,8 +181,9 @@ unsafe fn isolation_blocks_hydration() -> bool {
     }
 }
 
-/// The top-level statement's own target, when it is a plain `UPDATE`/`DELETE` on a single
-/// managed table (single-table `WHERE`, or a join/sub-query via the planner hook's probe).
+/// The top-level statement's own target, when it is a plain `UPDATE`/`DELETE`/`MERGE` on a
+/// single managed table (single-table `WHERE` for `UPDATE`/`DELETE`, or a join/sub-query --
+/// always the case for `MERGE` -- via the planner hook's probe).
 unsafe fn top_level_target(
     query_desc: *mut pg_sys::QueryDesc,
     planned: *mut pg_sys::PlannedStmt,
@@ -193,9 +208,11 @@ unsafe fn top_level_target(
         if !crate::catalog::cache::is_managed_relation(table_oid) {
             return None;
         }
-        // Single-table statements: the plan's own WHERE. Joins and sub-queries: the planner hook's
-        // probe, a SELECT of the target's primary keys over the statement's whole FROM/WHERE, used
-        // as `(pk) IN (probe)` so the same cold-only comparison applies.
+        // Single-table statements: the plan's own WHERE. Joins, sub-queries, and MERGE (always
+        // a join of target and source, never single-table): the planner hook's probe, a SELECT
+        // of the target's primary keys over the statement's whole FROM/WHERE (or, for MERGE,
+        // target/source/ON -- see `hooks::dml_planner`'s module doc comment), used as
+        // `(pk) IN (probe)` so the same cold-only comparison applies.
         if let Some(probe) = crate::hooks::dml_planner::probe_sql_of((*planned).planTree) {
             let params = crate::hooks::dml_planner::collect_params((*query_desc).params)?;
             let pk_columns = crate::sql::cold_dml::primary_key_columns(table_oid).ok()?;
@@ -205,6 +222,11 @@ unsafe fn top_level_target(
                 .collect::<Vec<_>>()
                 .join(", ");
             Some(HydrateTarget { table_oid, where_sql: format!("({columns}) IN ({probe})"), params })
+        } else if (*query_desc).operation == pg_sys::CmdType::CMD_MERGE {
+            // No single-table fallback for MERGE: an insert-only MERGE (no probe, because
+            // nothing it does ever touches an existing row) and a MERGE whose ON/source the
+            // probe could not reproduce both fall through to the write guards unchanged.
+            None
         } else {
             let where_sql =
                 crate::hooks::where_deparse::deparse_where((*planned).planTree, (*query_desc).params, table_oid)?;

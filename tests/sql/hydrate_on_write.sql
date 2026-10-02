@@ -328,5 +328,39 @@ SELECT sqlreg.settle();
 SELECT sqlreg.settle();
 SELECT id FROM sqlreg.h_ab ORDER BY id;
 
+-- MERGE is hydrated too (single-table target only, via the planner hook's MERGE-specific probe
+-- -- MERGE is inherently a join of target and source, so there is no single-table shape for it
+-- to fall back to the way a plain UPDATE/DELETE's own WHERE clause can)
+CREATE TABLE sqlreg.h_merge (id bigint PRIMARY KEY, v text);
+INSERT INTO sqlreg.h_merge SELECT g, 'm' || g FROM generate_series(1, 6) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_merge'::regclass, storage => 'sqlreg_fs', hot_row_limit => 6,
+  min_flush_rows => 1, max_rows_per_file => 6, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS merge_managed;
+SELECT sqlreg.flush_table('sqlreg.h_merge'::regclass) IS NOT NULL AS merge_flushed;
+SELECT sqlreg.settle();
+SET koldstore.hydrate_on_write = on;
+
+-- a row-changing MERGE (WHEN MATCHED UPDATE) against a cold-only row is hydrated first
+SELECT sqlreg.try($$MERGE INTO sqlreg.h_merge t USING (VALUES (1, 'merged')) AS s(id, v) ON t.id = s.id
+                    WHEN MATCHED THEN UPDATE SET v = s.v$$) AS merge_update_cold;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT v FROM sqlreg.h_merge WHERE id = 1$$) AS row_1_after_merge_update;
+
+-- WHEN MATCHED DELETE with a genuine multi-row source (not collapsible to a single parameterized
+-- scan) is hydrated the same way
+SELECT sqlreg.try($$MERGE INTO sqlreg.h_merge t USING (VALUES (2, 'x'), (3, 'x')) AS s(id, v) ON t.id = s.id
+                    WHEN MATCHED THEN DELETE$$) AS merge_delete_multirow_cold;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT count(*) FROM sqlreg.h_merge WHERE id IN (2, 3)$$) AS rows_2_3_after_merge_delete;
+
+-- an insert-only MERGE never touches an existing row, so it needs no hydration at all; id=100
+-- doesn't exist, hot or cold, so WHEN NOT MATCHED fires and the INSERT just runs natively
+SELECT sqlreg.try($$MERGE INTO sqlreg.h_merge t USING (VALUES (100, 'new')) AS s(id, v) ON t.id = s.id
+                    WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)$$) AS merge_insert_only;
+SELECT sqlreg.settle();
+SELECT sqlreg.val($$SELECT v FROM sqlreg.h_merge WHERE id = 100$$) AS row_100_after_merge_insert;
+RESET koldstore.hydrate_on_write;
+
 -- the job lock is released after the statements: a flush still runs
 SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;

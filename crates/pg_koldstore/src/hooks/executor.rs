@@ -314,7 +314,8 @@ mod live {
                 .is_some_and(|leaves| leaves.iter().all(|leaf| leaf.value_count() == 1));
             // The generic probe (any WHERE shape) needs the clause as SQL
             // text, taken while the plan tree is still alive. MERGE joins a
-            // source, which a standalone count cannot reproduce.
+            // source, which a standalone count cannot reproduce -- it gets
+            // the join probe below instead, same as a joined UPDATE/DELETE.
             let where_sql = if (*query_desc).operation == pg_sys::CmdType::CMD_MERGE
                 || !crate::guc::guard_scan_writes()
             {
@@ -326,7 +327,7 @@ mod live {
                     table_oid,
                 )
             };
-            let join_probe = if where_sql.is_none() && (*query_desc).operation != pg_sys::CmdType::CMD_MERGE {
+            let join_probe = if where_sql.is_none() {
                 crate::hooks::dml_planner::probe_sql_of((*planned).planTree).and_then(|sql| {
                     crate::hooks::dml_planner::collect_params((*query_desc).params).map(|params| (sql, params))
                 })
@@ -375,9 +376,10 @@ mod live {
         enforce_unverifiable_scan_guard(candidate);
     }
 
-    /// The same check for a statement that joins or uses a sub-query: counts the
-    /// cold-only target rows its join matches with the probe SELECT prepared at
-    /// plan time. Skipped under the same conditions as the single-table check.
+    /// The same check for a statement that joins or uses a sub-query (including `MERGE`,
+    /// which is inherently a join of target and source): counts the cold-only target rows
+    /// its join matches with the probe SELECT prepared at plan time. Skipped under the same
+    /// conditions as the single-table check.
     fn enforce_join_cold_match_guard(candidate: &GuardCandidate) {
         let Some((sql, params)) = candidate.join_probe.as_ref() else {
             return;
@@ -399,9 +401,11 @@ mod live {
         if cold_matches > 0 {
             let table_name = crate::catalog::resolve::qualified_relation_name(candidate.table_oid)
                 .unwrap_or_else(|_| "?".to_string());
+            let statement = if candidate.is_merge { "MERGE" } else { "UPDATE/DELETE" };
+            let clause = if candidate.is_merge { "ON clause" } else { "join or sub-query" };
             pgrx::error!(
-                "koldstore: refusing this UPDATE/DELETE on managed table {table_name} -- its join or sub-query \
-                 also matches {cold_matches} cold row(s) that a plain statement cannot modify (they live in \
+                "koldstore: refusing this {statement} on managed table {table_name} -- its {clause} also \
+                 matches {cold_matches} cold row(s) that a plain statement cannot modify (they live in \
                  Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/\
                  delete_row(), or narrow the statement to hot rows; if those keys were changed moments ago, \
                  call koldstore.wait_for_async_mirror() and retry (upstream issue #122)"
@@ -415,8 +419,18 @@ mod live {
     /// which keys the source held is gone once the statement ends, so cold rows
     /// it should have changed cannot be detected afterwards. Fail closed when
     /// cold data exists (upstream #122).
+    ///
+    /// Skipped when `enforce_join_cold_match_guard` already ran a precise recount instead (the
+    /// planner hook could reproduce the `ON` clause as a probe, same as a joined UPDATE/DELETE):
+    /// that check already caught a genuine cold-only match, and by the time it runs, any row
+    /// `koldstore.hydrate_on_write` hydrated before the native statement scanned is hot, not
+    /// cold-only, so this blanket check would otherwise reject a MERGE that hydration already
+    /// made safe to run.
     fn enforce_unverifiable_merge_guard(candidate: &GuardCandidate) {
-        if !candidate.merge_changes_rows || !crate::guc::guard_scan_writes() || crate::sql::cold_dml::guard::suspended()
+        if !candidate.merge_changes_rows
+            || candidate.join_probe.is_some()
+            || !crate::guc::guard_scan_writes()
+            || crate::sql::cold_dml::guard::suspended()
         {
             return;
         }

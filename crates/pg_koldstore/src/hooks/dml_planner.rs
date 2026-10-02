@@ -1,6 +1,8 @@
 //! Planner hook that prepares the cold-match probe for `UPDATE`/`DELETE`
 //! statements a plain plan-qual deparse cannot reproduce: joins (`FROM`,
 //! `USING`) and sub-queries (`IN (SELECT ...)`, `EXISTS`, ...), upstream #122.
+//! `MERGE` always needs this probe (it is inherently a join of target and
+//! source; there is no single-table shape for it to fall back to).
 //!
 //! A plain UPDATE/DELETE only sees the hot heap, so a cold-only row that the
 //! statement's join would have matched is silently skipped. Detecting that needs
@@ -12,12 +14,30 @@
 //! never evaluates) so it survives plan caching and reaches `ExecutorEnd`, where
 //! `hooks::executor` counts the cold-only rows it matches.
 //!
+//! `MERGE`'s own parse tree is a special case worth spelling out, confirmed against
+//! the PostgreSQL 18 source (`parse_merge.c`/`prepjointree.c`): `Query.mergeJoinCondition`
+//! holds the `ON` clause as a *separate* field, not folded into `Query.jointree`'s quals
+//! (which stay `NULL`), and `Query.jointree.fromlist` at this point holds only the
+//! *source* relation -- the target is deliberately left out of the join at parse time
+//! ("the join will be constructed fully by `transform_MERGE_to_join`", per that file's own
+//! comment), and that transform runs later, inside `standard_planner` itself, which this
+//! hook calls *after* building the probe. So the probe must add the target relation to a
+//! cloned `jointree.fromlist` itself and use `mergeJoinCondition` as the new `WHERE`,
+//! rather than just reusing the existing jointree the way the `UPDATE`/`DELETE` probe does.
+//! A plain comma-join (`FROM target, source WHERE <mergeJoinCondition>`) is sufficient for
+//! the probe's purpose -- finding target rows an action could touch -- even though the real
+//! executed `MERGE` may need PostgreSQL's own more elaborate outer join to additionally
+//! process `WHEN NOT MATCHED` cases, which the probe does not care about: hydrating a target
+//! row the `ON` condition matches is correct regardless of which `WHEN` clause (if any) ends
+//! up acting on it, and an insert-only `MERGE` (no `WHEN MATCHED`/`NOT MATCHED BY SOURCE`
+//! action that changes an existing row) gets no probe at all, since it never touches one.
+//!
 //! Anything that cannot be re-run faithfully (volatile functions, CTEs,
 //! `CURRENT OF`, no primary key) simply gets no probe: never a false rejection.
 
 use std::ffi::{c_int, CStr, CString};
 
-use pgrx::pg_sys;
+use pgrx::{pg_sys, PgBox};
 
 /// First bytes of the marker constant carrying the probe SQL.
 pub(crate) const PROBE_MARKER: &str = "/*koldstore:cold-match*/";
@@ -57,18 +77,26 @@ unsafe extern "C-unwind" fn planner(
     }
 }
 
-/// The probe SQL for `parse`, when it is a join/sub-query `UPDATE`/`DELETE` on
-/// a managed table whose statement can be re-run as a `SELECT`.
+/// The probe SQL for `parse`, when it is a join/sub-query `UPDATE`/`DELETE`, or any
+/// row-changing `MERGE`, on a managed table whose statement can be re-run as a `SELECT`.
 unsafe fn build_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
     unsafe {
         if parse.is_null() || !crate::catalog::cache::managed_catalog_ready() {
             return None;
         }
+        match (*parse).commandType {
+            pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE => build_update_delete_probe_sql(parse),
+            pg_sys::CmdType::CMD_MERGE => build_merge_probe_sql(parse),
+            _ => None,
+        }
+    }
+}
+
+/// The probe SQL for a join/sub-query `UPDATE`/`DELETE` (see `build_probe_sql`).
+unsafe fn build_update_delete_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
+    unsafe {
         let query = &*parse;
-        if !matches!(query.commandType, pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE)
-            || query.resultRelation <= 0
-            || query.jointree.is_null()
-        {
+        if query.resultRelation <= 0 || query.jointree.is_null() {
             return None;
         }
         // Only shapes the single-table deparse could not handle.
@@ -141,6 +169,111 @@ unsafe fn build_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
         (*select).targetList = target_list;
         (*select).returningList = std::ptr::null_mut();
         (*select).mergeActionList = std::ptr::null_mut();
+        (*select).withCheckOptions = std::ptr::null_mut();
+        (*select).rowMarks = std::ptr::null_mut();
+        (*select).canSetTag = true;
+        (*select).hasTargetSRFs = false;
+
+        let text = pg_sys::pg_get_querydef(select, false);
+        if text.is_null() {
+            return None;
+        }
+        let inner = CStr::from_ptr(text).to_string_lossy().into_owned();
+        Some(inner)
+    }
+}
+
+/// The probe SQL for a `MERGE` whose target's own `ModifyTable` is on a managed table (see
+/// `build_probe_sql` and the module doc comment for why this needs its own construction,
+/// distinct from the `UPDATE`/`DELETE` path above).
+unsafe fn build_merge_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
+    unsafe {
+        let query = &*parse;
+        if query.resultRelation <= 0 || query.jointree.is_null() || query.mergeJoinCondition.is_null() {
+            return None;
+        }
+        if !query.cteList.is_null() || query.hasModifyingCTE {
+            return None;
+        }
+        // An insert-only MERGE (every action is WHEN NOT MATCHED THEN INSERT, or DO NOTHING)
+        // never touches an existing target row, so there is nothing to hydrate -- and nothing
+        // for this probe to usefully find either.
+        let changes_rows = crate::merge_scan::pg::literals::list_node_pointers(query.mergeActionList)
+            .into_iter()
+            .any(|action| {
+                let action = action.cast::<pg_sys::MergeAction>();
+                !action.is_null()
+                    && matches!((*action).commandType, pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE)
+            });
+        if !changes_rows {
+            return None;
+        }
+        let rte_index = usize::try_from(query.resultRelation).ok()?;
+        let rte = crate::merge_scan::pg::literals::list_node_pointers(query.rtable)
+            .get(rte_index - 1)
+            .copied()?
+            .cast::<pg_sys::RangeTblEntry>();
+        if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+            return None;
+        }
+        let table_oid = (*rte).relid;
+        let snapshot = crate::merge_scan::pg::with_hook_disabled(|| {
+            (crate::catalog::cache::is_managed_relation(table_oid))
+                .then(|| crate::catalog::cache::managed_table_snapshot(table_oid).ok().flatten())
+                .flatten()
+        })?;
+        let pk_attnums: Vec<i16> = snapshot.primary_key_columns.iter().map(|column| column.column_id.get()).collect();
+        if pk_attnums.is_empty() {
+            return None;
+        }
+        // Volatile functions cannot be re-evaluated; MERGE has no WHERE CURRENT OF to worry about.
+        if pg_sys::contain_volatile_functions(query.mergeJoinCondition)
+            || pg_sys::contain_volatile_functions(query.jointree.cast())
+        {
+            return None;
+        }
+
+        let select = pg_sys::copyObjectImpl(parse.cast()).cast::<pg_sys::Query>();
+        let mut target_list: *mut pg_sys::List = std::ptr::null_mut();
+        for (index, attnum) in pk_attnums.iter().enumerate() {
+            let mut type_oid = pg_sys::InvalidOid;
+            let mut typmod: i32 = -1;
+            let mut collation = pg_sys::InvalidOid;
+            pg_sys::get_atttypetypmodcoll(table_oid, *attnum, &mut type_oid, &mut typmod, &mut collation);
+            if type_oid == pg_sys::InvalidOid {
+                return None;
+            }
+            let var = pg_sys::makeVar(query.resultRelation, *attnum, type_oid, typmod, collation, 0);
+            let resno = i16::try_from(index + 1).ok()?;
+            target_list = pg_sys::lappend(
+                target_list,
+                pg_sys::makeTargetEntry(var.cast(), resno, std::ptr::null_mut(), false).cast(),
+            );
+        }
+
+        // The target relation is deliberately absent from `jointree.fromlist` at this point
+        // (see the module doc comment); add it, and reuse the `ON` clause as the new `WHERE` --
+        // a plain comma-join is enough for the probe's purpose.
+        let select_jointree = (*select).jointree;
+        let mut target_ref = PgBox::<pg_sys::RangeTblRef>::alloc_node(pg_sys::NodeTag::T_RangeTblRef);
+        target_ref.rtindex = query.resultRelation;
+        (*select_jointree).fromlist = pg_sys::lappend((*select_jointree).fromlist, target_ref.into_pg().cast());
+        (*select_jointree).quals = (*select).mergeJoinCondition;
+
+        // The target's range-table entry is not "in the FROM clause" for a MERGE either; mark
+        // it the same way the UPDATE/DELETE path does.
+        let select_rte = crate::merge_scan::pg::literals::list_node_pointers((*select).rtable)
+            .get(rte_index - 1)
+            .copied()?
+            .cast::<pg_sys::RangeTblEntry>();
+        (*select_rte).inFromCl = true;
+        (*select).commandType = pg_sys::CmdType::CMD_SELECT;
+        (*select).resultRelation = 0;
+        (*select).mergeTargetRelation = 0;
+        (*select).mergeJoinCondition = std::ptr::null_mut();
+        (*select).mergeActionList = std::ptr::null_mut();
+        (*select).targetList = target_list;
+        (*select).returningList = std::ptr::null_mut();
         (*select).withCheckOptions = std::ptr::null_mut();
         (*select).rowMarks = std::ptr::null_mut();
         (*select).canSetTag = true;

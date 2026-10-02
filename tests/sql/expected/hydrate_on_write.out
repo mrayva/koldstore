@@ -572,6 +572,70 @@ RESET
   5
 (4 rows)
 
+CREATE TABLE
+INSERT 0 6
+ merge_managed
+---------------
+ t
+(1 row)
+
+ merge_flushed
+---------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+SET
+ merge_update_cold
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ row_1_after_merge_update
+--------------------------
+ merged
+(1 row)
+
+ merge_delete_multirow_cold
+----------------------------
+ ok: 2
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ rows_2_3_after_merge_delete
+-----------------------------
+ 0
+(1 row)
+
+ merge_insert_only
+-------------------
+ ok: 1
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+ row_100_after_merge_insert
+----------------------------
+ new
+(1 row)
+
+RESET
  flush_after_hydration
 -----------------------
  t

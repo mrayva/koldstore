@@ -211,9 +211,19 @@ INSERT 0 6
  REJECTED write pk={"id":"2"}
 (1 row)
 
-                                                                                                                                                                                                         merge_new_key_inserts
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: refusing this MERGE on managed table sqlreg.g1 -- it updates or deletes target rows through a join, and the join only sees hot rows, so matching cold rows would be silently skipped. Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts the risk (upstream issue #122)
+ merge_new_key_inserts
+-----------------------
+ ok: 1
+(1 row)
+
+                                                                                                        merge_not_matched_insert_guard_catches_cold
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing INSERT on managed table "sqlreg"."g1" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+(1 row)
+
+                                                                                                                                                                                              merge_multirow_matched_only_cold
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this MERGE on managed table sqlreg.g1 -- its ON clause also matches 2 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the statement to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
 (1 row)
 
  merge_update_hot
@@ -261,7 +271,8 @@ INSERT 0 6
   7 | mh
   8 | v8
   9 | v9
-(8 rows)
+ 11 | m
+(9 rows)
 
 CREATE TABLE
 INSERT 0 4

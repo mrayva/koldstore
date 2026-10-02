@@ -215,10 +215,10 @@ Known limits of the prototype (all fail closed or are documented, none silent):
   planner hook's probe (2026-09-26): the probe is a `SELECT` of the target's primary key over
   the statement's whole `FROM`/`WHERE`, and hydration looks for cold-only rows matching
   `(pk) IN (probe)` with the statement's own parameters bound (prepared statements work).
-  A single-table data-modifying CTE's own target is hydrated too (fixed 2026-10-02, see the
-  dated entry near the end of this file); a CTE with a join/sub-query source, and `MERGE`
-  (top-level or inside a CTE), still fall through to the guards (which reject), as do
-  statements the probe cannot reproduce (volatile functions, `CURRENT OF`).
+  A single-table data-modifying CTE's own target is hydrated too, and so is any row-changing
+  `MERGE` (both fixed 2026-10-02, see the dated entries near the end of this file); a CTE with a
+  join/sub-query source, or a `MERGE` inside a CTE, still fall through to the guards (which
+  reject), as do statements the probe cannot reproduce (volatile functions, `CURRENT OF`).
 - **User triggers (resolved 2026-09-26): the hydration `INSERT` no longer fires them.**
   The prototype originally fired user `AFTER INSERT` triggers for the hydrated row,
   so deleting one cold row logged `INSERT` then `DELETE`. Hydration now runs under
@@ -483,9 +483,9 @@ mechanism neither attempt here built) or accept the serialization and focus pure
 between waiters (closer to what plain polling already does) rather than priority.
 
 Open items before this could be defaulted on: the double-delete row count (a statement racing a
-delete reports the same count native PostgreSQL would only sometimes), `MERGE` support, and a
-partitioned-table story. (`REPEATABLE READ`/`SERIALIZABLE` closed 2026-10-01, single-table
-data-modifying CTE hydration closed 2026-10-02, see below.)
+delete reports the same count native PostgreSQL would only sometimes), and a partitioned-table
+story. (`REPEATABLE READ`/`SERIALIZABLE` closed 2026-10-01; single-table data-modifying CTE
+hydration and `MERGE` support closed 2026-10-02, see below.)
 
 Data-modifying CTE hydration (2026-10-02). The hook gated entirely on the top-level statement's
 own `CmdType` being `UPDATE`/`DELETE`, so `WITH d AS (DELETE FROM t WHERE ... RETURNING ...)
@@ -503,11 +503,57 @@ top-level case exactly: a CTE whose own `WHERE` joins or sub-queries never gets 
 probe either, because that hook only runs on the outermost statement and declines outright on
 `hasModifyingCTE`/`cteList` (`hooks::dml_planner::build_probe_sql`) -- confirmed live, such a CTE
 still falls through to the write guard's unverifiable-scan rejection, unchanged. `MERGE` (top-level
-or inside a CTE) was explicitly not attempted: it has no probe mechanism at all today, a larger,
-separate piece of work. New regression cases (`tests/sql/hydrate_on_write.sql`, dedicated
-`sqlreg.h_cte`/`h_cte2` fixtures to avoid colliding with `h1`'s already-dense id space) cover a CTE
-`DELETE`, a CTE `UPDATE`, and a join-shaped CTE source (still correctly rejected, unhydrated). Full
-18-case SQL regression suite green, clippy clean.
+or inside a CTE) was explicitly not attempted this round: it has no probe mechanism at all, a
+larger, separate piece of work -- closed the same day, see below. New regression cases
+(`tests/sql/hydrate_on_write.sql`, dedicated `sqlreg.h_cte`/`h_cte2` fixtures to avoid colliding
+with `h1`'s already-dense id space) cover a CTE `DELETE`, a CTE `UPDATE`, and a join-shaped CTE
+source (still correctly rejected, unhydrated). Full 18-case SQL regression suite green, clippy
+clean.
+
+`MERGE` support (2026-10-02). Built the probe mechanism the entry above explicitly deferred.
+`MERGE`'s own parse tree needed its own investigation, confirmed against the actual PostgreSQL 18
+source rather than assumed: `parse_merge.c` stores the `ON` clause in a *separate* field
+(`Query.mergeJoinCondition`), not folded into `Query.jointree`'s quals (which stay `NULL`), and --
+more surprising -- `Query.jointree.fromlist` at parse time holds only the *source* relation; the
+target is deliberately left out ("the join will be constructed fully by
+`transform_MERGE_to_join`", per that file's own comment), and `prepjointree.c` confirms that
+transform runs from inside `standard_planner` itself, which this hook calls *after* building the
+probe. So the planner hook (`hooks::dml_planner`) builds its own `SELECT <target pk> FROM target,
+source WHERE <mergeJoinCondition>` -- a plain comma-join is enough for the probe's purpose (finding
+target rows an action could touch), even though the executed `MERGE` may need PostgreSQL's own
+outer join to additionally process `WHEN NOT MATCHED` cases, which the probe does not care about.
+Only built when some action actually changes an existing row (`WHEN MATCHED`/`WHEN NOT MATCHED BY
+SOURCE` `UPDATE`/`DELETE`) -- an insert-only `MERGE` never touches one, so there is nothing to
+hydrate. `MERGE` inside a CTE is not attempted (the probe-building hook only runs on the outermost
+statement, same limit the CTE case above already has for a join/sub-query).
+
+Necessary side fix, not optional: the cold-DML write guard's own `MERGE` check
+(`enforce_unverifiable_merge_guard`) previously rejected *any* row-changing `MERGE` whenever the
+table had cold data *anywhere*, with no recount of whether the join actually matched any of it --
+unlike the `UPDATE`/`DELETE` join case, which already had a precise probe-based recount. Without
+fixing this, hydration would still work, but the guard would then unconditionally reject the
+statement anyway afterward, since hydrating specific matched rows does nothing to the table's
+`has_cold` status as a whole. Now `enforce_join_cold_match_guard` (same function the `UPDATE`/
+`DELETE` join case already used) also runs for `MERGE`, with the message branching on
+`candidate.is_merge` for accurate wording; `enforce_unverifiable_merge_guard` skips whenever a
+probe exists, since that means the precise check already ran. This also fixes a real, independent
+false positive in the existing guard found while testing (confirmed red before, green after,
+unrelated to `hydrate_on_write` being on or off): a `MERGE` with `WHEN MATCHED THEN UPDATE ... WHEN
+NOT MATCHED THEN INSERT` against a brand-new key (no match, hot or cold, anywhere) used to be
+blanket-rejected purely because the table had unrelated cold data elsewhere; it now correctly
+succeeds. A `WHEN NOT MATCHED THEN INSERT` against a genuinely cold-only key is still correctly
+rejected either way, just by a different, pre-existing guard first (koldstore's own insert-exists
+check, which fires during the native statement's own attempted `INSERT`, before this guard's
+`ExecutorEnd`-time check ever runs) -- confirmed live and kept as its own regression case, since it
+demonstrates the two guards still compose correctly rather than leaving a gap.
+
+Verified: new regression cases in both `tests/sql/cold_dml_guard.sql` (the false-positive fix, plus
+a genuine multi-row `WHEN MATCHED`-only cold rejection that actually exercises the new join-probe
+path end to end -- a single-row source collapses to the pre-existing exact-PK guard instead,
+confirmed unaffected) and `tests/sql/hydrate_on_write.sql` (dedicated `sqlreg.h_merge` fixture: a
+`WHEN MATCHED UPDATE` and a multi-row `WHEN MATCHED DELETE` against cold rows both hydrate and
+succeed; an insert-only `MERGE` against a nonexistent key is unaffected, as expected). Full 18-case
+SQL regression suite green (run twice), clippy clean.
 
 `REPEATABLE READ` / `SERIALIZABLE` support (2026-10-01). The "transaction snapshot cannot be
 advanced" framing above turned out to conflate two different things. PostgreSQL's own-transaction
