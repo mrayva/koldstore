@@ -84,6 +84,20 @@ BEGIN
   END IF;
 END $$;
 
+-- Regression: a semi-join (IN) whose sub-query joins the PARENT to a VALUES list used to crash the
+-- whole server. KoldMergeScan replaced the managed leaf's path list with wrappers around only its
+-- cheapest native path; under that join the cheapest was an index scan parameterized by the VALUES
+-- rows, so the leaf was left with no unparameterized path and PostgreSQL's append planning
+-- dereferenced a NULL path. A managed relation must always keep an unparameterized path.
+SELECT count(*)::bigint AS parent_in_parent_join_values
+FROM sqlreg.p_sales t
+WHERE (t.id, t.region) IN (
+  SELECT s.id, s.region FROM sqlreg.p_sales s, (VALUES (3::bigint), (998)) v(i) WHERE s.id = v.i);
+SELECT count(*)::bigint AS leaf_in_parent_join_values
+FROM sqlreg.p_sales_east t
+WHERE (t.id, t.region) IN (
+  SELECT s.id, s.region FROM sqlreg.p_sales s, (VALUES (3::bigint), (4), (998)) v(i) WHERE s.id = v.i);
+
 -- ------------------------- write guard covers the parent, per leaf
 -- (docs/limitations.md, ADR-008). PostgreSQL lists every partition in
 -- PlannedStmt.resultRelations for a parent-routed statement but gives
@@ -91,7 +105,9 @@ END $$;
 -- The guard recovers each managed leaf's own filter from its scan node and
 -- runs the same cold-match recount as for a plain table; a leaf with no scan
 -- (pruned at plan time) cannot be touched and is skipped. Shapes that cannot
--- be attributed to a leaf (a join, MERGE) still fail closed.
+-- be attributed to a leaf (a join, a sub-query, MERGE) use the planner hook's
+-- probe, built against the parent, which the recount reads once merged and
+-- once hot-only per managed leaf.
 CREATE FUNCTION sqlreg.try(stmt text) RETURNS text
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -149,19 +165,44 @@ SELECT sqlreg.try($$EXECUTE sqlreg_bump(999)$$) AS generic_plan_hot_param_succee
 DEALLOCATE sqlreg_bump;
 RESET plan_cache_mode;
 
--- A real join over several leaves cannot be attributed to a leaf: fails closed
--- (coarsely) even for hot rows, the documented remaining imprecision. (A join
--- the planner folds into a single-leaf index scan, e.g. a one-row VALUES with a
--- literal partition key, is just an ordinary precise statement.)
+-- A real join over several leaves cannot be attributed to one leaf, so the probe stands in.
+-- A join that only reaches hot rows succeeds...
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales s SET amt = amt + 1
                     FROM (VALUES (999::bigint), (998)) v(i) WHERE s.id = v.i$$)
-  AS parent_update_from_join_refused_coarsely;
+  AS parent_update_from_join_hot_ids_succeeds;
+-- ...and one that reaches a cold row is refused with the precise join message.
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales s SET amt = amt + 1
+                    FROM (VALUES (5::bigint), (998)) v(i) WHERE s.id = v.i$$)
+  AS parent_update_from_join_cold_id_refused;
+SELECT sqlreg.try($$DELETE FROM sqlreg.p_sales WHERE id IN (SELECT 5::bigint)$$)
+  AS parent_delete_subquery_cold_id_refused;
+
+-- MERGE through the parent takes the same path. A WHEN MATCHED action that reaches a cold row
+-- is refused...
+SELECT sqlreg.try($$MERGE INTO sqlreg.p_sales t
+                    USING (VALUES (5::bigint, 'east'::text)) v(i, r) ON t.id = v.i AND t.region = v.r
+                    WHEN MATCHED THEN UPDATE SET amt = t.amt + 1$$)
+  AS parent_merge_matched_cold_row_refused;
+-- ...one that only matches a hot row succeeds...
+SELECT sqlreg.try($$MERGE INTO sqlreg.p_sales t
+                    USING (VALUES (999::bigint, 'east'::text)) v(i, r) ON t.id = v.i AND t.region = v.r
+                    WHEN MATCHED THEN UPDATE SET amt = t.amt + 1$$)
+  AS parent_merge_matched_hot_row_succeeds;
+-- ...and an insert-only MERGE of a new key is not held up by the leaf's unrelated cold data.
+SELECT sqlreg.try($$MERGE INTO sqlreg.p_sales t
+                    USING (VALUES (7000::bigint, 'east'::text, 70::bigint)) v(i, r, a)
+                    ON t.id = v.i AND t.region = v.r
+                    WHEN NOT MATCHED THEN INSERT (id, region, amt) VALUES (v.i, v.r, v.a)$$)
+  AS parent_merge_insert_only_succeeds;
+SELECT amt AS id7000_amt FROM sqlreg.p_sales WHERE id = 7000 AND region = 'east';
+SELECT sqlreg.try($$DELETE FROM sqlreg.p_sales WHERE id = 7000 AND region = 'east'$$) AS id7000_cleanup;
 
 -- ------------------------- hydrate-on-write through the parent, per leaf
 -- With koldstore.hydrate_on_write on, a parent-routed UPDATE/DELETE changes cold-only rows
 -- instead of being refused: each managed leaf's own scan filter selects the cold rows to insert
--- into that leaf's heap first, then the native statement runs. Shapes that cannot be attributed
--- to one leaf (a join across partitions, MERGE) still fall through to the write guard.
+-- into that leaf's heap first, then the native statement runs. A join across partitions, a
+-- sub-query and MERGE cannot be attributed to one leaf, so they use the planner hook's probe over
+-- the parent: a leaf hydrates the cold-only rows whose primary key the probe returns.
 SET koldstore.hydrate_on_write = on;
 
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1000 WHERE id = 3 AND region = 'east'$$)
@@ -190,15 +231,25 @@ SELECT count(*)::bigint AS id5_rows_in_west FROM sqlreg.p_sales_west WHERE id = 
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE region = 'west' AND id = 102$$)
   AS hydrate_unmanaged_leaf_only;
 
--- Still refused: a join across partitions cannot be attributed to a leaf, and MERGE has no probe.
+-- A join across partitions hydrates through the probe.
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales s SET amt = amt + 1
                     FROM (VALUES (6::bigint), (998)) v(i) WHERE s.id = v.i$$)
-  AS hydrate_join_still_refused;
+  AS hydrate_join_update;
+SELECT amt AS id6_amt_after_join_update FROM sqlreg.p_sales WHERE id = 6 AND region = 'east';
+
+-- MERGE through the parent hydrates through the same probe: an UPDATE action...
 SELECT sqlreg.try($$MERGE INTO sqlreg.p_sales t
                     USING (VALUES (6::bigint, 'east'::text)) v(i, r) ON t.id = v.i AND t.region = v.r
                     WHEN MATCHED THEN UPDATE SET amt = t.amt + 1$$)
-  AS hydrate_merge_still_refused;
-SELECT amt AS id6_amt_unchanged FROM sqlreg.p_sales WHERE id = 6 AND region = 'east';
+  AS hydrate_merge_update;
+SELECT amt AS id6_amt_after_merge_update FROM sqlreg.p_sales WHERE id = 6 AND region = 'east';
+-- ...and a DELETE action.
+SELECT sqlreg.try($$MERGE INTO sqlreg.p_sales t
+                    USING (VALUES (6::bigint, 'east'::text)) v(i, r) ON t.id = v.i AND t.region = v.r
+                    WHEN MATCHED THEN DELETE$$)
+  AS hydrate_merge_delete;
+SELECT koldstore.wait_for_async_mirror() >= 0 AS mirror_settled_merge;
+SELECT count(*)::bigint AS id6_rows_left FROM sqlreg.p_sales WHERE id = 6;
 
 RESET koldstore.hydrate_on_write;
 
@@ -239,6 +290,14 @@ SET koldstore.hydrate_on_write = on;
 -- One statement, cold rows in BOTH managed leaves: each leaf hydrates its own matches.
 SELECT sqlreg.try($$UPDATE sqlreg.p2 SET amt = amt + 1 WHERE id IN (2, 3)$$) AS p2_update_hits_both_leaves;
 SELECT id, region, amt FROM sqlreg.p2 ORDER BY region, id;
+-- A MERGE whose source matches cold rows in BOTH managed leaves, and also inserts a new key.
+SELECT sqlreg.try($$MERGE INTO sqlreg.p2 t
+                    USING (VALUES (1::bigint, 'a'::text), (1, 'b'), (9, 'a')) v(i, r)
+                    ON t.id = v.i AND t.region = v.r
+                    WHEN MATCHED THEN UPDATE SET amt = t.amt + 5
+                    WHEN NOT MATCHED THEN INSERT (id, region, amt) VALUES (v.i, v.r, 1)$$)
+  AS p2_merge_hits_both_leaves;
+SELECT id, region, amt FROM sqlreg.p2 WHERE id IN (1, 9) ORDER BY region, id;
 SELECT sqlreg.try($$DELETE FROM sqlreg.p2$$) AS p2_unconditional_delete_hits_both_leaves;
 SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS mirror_settled_p2;
 SELECT count(*)::bigint AS p2_rows_left FROM sqlreg.p2;

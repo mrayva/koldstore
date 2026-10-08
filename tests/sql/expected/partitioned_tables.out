@@ -69,6 +69,16 @@ INSERT 0 1
 (1 row)
 
 DO
+ parent_in_parent_join_values
+------------------------------
+                            1
+(1 row)
+
+ leaf_in_parent_join_values
+----------------------------
+                          2
+(1 row)
+
 CREATE FUNCTION
                                                                                                                                                                                                           parent_update_of_cold_row_refused
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -159,9 +169,44 @@ PREPARE
 
 DEALLOCATE
 RESET
-                                                                                                                                                                                                                                     parent_update_from_join_refused_coarsely
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
+ parent_update_from_join_hot_ids_succeeds
+------------------------------------------
+ ok
+(1 row)
+
+                                                                                                                                                                                                        parent_update_from_join_cold_id_refused
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its join or sub-query also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the statement to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+                                                                                                                                                                                                       parent_delete_subquery_cold_id_refused
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its WHERE clause also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+                                                                                                                                                                                                 parent_merge_matched_cold_row_refused
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this MERGE on managed table sqlreg.p_sales_east -- its ON clause also matches 1 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the statement to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+ parent_merge_matched_hot_row_succeeds
+---------------------------------------
+ ok
+(1 row)
+
+ parent_merge_insert_only_succeeds
+-----------------------------------
+ ok
+(1 row)
+
+ id7000_amt
+------------
+         70
+(1 row)
+
+ id7000_cleanup
+----------------
+ ok
 (1 row)
 
 SET
@@ -226,26 +271,46 @@ SET
  ok
 (1 row)
 
-                                                                                                                                                                                                                                            hydrate_join_still_refused
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
+ hydrate_join_update
+---------------------
+ ok
 (1 row)
 
-                                                                                                                                                                                                                                hydrate_merge_still_refused
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: refusing this MERGE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so matching cold rows would be silently skipped. Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts the risk (upstream issue #122)
+ id6_amt_after_join_update
+---------------------------
+                        61
 (1 row)
 
- id6_amt_unchanged
--------------------
-                60
+ hydrate_merge_update
+----------------------
+ ok
+(1 row)
+
+ id6_amt_after_merge_update
+----------------------------
+                         62
+(1 row)
+
+ hydrate_merge_delete
+----------------------
+ ok
+(1 row)
+
+ mirror_settled_merge
+----------------------
+ t
+(1 row)
+
+ id6_rows_left
+---------------
+             0
 (1 row)
 
 RESET
 ALTER TABLE
  east_leaf_count_after_detach
 ------------------------------
-                            6
+                            5
 (1 row)
 
  parent_total_after_detach
@@ -305,6 +370,18 @@ SET
   3 | b      | 301
   4 | b      | 400
 (8 rows)
+
+ p2_merge_hits_both_leaves
+---------------------------
+ ok
+(1 row)
+
+ id | region | amt
+----+--------+-----
+  1 | a      |  15
+  9 | a      |   1
+  1 | b      | 105
+(3 rows)
 
  p2_unconditional_delete_hits_both_leaves
 ------------------------------------------

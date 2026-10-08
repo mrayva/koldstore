@@ -63,11 +63,12 @@ mod live {
         is_merge: bool,
         /// This candidate is one of several result relations in the same statement
         /// (a partitioned/inherited target, ADR-008) rather than the lone target of
-        /// an ordinary single-table statement. `raw`/`join_probe` are always `None`
-        /// for one of these; `where_sql` is the leaf's own scan filter when the plan
-        /// shape allows it (`where_deparse::deparse_where_for_leaf`), otherwise the
-        /// candidate falls through to the unverifiable-shape guards, with a message
-        /// naming the real reason instead of their default wording.
+        /// an ordinary single-table statement. `raw` is always `None` for one of these;
+        /// `where_sql` is the leaf's own scan filter when the plan shape allows it
+        /// (`where_deparse::deparse_where_for_leaf`), otherwise `join_probe` is the planner
+        /// hook's probe over the parent, and only with neither does the candidate fall
+        /// through to the unverifiable-shape guards, with a message naming the real reason
+        /// instead of their default wording.
         multi_relation: bool,
     }
 
@@ -252,13 +253,16 @@ mod live {
     /// leaf has cold data elsewhere.
     ///
     /// Anything that cannot be attributed to a leaf this way -- MERGE (a join),
-    /// `UPDATE ... FROM`, a sub-query, a volatile qual, any plan node other than
-    /// `Append`/`MergeAppend` over plain scans -- yields a candidate with
-    /// `where_sql`/`join_probe` both `None`, which falls through to
-    /// `enforce_unverifiable_scan_guard`/`enforce_unverifiable_merge_guard` and
-    /// fails closed (refuse whenever the leaf has cold data at all), matching
-    /// the imprecision the codebase already accepts for other hard-to-verify
-    /// shapes. With `koldstore.hydrate_on_write` on, an `UPDATE`/`DELETE` whose
+    /// `UPDATE ... FROM`, a sub-query, any plan node other than `Append`/
+    /// `MergeAppend` over plain scans -- uses the planner hook's probe instead
+    /// (`hooks::dml_planner`, built against the partitioned parent): the join
+    /// guard's merged-minus-hot-only recount isolates each managed leaf's
+    /// cold-only matches. Only when no probe exists either (a volatile qual, a
+    /// shape the hook declines) does the candidate have `where_sql`/`join_probe`
+    /// both `None`, fall through to `enforce_unverifiable_scan_guard`/
+    /// `enforce_unverifiable_merge_guard` and fail closed (refuse whenever the
+    /// leaf has cold data at all), the imprecision the codebase accepts for
+    /// other hard-to-verify shapes. With `koldstore.hydrate_on_write` on, an `UPDATE`/`DELETE` whose
     /// per-leaf filter could be recovered is hydrated before the native statement runs
     /// (`hydrate_on_write::leaf_targets`), which composes with the recount above; every
     /// shape that falls back to the unverifiable candidate is refused instead.
@@ -434,9 +438,9 @@ mod live {
                     continue;
                 }
                 // UPDATE/DELETE: recover this leaf's own filter from its scan under the
-                // shared `Append`. MERGE (a join, no probe mechanism for a partitioned
-                // target) and any shape that cannot be attributed to the leaf stay
-                // unverifiable and fail closed.
+                // shared `Append`. MERGE (a join) and any shape that cannot be attributed to
+                // the leaf use the probe below; with no probe either, the candidate stays
+                // unverifiable and fails closed.
                 let where_sql = if is_merge || !crate::guc::guard_scan_writes() {
                     None
                 } else {
@@ -451,11 +455,22 @@ mod live {
                         crate::hooks::where_deparse::LeafWhere::Unknown => None,
                     }
                 };
+                // No recoverable per-leaf filter (all of MERGE, or a join/sub-query across
+                // partitions): the planner hook's probe, built against the partitioned parent,
+                // stands in. Its recount reads `table_oid` once merged and once hot-only, so it
+                // counts exactly this leaf's cold-only matches even though it names the parent.
+                let join_probe = if where_sql.is_none() {
+                    crate::hooks::dml_planner::probe_sql_of((*planned).planTree).and_then(|sql| {
+                        crate::hooks::dml_planner::collect_params((*query_desc).params).map(|params| (sql, params))
+                    })
+                } else {
+                    None
+                };
                 candidates.push(GuardCandidate {
                     table_oid,
                     raw: None,
                     where_sql,
-                    join_probe: None,
+                    join_probe,
                     single_valued: false,
                     es_processed: 0,
                     prior_write: crate::txn_writes::was_written(table_oid),

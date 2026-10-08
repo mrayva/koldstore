@@ -62,9 +62,10 @@
 //! child plan is an `Append` of one filtered scan per surviving leaf, so each leaf's own scan
 //! filter (`hooks::where_deparse::deparse_where_for_leaf`) is the clause a plain statement on
 //! that leaf would carry, and the hydrating `INSERT` goes straight into the leaf (never back
-//! through the parent). Leaves the plan never scans are skipped; a shape that cannot be
-//! attributed to a leaf (a join across partitions, a volatile qual) and `MERGE` through the
-//! parent still fall through to the write guard, which refuses them. A partition-key-changing
+//! through the parent). Leaves the plan never scans are skipped. A shape that cannot be
+//! attributed to a leaf -- `MERGE`, a join across partitions, a sub-query -- hydrates through the
+//! planner hook's probe, built against the parent (`probe_target`); only a shape with no probe
+//! either (a volatile qual) falls through to the write guard, which refuses it. A partition-key-changing
 //! `UPDATE` never reaches hydration: a partitioned table's primary key must include the partition
 //! key, so moving a row across leaves is a primary-key update, which koldstore refuses on a
 //! managed table anyway.
@@ -214,25 +215,24 @@ unsafe fn top_level_targets(
             return Vec::new();
         }
         // A partitioned/inherited target lists every potential leaf here (including ones plan-time
-        // pruning removed), not just one. `MERGE` through such a parent stays with the write guard
-        // (no probe mechanism for it); `UPDATE`/`DELETE` hydrate each managed leaf separately.
+        // pruning removed), not just one; each managed leaf is hydrated separately.
         if (*result_relations).length > 1 {
-            return if (*query_desc).operation == pg_sys::CmdType::CMD_MERGE {
-                Vec::new()
-            } else {
-                leaf_targets(query_desc, planned, rtable, result_relations)
-            };
+            return leaf_targets(query_desc, planned, rtable, result_relations);
         }
         top_level_target(query_desc, planned).into_iter().collect()
     }
 }
 
-/// One target per managed leaf of a partitioned/inherited `UPDATE`/`DELETE`: the leaf's own scan
-/// filter (`hooks::where_deparse::deparse_where_for_leaf`) is exactly the clause a plain
-/// single-table statement on that leaf would carry, so the same cold-only comparison applies.
-/// A leaf the plan never scans (pruned at plan time) cannot be touched and is skipped; a leaf whose
-/// filter cannot be attributed (a join across leaves, a volatile qual) is left to the write guard,
-/// which refuses it -- the same fall-through an unreproducible single-table clause already gets.
+/// One target per managed leaf of a partitioned/inherited `UPDATE`/`DELETE`/`MERGE`.
+///
+/// Where the leaf's own scan filter can be recovered (`hooks::where_deparse::deparse_where_for_leaf`;
+/// `UPDATE`/`DELETE` only) it is exactly the clause a plain single-table statement on that leaf
+/// would carry. A leaf the plan never scans (pruned at plan time) cannot be touched and is skipped.
+/// Everything else -- all of `MERGE`, and a join or sub-query across partitions -- uses the planner
+/// hook's probe (`hooks::dml_planner`), which is built against the partitioned parent and selects
+/// the primary keys of every row the statement matches, in whichever leaf: a leaf then hydrates the
+/// cold-only rows whose key appears in it. With neither a filter nor a probe the leaf is left to the
+/// write guard, which refuses it -- the same fall-through an unreproducible single-table clause gets.
 unsafe fn leaf_targets(
     query_desc: *mut pg_sys::QueryDesc,
     planned: *mut pg_sys::PlannedStmt,
@@ -240,6 +240,7 @@ unsafe fn leaf_targets(
     result_relations: *mut pg_sys::List,
 ) -> Vec<HydrateTarget> {
     unsafe {
+        let is_merge = (*query_desc).operation == pg_sys::CmdType::CMD_MERGE;
         let mut targets = Vec::new();
         for index in 0..(*result_relations).length as usize {
             let range_table_index = (*(*result_relations).elements.add(index)).int_value;
@@ -256,20 +257,50 @@ unsafe fn leaf_targets(
             if !crate::catalog::cache::is_managed_relation(table_oid) {
                 continue;
             }
-            match crate::hooks::where_deparse::deparse_where_for_leaf(
-                (*planned).planTree,
-                rtable,
-                (*query_desc).params,
-                table_oid,
-            ) {
-                crate::hooks::where_deparse::LeafWhere::Sql(where_sql) => {
-                    targets.push(HydrateTarget { table_oid, where_sql, params: Vec::new() });
+            if !is_merge {
+                match crate::hooks::where_deparse::deparse_where_for_leaf(
+                    (*planned).planTree,
+                    rtable,
+                    (*query_desc).params,
+                    table_oid,
+                ) {
+                    crate::hooks::where_deparse::LeafWhere::Sql(where_sql) => {
+                        targets.push(HydrateTarget { table_oid, where_sql, params: Vec::new() });
+                        continue;
+                    }
+                    crate::hooks::where_deparse::LeafWhere::Absent => continue,
+                    crate::hooks::where_deparse::LeafWhere::Unknown => {}
                 }
-                crate::hooks::where_deparse::LeafWhere::Absent
-                | crate::hooks::where_deparse::LeafWhere::Unknown => {}
+            }
+            if let Some(target) = probe_target(query_desc, planned, table_oid) {
+                targets.push(target);
             }
         }
         targets
+    }
+}
+
+/// A leaf's target built from the planner hook's probe over the partitioned parent: the leaf's
+/// cold-only rows whose primary key the probe returns. The probe's output columns are the parent's
+/// primary-key columns, which a leaf shares, so both sides of the `IN` are listed *by name* in one
+/// order and the result does not depend on how either side lists its key. It stays an uncorrelated
+/// `IN`, like the single-table probe form: a correlated `EXISTS` would re-run the probe -- a scan of
+/// the managed leaf through the custom scan -- once per candidate row.
+unsafe fn probe_target(
+    query_desc: *mut pg_sys::QueryDesc,
+    planned: *mut pg_sys::PlannedStmt,
+    table_oid: pg_sys::Oid,
+) -> Option<HydrateTarget> {
+    unsafe {
+        let probe = crate::hooks::dml_planner::probe_sql_of((*planned).planTree)?;
+        let params = crate::hooks::dml_planner::collect_params((*query_desc).params)?;
+        let pk_columns = crate::sql::cold_dml::primary_key_columns(table_oid).ok()?;
+        let quoted: Vec<String> =
+            pk_columns.iter().map(|column| koldstore_common::sql::ident::quote_ident(column)).collect();
+        let outer = quoted.iter().map(|column| format!("t.{column}")).collect::<Vec<_>>().join(", ");
+        let inner = quoted.iter().map(|column| format!("koldstore_probe_rows.{column}")).collect::<Vec<_>>().join(", ");
+        let where_sql = format!("({outer}) IN (SELECT {inner} FROM ({probe}) AS koldstore_probe_rows)");
+        Some(HydrateTarget { table_oid, where_sql, params })
     }
 }
 

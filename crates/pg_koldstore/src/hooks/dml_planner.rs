@@ -85,7 +85,9 @@ unsafe extern "C-unwind" fn planner(
 }
 
 /// The probe SQL for `parse`, when it is a join/sub-query `UPDATE`/`DELETE`, or any
-/// row-changing `MERGE`, on a managed table whose statement can be re-run as a `SELECT`.
+/// row-changing `MERGE`, on a managed table -- or on a partitioned/inheritance parent, whose
+/// managed leaves share the parent's probe (see `probe_pk_attnums`) -- whose statement can be
+/// re-run as a `SELECT`.
 unsafe fn build_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
     unsafe {
         if parse.is_null() || !crate::catalog::cache::managed_catalog_ready() {
@@ -96,6 +98,60 @@ unsafe fn build_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
             pg_sys::CmdType::CMD_MERGE => build_merge_probe_sql(parse),
             _ => None,
         }
+    }
+}
+
+/// The primary-key attnums the probe selects for the DML target `table_oid`.
+///
+/// A managed table's own. A partitioned/inheritance parent can never be managed itself (ADR-008)
+/// but its managed leaves can, and a probe built against the *parent* serves every one of them:
+/// the write guard's recount runs it once with a leaf read through the merged view and once with
+/// that leaf forced hot-only, and the difference isolates the leaf's cold-only matches; hydration
+/// matches probe rows to a leaf's rows by primary-key column name. The parent's primary key is the
+/// leaf's (a partition's index must match the parent's), so the same columns select the same rows.
+unsafe fn probe_pk_attnums(table_oid: pg_sys::Oid) -> Option<Vec<i16>> {
+    unsafe {
+        let managed = crate::merge_scan::pg::with_hook_disabled(|| {
+            (crate::catalog::cache::is_managed_relation(table_oid))
+                .then(|| crate::catalog::cache::managed_table_snapshot(table_oid).ok().flatten())
+                .flatten()
+        });
+        let attnums: Vec<i16> = match managed {
+            Some(snapshot) => snapshot.primary_key_columns.iter().map(|column| column.column_id.get()).collect(),
+            None => hierarchy_parent_primary_key_attnums(table_oid)?,
+        };
+        (!attnums.is_empty()).then_some(attnums)
+    }
+}
+
+/// The primary-key attnums of a partitioned table or an inheritance parent, `None` for anything
+/// else (an ordinary unmanaged table has nothing for the guard or hydration to look at).
+unsafe fn hierarchy_parent_primary_key_attnums(table_oid: pg_sys::Oid) -> Option<Vec<i16>> {
+    unsafe {
+        let relation = pgrx::PgRelation::with_lock(table_oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE);
+        let class = relation.rd_rel;
+        if class.is_null() {
+            return None;
+        }
+        let partitioned = (*class).relkind == pg_sys::RELKIND_PARTITIONED_TABLE as std::ffi::c_char;
+        if !partitioned && !(*class).relhassubclass {
+            return None;
+        }
+        let bitmap = pg_sys::RelationGetIndexAttrBitmap(
+            relation.as_ptr(),
+            pg_sys::IndexAttrBitmapKind::INDEX_ATTR_BITMAP_PRIMARY_KEY,
+        );
+        let mut attnums = Vec::new();
+        let mut member = -1;
+        loop {
+            member = pg_sys::bms_next_member(bitmap, member);
+            if member < 0 {
+                break;
+            }
+            attnums.push(i16::try_from(member + pg_sys::FirstLowInvalidHeapAttributeNumber).ok()?);
+        }
+        pg_sys::bms_free(bitmap);
+        Some(attnums)
     }
 }
 
@@ -130,15 +186,7 @@ unsafe fn build_update_delete_probe_sql(parse: *mut pg_sys::Query) -> Option<Str
             return None;
         }
         let table_oid = (*rte).relid;
-        let snapshot = crate::merge_scan::pg::with_hook_disabled(|| {
-            (crate::catalog::cache::is_managed_relation(table_oid))
-                .then(|| crate::catalog::cache::managed_table_snapshot(table_oid).ok().flatten())
-                .flatten()
-        })?;
-        let pk_attnums: Vec<i16> = snapshot.primary_key_columns.iter().map(|column| column.column_id.get()).collect();
-        if pk_attnums.is_empty() {
-            return None;
-        }
+        let pk_attnums = probe_pk_attnums(table_oid)?;
         // Volatile functions and WHERE CURRENT OF cannot be re-evaluated.
         if pg_sys::contain_volatile_functions(query.jointree.cast()) {
             return None;
@@ -190,7 +238,7 @@ unsafe fn build_update_delete_probe_sql(parse: *mut pg_sys::Query) -> Option<Str
     }
 }
 
-/// The probe SQL for a `MERGE` whose target's own `ModifyTable` is on a managed table (see
+/// The probe SQL for a `MERGE` whose target is a managed table or a partitioned/inheritance parent (see
 /// `build_probe_sql` and the module doc comment for why this needs its own construction,
 /// distinct from the `UPDATE`/`DELETE` path above).
 unsafe fn build_merge_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
@@ -224,15 +272,7 @@ unsafe fn build_merge_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
             return None;
         }
         let table_oid = (*rte).relid;
-        let snapshot = crate::merge_scan::pg::with_hook_disabled(|| {
-            (crate::catalog::cache::is_managed_relation(table_oid))
-                .then(|| crate::catalog::cache::managed_table_snapshot(table_oid).ok().flatten())
-                .flatten()
-        })?;
-        let pk_attnums: Vec<i16> = snapshot.primary_key_columns.iter().map(|column| column.column_id.get()).collect();
-        if pk_attnums.is_empty() {
-            return None;
-        }
+        let pk_attnums = probe_pk_attnums(table_oid)?;
         // Volatile functions cannot be re-evaluated; MERGE has no WHERE CURRENT OF to worry about.
         if pg_sys::contain_volatile_functions(query.mergeJoinCondition)
             || pg_sys::contain_volatile_functions(query.jointree.cast())

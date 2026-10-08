@@ -16,8 +16,11 @@ doing nothing -- see "What shipped" below and `docs/limitations.md`.
 With `koldstore.hydrate_on_write` on, those `UPDATE`/`DELETE` statements now
 hydrate each managed leaf's cold matches instead of being refused (a fourth
 slice, 2026-10-08). The partition-key-changing `UPDATE` case turned out not
-to be a gap (see below). Only `MERGE` through the parent remains open,
-tracked in "Next step".
+to be a gap (see below). `MERGE` and joins/sub-queries across partitions
+are covered too, through the planner hook's probe built against the parent
+(a fifth slice, same day), which also exposed and fixed a server crash in
+koldstore's scan-path installation. Nothing is open for partitioned
+targets.
 
 ## Date
 
@@ -311,11 +314,45 @@ nothing hydrated or moved; the cross-partition join and `MERGE` still refused; a
 partitioned table with **both** leaves managed, where one statement hydrates cold rows in each.
 Full 19-case SQL regression suite green, clippy clean.
 
-## Next step (not started)
+## What shipped (fifth slice, 2026-10-08): MERGE and cross-partition joins, and a planner crash
 
-`MERGE` through a partitioned/inherited parent still fails closed: it is a join, and the planner
-hook's MERGE probe is built against a single managed target, so neither the write guard's
-recount nor hydration can attribute it to a leaf. It would need the MERGE probe to resolve its
-target per leaf. Nothing else about partitioned targets is open.
+`MERGE` through a partitioned/inherited parent, and an `UPDATE`/`DELETE` that joins across
+partitions or uses a sub-query, have no recoverable per-leaf filter. They now use the planner
+hook's probe (`hooks::dml_planner`), which was previously built only for a *managed* target and
+is now built against the partitioned parent too: its primary-key columns come from the parent's
+catalog (`probe_pk_attnums`, via the relcache's primary-key attribute bitmap), and a partition's
+primary key is the parent's, so one probe serves every managed leaf below it.
+
+- **Write guard:** each managed leaf candidate carries the probe as its `join_probe`. The
+  existing recount runs it once through the merged view and once with that leaf forced hot-only
+  and subtracts, which isolates the leaf's own cold-only matches even though the probe names the
+  parent. No per-leaf attribution is needed.
+- **Hydration:** `hydrate_on_write::probe_target` hydrates a leaf's cold-only rows whose primary
+  key the probe returns, written as an uncorrelated `(pk) IN (SELECT pk FROM (probe))` with both
+  sides listed by column name, so neither side's column order matters. (A correlated `EXISTS` form
+  was tried first and abandoned for the uncorrelated shape the single-table path already uses.)
+
+**A pre-existing server crash, found while testing this and fixed.** A plain `SELECT` such as
+`SELECT ... FROM p WHERE (id, region) IN (SELECT id, region FROM p, (VALUES ...) v WHERE p.id =
+v.i)` crashed the *deployed* build whenever a partition of `p` was managed and held cold data.
+`install_path_portfolio` replaces the leaf's path list with wrappers around its cheapest native
+path; under that join the cheapest native path is an index scan parameterized by the VALUES rows,
+so every wrapper was parameterized and the leaf kept no unparameterized path. PostgreSQL's
+append planning (`get_cheapest_parameterized_child_path`) assumes one always exists and only
+`Assert`s it, so a release build dereferenced a NULL path (faulting instruction `mov 0x18(%rax)`,
+`param_info` of a NULL `Path`). The fix also wraps the cheapest *unparameterized* native path
+whenever the overall cheapest is parameterized. It affects any ordinary query of that shape, not
+just DML, and it is why a regression test for the plain `SELECT` is in `partitioned_tables.sql`.
+
+Tests: the old "join and MERGE are refused coarsely" expectations became precise ones (hot-row
+joins and MERGE succeed, cold-row ones are refused with the join/`ON` message, an insert-only
+MERGE is unaffected), the hydration section now hydrates through a join and through MERGE
+(UPDATE and DELETE actions), and the two-managed-leaf table gets a MERGE that updates in both
+leaves and inserts a new key. Full 19-case SQL suite green, clippy clean.
+
+## Next step
+
+None for partitioned/inherited targets: reads, `INSERT`, `UPDATE`, `DELETE`, `MERGE` (guard and
+hydration) and joins/sub-queries across partitions all work per managed leaf.
 
 See [[koldstore_remaining_gaps]] for where this sits in the overall gap list.

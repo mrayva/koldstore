@@ -105,16 +105,18 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   be touched and is skipped. A statement whose predicate reaches cold rows is
   refused with the usual "matches N cold row(s)" message, and one that only
   touches hot rows, or only an unmanaged sibling leaf, runs normally.
-  **`MERGE` through the parent, and any `UPDATE`/`DELETE` whose plan cannot be
-  attributed to a leaf (a join across several partitions, a sub-query, a
-  volatile function), are refused whenever the managed leaf has cold data
-  *anywhere*** -- the same fail-closed treatment as other hard-to-verify
-  shapes, so a statement that would only touch hot rows can be refused too.
-  With `koldstore.hydrate_on_write` on, an `UPDATE`/`DELETE` through the
-  parent hydrates the cold rows it matches in each managed leaf before running,
-  exactly as on a plain table (a statement can hydrate several managed leaves at
-  once); the shapes listed above that cannot be attributed to a leaf, and
-  `MERGE`, are still refused rather than hydrated. A partition-key-changing
+  **`MERGE`, and an `UPDATE`/`DELETE` that joins across partitions or uses a
+  sub-query, get the same precision** through the planner hook's probe, built
+  against the parent: for each managed leaf the guard counts the cold-only rows
+  the probe matches (read once through the merged view and once hot-only), so a
+  `MERGE` that only matches hot rows, or only inserts new keys, is not held up
+  by the leaf's unrelated cold data, and one that reaches a cold row is refused
+  with the usual "matches N cold row(s)" message. Only a shape with no probe
+  either (a volatile function) is refused whenever the managed leaf has cold
+  data *anywhere*. With `koldstore.hydrate_on_write` on, all of these hydrate
+  the cold rows they match in each managed leaf before running, exactly as on
+  a plain table (one statement can hydrate several managed leaves, and a
+  `MERGE` can update, delete and insert across them). A partition-key-changing
   `UPDATE` is not a gap: a partitioned table's primary key must include the
   partition key, so moving a row across leaves is a primary-key update, which
   koldstore refuses on a managed table in any case. `manage_table` still

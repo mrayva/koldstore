@@ -132,9 +132,10 @@ pub(crate) unsafe fn sort_order_id_from_path_private(private: *mut pg_sys::List)
 
 /// Installs the KoldMergeScan path portfolio and clears bare heap finals.
 ///
-/// Always offers a non-ordering fallback around the cheapest hot child, plus
-/// an ordered progressive wrapper for each native path whose leading pathkey
-/// matches the primary key or configured segment-order column.
+/// Always offers a non-ordering fallback around the cheapest hot child (and, when that child is
+/// parameterized, one around the cheapest unparameterized child too -- PostgreSQL requires every
+/// base relation to keep an unparameterized path), plus an ordered progressive wrapper for each
+/// native path whose leading pathkey matches the primary key or configured segment-order column.
 ///
 /// # Safety
 /// `rel` must be a live planner relation; `methods` must outlive installed paths.
@@ -158,6 +159,18 @@ pub(crate) unsafe fn install_path_portfolio(
         .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) })
         .expect("natives non-empty");
 
+    // The cheapest *unparameterized* native path. When this relation is a partition child under
+    // an `Append` joined to something else, the cheapest native path can be an index scan
+    // parameterized by the join (cheap because the outer row supplies the key); wrapping only
+    // that leaves the relation with no unparameterized path at all, which PostgreSQL assumes
+    // never happens (`get_cheapest_parameterized_child_path` only `Assert`s it, so a release
+    // build dereferences a NULL path and the whole server crashes).
+    let cheapest_unparameterized = natives
+        .iter()
+        .copied()
+        .filter(|path| unsafe { (**path).param_info.is_null() })
+        .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) });
+
     // Drop bare heap finals before add_path so only KoldMergeScan remains.
     (*rel).pathlist = std::ptr::null_mut();
     (*rel).partial_pathlist = std::ptr::null_mut();
@@ -174,6 +187,21 @@ pub(crate) unsafe fn install_path_portfolio(
         order_descending: false,
         methods,
     });
+    if let Some(unparameterized) = cheapest_unparameterized {
+        if !std::ptr::eq(unparameterized, cheapest) {
+            add_custom_wrapper(CustomWrapperArgs {
+                rel,
+                hot_child: unparameterized,
+                strategy: &fallback_strategy,
+                scope_key: &args.scope_key,
+                segment_count: args.segment_count,
+                cold_row_count: args.cold_row_count,
+                copy_pathkeys: false,
+                order_descending: false,
+                methods,
+            });
+        }
+    }
 
     for hot_child in natives {
         let Some(order_support) = leading_order_support(hot_child, args.scanrelid, args) else {
