@@ -301,6 +301,10 @@ unsafe extern "C-unwind" fn relcache_invalidation_callback(
     _arg: pgrx::pg_sys::Datum,
     table_oid: pgrx::pg_sys::Oid,
 ) {
+    if crate::thread_guard::is_foreign() {
+        crate::thread_guard::defer_invalidate_all();
+        return;
+    }
     if table_oid == pgrx::pg_sys::InvalidOid {
         invalidate_all();
     } else {

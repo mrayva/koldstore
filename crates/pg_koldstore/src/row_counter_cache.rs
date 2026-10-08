@@ -197,6 +197,9 @@ unsafe extern "C-unwind" fn row_counter_xact_callback(
     event: pg_sys::XactEvent::Type,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     match event {
         pg_sys::XactEvent::XACT_EVENT_PRE_COMMIT
         | pg_sys::XactEvent::XACT_EVENT_PARALLEL_PRE_COMMIT => {

@@ -355,6 +355,10 @@ unsafe extern "C-unwind" fn merge_scan_xact_callback(
     event: pg_sys::XactEvent::Type,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
+    crate::thread_guard::apply_deferred_invalidations();
     match event {
         pg_sys::XactEvent::XACT_EVENT_ABORT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
             abandon_scan_states_after_abort();
@@ -378,6 +382,9 @@ unsafe extern "C-unwind" fn merge_scan_subxact_callback(
     parent_subid: pg_sys::SubTransactionId,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     match event {
         pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
             abandon_scan_states_after_abort();
@@ -416,6 +423,10 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if let Some(previous) = PREVIOUS_SET_REL_PATHLIST_HOOK {
         previous(root, rel, rti, rte);
     }
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
+    crate::thread_guard::apply_deferred_invalidations();
 
     if root.is_null() || rel.is_null() || rte.is_null() {
         return;

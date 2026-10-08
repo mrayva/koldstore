@@ -60,6 +60,13 @@ unsafe extern "C-unwind" fn planner(
     bound_params: pg_sys::ParamListInfo,
 ) -> *mut pg_sys::PlannedStmt {
     unsafe {
+        if crate::thread_guard::is_foreign() {
+            return match PREVIOUS_PLANNER_HOOK {
+                Some(previous) => previous(parse, query_string, cursor_options, bound_params),
+                None => crate::thread_guard::standard::standard_planner(parse, query_string, cursor_options, bound_params),
+            };
+        }
+        crate::thread_guard::apply_deferred_invalidations();
         // Must run before planning: the planner rewrites the tree in place.
         let probe = if crate::guc::guard_scan_writes() || crate::guc::hydrate_on_write() {
             build_probe_sql(parse)

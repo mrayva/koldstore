@@ -77,6 +77,9 @@ unsafe extern "C-unwind" fn xact_callback(
     event: pgrx::pg_sys::XactEvent::Type,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     match event {
         pgrx::pg_sys::XactEvent::XACT_EVENT_COMMIT
         | pgrx::pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT => {

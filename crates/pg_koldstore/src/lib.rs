@@ -26,6 +26,8 @@ pub mod settings;
 pub mod spi;
 pub mod sql;
 #[cfg(feature = "pg")]
+pub(crate) mod thread_guard;
+#[cfg(feature = "pg")]
 pub(crate) mod txn_writes;
 /// Cluster-supervised PostgreSQL background work adapter.
 #[cfg(feature = "pg")]
@@ -118,6 +120,7 @@ pub extern "C" fn _PG_init() {
         pgrx::error!("{}", preload::preload_required_message());
     }
     preload::mark_loaded_via_shared_preload();
+    thread_guard::init();
 
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     koldstore_storage::ensure_rustls_ring_provider();

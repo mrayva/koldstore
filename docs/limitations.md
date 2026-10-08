@@ -197,6 +197,22 @@ highly selective filter over a broad-scan strategy still estimates as if it
 might match everything cold. Tracked in
 [#124](https://github.com/kalamdb/koldstore/issues/124).
 
+## Extensions that run Postgres on helper threads
+
+Some extensions (`pg_duckdb`, `pg_ducklake`) run Postgres work, such as SPI or subtransactions
+inside `CREATE EXTENSION`, on a DuckDB helper thread while the backend thread waits. Postgres
+then invokes KoldStore's hooks and transaction callbacks on that helper thread. pgrx aborts the
+whole process on any Postgres call from a second thread, and KoldStore's per-backend state is
+thread-local, so every hook and callback is a pass-through off the backend's own thread
+(`thread_guard`). Before this, `CREATE EXTENSION pg_ducklake` with KoldStore preloaded crashed
+the entire cluster ("postgres FFI may not be called from multiple threads").
+
+The consequence: Postgres work done on such a helper thread is invisible to KoldStore. A write to
+a managed table made there is not tracked (no maintenance wake-up, no same-transaction cold-read
+tracking), the cold-DML write guard and hydrate-on-write do not run for it, and a plan built there
+does not get `KoldMergeScan`, so it would read only the hot heap. Run such statements on the
+backend's own thread (plain SQL in the session) when they touch managed tables.
+
 ## Unique and Foreign Key Constraints
 
 PostgreSQL `UNIQUE` and foreign-key constraints on managed tables are enforced on

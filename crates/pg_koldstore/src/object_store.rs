@@ -118,6 +118,9 @@ pub fn install_interrupt_hook() {
 
 #[cfg(feature = "pg")]
 fn check_object_store_interrupts() {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     pgrx::check_for_interrupts!();
 }
 

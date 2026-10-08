@@ -87,6 +87,13 @@ mod live {
     #[pgrx::pg_guard]
     unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
         unsafe {
+            if crate::thread_guard::is_foreign() {
+                match PREVIOUS {
+                    Some(previous) => previous(query_desc),
+                    None => crate::thread_guard::standard::standard_ExecutorEnd(query_desc),
+                }
+                return;
+            }
             // Only managed result relations publish a WAL generation. Nested
             // trigger/cascade DML still fires ExecutorEnd with the managed
             // relation as the result target, so those writes are not missed.
@@ -225,8 +232,8 @@ mod live {
     /// and "the one candidate wasn't hot" are the same fact -- an
     /// early-skip based on the native statement's own affected-row count.
     ///
-    /// A **partitioned/inherited target** (`PlannedStmt.resultRelations.length
-    /// > 1`, ADR-008) is a materially different shape. That list keeps every
+    /// A **partitioned/inherited target** (more than one entry in
+    /// `PlannedStmt.resultRelations`, ADR-008) is a materially different shape. That list keeps every
     /// partition the statement could have touched, *including ones plan-time
     /// pruning later removed* (kept for locking; `EXPLAIN` shows only the
     /// survivors, taken from the `ModifyTable` node's own list), so even a

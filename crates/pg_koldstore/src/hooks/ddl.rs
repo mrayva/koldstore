@@ -81,6 +81,15 @@ mod process_utility {
         qc: *mut pg_sys::QueryCompletion,
     ) {
         unsafe {
+            if crate::thread_guard::is_foreign() {
+                match PREVIOUS {
+                    Some(previous) => previous(pstmt, query, read_only, context, params, env, dest, qc),
+                    None => crate::thread_guard::standard::standard_ProcessUtility(
+                        pstmt, query, read_only, context, params, env, dest, qc,
+                    ),
+                }
+                return;
+            }
             let copied = pg_sys::copyObjectImpl(pstmt.cast()).cast::<pg_sys::PlannedStmt>();
             let mut captured = None;
             let mut has_standard_actions = true;

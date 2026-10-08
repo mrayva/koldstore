@@ -576,6 +576,9 @@ unsafe extern "C-unwind" fn flush_origin_xact_callback(
     event: pgrx::pg_sys::XactEvent::Type,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     // Restore only after the commit/abort WAL is written. Pre-commit would
     // clear the origin before the commit record is stamped, which is exactly
     // the PG15 ORIGIN-message failure mode we are fixing.

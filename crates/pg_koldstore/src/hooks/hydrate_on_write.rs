@@ -91,6 +91,13 @@ pub(crate) fn release_locks() {
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, eflags: std::ffi::c_int) {
     unsafe {
+        if crate::thread_guard::is_foreign() {
+            match PREVIOUS {
+                Some(previous) => previous(query_desc, eflags),
+                None => crate::thread_guard::standard::standard_ExecutorStart(query_desc, eflags),
+            }
+            return;
+        }
         if crate::guc::hydrate_on_write() {
             hydrate_before_scan(query_desc, eflags);
         }

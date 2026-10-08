@@ -299,6 +299,9 @@ unsafe extern "C-unwind" fn wake_xact_callback(
     event: pg_sys::XactEvent::Type,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     match event {
         pg_sys::XactEvent::XACT_EVENT_COMMIT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT => {
             publish_pending_commit()
@@ -379,6 +382,9 @@ unsafe extern "C-unwind" fn wake_subxact_callback(
     _parent_subid: pg_sys::SubTransactionId,
     _arg: *mut std::ffi::c_void,
 ) {
+    if crate::thread_guard::is_foreign() {
+        return;
+    }
     let nesting_level = current_nesting_level();
     update_subxact_dirty(&MANAGED_DML_PENDING, event, nesting_level);
     update_subxact_dirty(&FLUSH_QUEUE_PENDING, event, nesting_level);
