@@ -258,9 +258,10 @@ mod live {
     /// `enforce_unverifiable_scan_guard`/`enforce_unverifiable_merge_guard` and
     /// fails closed (refuse whenever the leaf has cold data at all), matching
     /// the imprecision the codebase already accepts for other hard-to-verify
-    /// shapes. `koldstore.hydrate_on_write` does not attempt one of these
-    /// targets (see `hydrate_on_write`'s own `top_level_target`), so a cold
-    /// match is refused with a pointer to `update_row`/`delete_row`.
+    /// shapes. With `koldstore.hydrate_on_write` on, an `UPDATE`/`DELETE` whose
+    /// per-leaf filter could be recovered is hydrated before the native statement runs
+    /// (`hydrate_on_write::leaf_targets`), which composes with the recount above; every
+    /// shape that falls back to the unverifiable candidate is refused instead.
     ///
     /// `CMD_MERGE` reuses the exact same `extract_raw_attnum_equality`
     /// extraction as UPDATE/DELETE, not a MERGE-specific path -- confirmed

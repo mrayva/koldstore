@@ -58,6 +58,17 @@
 //! compose correctly here: without it, a MERGE hydration already made safe to run would still
 //! be wrongly rejected afterward.
 
+//! A partitioned/inherited target (ADR-008) is hydrated per managed leaf. The `ModifyTable`
+//! child plan is an `Append` of one filtered scan per surviving leaf, so each leaf's own scan
+//! filter (`hooks::where_deparse::deparse_where_for_leaf`) is the clause a plain statement on
+//! that leaf would carry, and the hydrating `INSERT` goes straight into the leaf (never back
+//! through the parent). Leaves the plan never scans are skipped; a shape that cannot be
+//! attributed to a leaf (a join across partitions, a volatile qual) and `MERGE` through the
+//! parent still fall through to the write guard, which refuses them. A partition-key-changing
+//! `UPDATE` never reaches hydration: a partitioned table's primary key must include the partition
+//! key, so moving a row across leaves is a primary-key update, which koldstore refuses on a
+//! managed table anyway.
+
 use std::cell::RefCell;
 
 use pgrx::pg_sys;
@@ -137,7 +148,7 @@ unsafe fn hydrate_before_scan(query_desc: *mut pg_sys::QueryDesc, eflags: std::f
             (*query_desc).operation,
             pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE | pg_sys::CmdType::CMD_MERGE
         ) {
-            if let Some(target) = top_level_target(query_desc, planned) {
+            for target in top_level_targets(query_desc, planned) {
                 hydrated_any |= hydrate_target(&target);
             }
         }
@@ -188,9 +199,81 @@ unsafe fn isolation_blocks_hydration() -> bool {
     }
 }
 
-/// The top-level statement's own target, when it is a plain `UPDATE`/`DELETE`/`MERGE` on a
-/// single managed table (single-table `WHERE` for `UPDATE`/`DELETE`, or a join/sub-query --
-/// always the case for `MERGE` -- via the planner hook's probe).
+/// The top-level statement's own hydration targets: for a plain `UPDATE`/`DELETE`/`MERGE` on a
+/// single managed table, that table (single-table `WHERE` for `UPDATE`/`DELETE`, or a join/sub-query
+/// -- always the case for `MERGE` -- via the planner hook's probe); for a partitioned/inherited
+/// `UPDATE`/`DELETE` (ADR-008), one target per managed leaf, from that leaf's own scan filter.
+unsafe fn top_level_targets(
+    query_desc: *mut pg_sys::QueryDesc,
+    planned: *mut pg_sys::PlannedStmt,
+) -> Vec<HydrateTarget> {
+    unsafe {
+        let result_relations = (*planned).resultRelations;
+        let rtable = (*planned).rtable;
+        if rtable.is_null() || result_relations.is_null() {
+            return Vec::new();
+        }
+        // A partitioned/inherited target lists every potential leaf here (including ones plan-time
+        // pruning removed), not just one. `MERGE` through such a parent stays with the write guard
+        // (no probe mechanism for it); `UPDATE`/`DELETE` hydrate each managed leaf separately.
+        if (*result_relations).length > 1 {
+            return if (*query_desc).operation == pg_sys::CmdType::CMD_MERGE {
+                Vec::new()
+            } else {
+                leaf_targets(query_desc, planned, rtable, result_relations)
+            };
+        }
+        top_level_target(query_desc, planned).into_iter().collect()
+    }
+}
+
+/// One target per managed leaf of a partitioned/inherited `UPDATE`/`DELETE`: the leaf's own scan
+/// filter (`hooks::where_deparse::deparse_where_for_leaf`) is exactly the clause a plain
+/// single-table statement on that leaf would carry, so the same cold-only comparison applies.
+/// A leaf the plan never scans (pruned at plan time) cannot be touched and is skipped; a leaf whose
+/// filter cannot be attributed (a join across leaves, a volatile qual) is left to the write guard,
+/// which refuses it -- the same fall-through an unreproducible single-table clause already gets.
+unsafe fn leaf_targets(
+    query_desc: *mut pg_sys::QueryDesc,
+    planned: *mut pg_sys::PlannedStmt,
+    rtable: *mut pg_sys::List,
+    result_relations: *mut pg_sys::List,
+) -> Vec<HydrateTarget> {
+    unsafe {
+        let mut targets = Vec::new();
+        for index in 0..(*result_relations).length as usize {
+            let range_table_index = (*(*result_relations).elements.add(index)).int_value;
+            if range_table_index <= 0 || range_table_index > (*rtable).length {
+                continue;
+            }
+            let rte = (*(*rtable).elements.add((range_table_index - 1) as usize))
+                .ptr_value
+                .cast::<pg_sys::RangeTblEntry>();
+            if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                continue;
+            }
+            let table_oid = (*rte).relid;
+            if !crate::catalog::cache::is_managed_relation(table_oid) {
+                continue;
+            }
+            match crate::hooks::where_deparse::deparse_where_for_leaf(
+                (*planned).planTree,
+                rtable,
+                (*query_desc).params,
+                table_oid,
+            ) {
+                crate::hooks::where_deparse::LeafWhere::Sql(where_sql) => {
+                    targets.push(HydrateTarget { table_oid, where_sql, params: Vec::new() });
+                }
+                crate::hooks::where_deparse::LeafWhere::Absent
+                | crate::hooks::where_deparse::LeafWhere::Unknown => {}
+            }
+        }
+        targets
+    }
+}
+
+/// The single managed table behind a one-entry `resultRelations` list.
 unsafe fn top_level_target(
     query_desc: *mut pg_sys::QueryDesc,
     planned: *mut pg_sys::PlannedStmt,
@@ -198,13 +281,6 @@ unsafe fn top_level_target(
     unsafe {
         let result_relations = (*planned).resultRelations;
         let rtable = (*planned).rtable;
-        // A partitioned/inherited target (ADR-008) lists every potential leaf here, not
-        // just one -- confirmed live even for a literal, maximally selective WHERE clause
-        // on the partition key, since PostgreSQL relies on runtime pruning rather than
-        // eliminating siblings from this list at plan time. No probe mechanism exists for
-        // that shape yet (same gap `hooks::executor`'s write guard has), so it is left
-        // alone here too: the write guard now fails closed for it instead of silently
-        // doing nothing, which is the safe outcome in the absence of hydration.
         if rtable.is_null() || result_relations.is_null() || (*result_relations).length != 1 {
             return None;
         }

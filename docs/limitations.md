@@ -110,14 +110,16 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   volatile function), are refused whenever the managed leaf has cold data
   *anywhere*** -- the same fail-closed treatment as other hard-to-verify
   shapes, so a statement that would only touch hot rows can be refused too.
-  `koldstore.hydrate_on_write` does not attempt to hydrate through the parent:
-  a cold row reached that way is refused with a pointer to `update_row`/
-  `delete_row` rather than hydrated. Running the statement against the managed
-  leaf directly avoids both limits. A partition-key-changing `UPDATE` that
-  would move a cold-only row to a different leaf (PostgreSQL implements this as
-  a `DELETE` + `INSERT` pair) remains open -- tracked in ADR-008's "Next
-  step". `manage_table` still refuses foreign, temporary and
-  unlogged tables, views, materialized views and sequences as before.
+  With `koldstore.hydrate_on_write` on, an `UPDATE`/`DELETE` through the
+  parent hydrates the cold rows it matches in each managed leaf before running,
+  exactly as on a plain table (a statement can hydrate several managed leaves at
+  once); the shapes listed above that cannot be attributed to a leaf, and
+  `MERGE`, are still refused rather than hydrated. A partition-key-changing
+  `UPDATE` is not a gap: a partitioned table's primary key must include the
+  partition key, so moving a row across leaves is a primary-key update, which
+  koldstore refuses on a managed table in any case. `manage_table` still
+  refuses foreign, temporary and unlogged tables, views, materialized views and
+  sequences as before.
 - Schema, table and column names may be any valid PostgreSQL identifier:
   mixed case, reserved words, spaces, embedded quotes and dots, slashes,
   non-ASCII letters, a leading digit, and leading or trailing blanks. Names are

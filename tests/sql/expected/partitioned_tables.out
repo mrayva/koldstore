@@ -164,10 +164,88 @@ RESET
  ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
 (1 row)
 
+SET
+ hydrate_parent_update_cold_row
+--------------------------------
+ ok
+(1 row)
+
+ id3_amt_via_parent
+--------------------
+               1030
+(1 row)
+
+ id3_amt_via_leaf
+------------------
+             1030
+(1 row)
+
+ hydrate_parent_delete_without_partition_key
+---------------------------------------------
+ ok
+(1 row)
+
+ mirror_settled
+----------------
+ t
+(1 row)
+
+ id4_rows_left
+---------------
+             0
+(1 row)
+
+ hydrate_parent_range_update
+-----------------------------
+ ok
+(1 row)
+
+ id | amt
+----+-----
+  1 |  11
+  2 |  21
+(2 rows)
+
+                                        hydrate_cross_leaf_move_refused
+----------------------------------------------------------------------------------------------------------------
+ ERROR: pg-koldstore does not support primary-key or segment-order-column updates on managed table p_sales_east
+(1 row)
+
+ id | region | amt
+----+--------+-----
+  5 | east   |  50
+(1 row)
+
+ id5_rows_in_west
+------------------
+                0
+(1 row)
+
+ hydrate_unmanaged_leaf_only
+-----------------------------
+ ok
+(1 row)
+
+                                                                                                                                                                                                                                            hydrate_join_still_refused
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so a matching cold row could be silently left unmodified. Narrow it to a plain literal predicate, act on the leaf relation directly, change rows one key at a time with koldstore.update_row()/delete_row(), or SET koldstore.guard_scan_writes = off to accept the risk (upstream issue #122)
+(1 row)
+
+                                                                                                                                                                                                                                hydrate_merge_still_refused
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this MERGE on managed table sqlreg.p_sales_east -- its target is a partitioned/inherited relation, and this guard cannot yet verify cold rows across multiple result relations, so matching cold rows would be silently skipped. Use koldstore.update_row()/delete_row() for cold keys, MERGE a single row by primary key, or INSERT ... ON CONFLICT after koldstore.hydrate_pk(); SET koldstore.guard_scan_writes = off accepts the risk (upstream issue #122)
+(1 row)
+
+ id6_amt_unchanged
+-------------------
+                60
+(1 row)
+
+RESET
 ALTER TABLE
  east_leaf_count_after_detach
 ------------------------------
-                            7
+                            6
 (1 row)
 
  parent_total_after_detach
@@ -175,3 +253,72 @@ ALTER TABLE
                          3
 (1 row)
 
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+ managed_a
+-----------
+ t
+(1 row)
+
+ managed_b
+-----------
+ t
+(1 row)
+
+INSERT 0 4
+INSERT 0 4
+ mirror_caught_up_p2
+---------------------
+ t
+(1 row)
+
+ flushed_a
+-----------
+ t
+(1 row)
+
+ flushed_b
+-----------
+ t
+(1 row)
+
+                                                                                                                                                                                                        p2_refused_without_hydration
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: koldstore: refusing this UPDATE/DELETE on managed table sqlreg.p2_a -- its WHERE clause also matches 2 cold row(s) that a plain statement cannot modify (they live in Parquet storage, not the heap). Change them one key at a time with koldstore.update_row()/delete_row(), or narrow the WHERE clause to hot rows; if those keys were changed moments ago, call koldstore.wait_for_async_mirror() and retry (upstream issue #122)
+(1 row)
+
+SET
+ p2_update_hits_both_leaves
+----------------------------
+ ok
+(1 row)
+
+ id | region | amt
+----+--------+-----
+  1 | a      |  10
+  2 | a      |  21
+  3 | a      |  31
+  4 | a      |  40
+  1 | b      | 100
+  2 | b      | 201
+  3 | b      | 301
+  4 | b      | 400
+(8 rows)
+
+ p2_unconditional_delete_hits_both_leaves
+------------------------------------------
+ ok
+(1 row)
+
+ mirror_settled_p2
+-------------------
+ t
+(1 row)
+
+ p2_rows_left
+--------------
+            0
+(1 row)
+
+RESET

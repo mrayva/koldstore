@@ -13,8 +13,11 @@ cold-match recount as a plain table, per managed leaf (a third slice,
 2026-10-07); `MERGE` and plan shapes that cannot be attributed to a leaf are
 still refused whenever the leaf has cold data anywhere, instead of silently
 doing nothing -- see "What shipped" below and `docs/limitations.md`.
-Hydrate-on-write for a partitioned target and the partition-key-changing-
-`UPDATE` case remain open, tracked in "Next step".
+With `koldstore.hydrate_on_write` on, those `UPDATE`/`DELETE` statements now
+hydrate each managed leaf's cold matches instead of being refused (a fourth
+slice, 2026-10-08). The partition-key-changing `UPDATE` case turned out not
+to be a gap (see below). Only `MERGE` through the parent remains open,
+tracked in "Next step".
 
 ## Date
 
@@ -115,13 +118,11 @@ What this requires building:
   below.
 - **Cross-partition tuple routing.** PostgreSQL implements a partition-key
   `UPDATE` that moves a row to a different leaf as a `DELETE` on the old leaf
-  plus an `INSERT` on the new one. If the row being moved is cold-only on the
-  old leaf, hydrate-on-write would need to hydrate it there first (same
-  mechanism as today's single-table hydrate-before-delete, just needs to
-  resolve which leaf currently holds the row before acting) before the
-  native delete half can see it. This is the single trickiest new case
-  found in this pass and needs its own design note once Option A is
-  scoped for real implementation — not solved here.
+  plus an `INSERT` on the new one. This pass worried that a cold-only row would
+  need hydrating first. It never arises: a partitioned table's primary key
+  must include the partition key, so such an `UPDATE` is a primary-key update,
+  which koldstore already refuses on a managed table (confirmed in the fourth
+  slice, with and without hydrate-on-write).
 - **A cascading convenience, not a new catalog concept.** Rather than
   inventing parent-level configuration, a `manage_table(parent, ..., cascade
   => true)` helper could just walk `pg_inherits` and call the existing
@@ -171,8 +172,8 @@ which is better learned after Option A ships than guessed now.
 - Sub-partitioning (a managed leaf that is itself further partitioned) — not
   examined; likely composes fine under Option A's "a partition is just a
   table" framing but not verified.
-- The partition-key-changing `UPDATE` hydrate-before-move case flagged above
-  under Option A — identified, not designed.
+- (Resolved, see above) the partition-key-changing `UPDATE` hydrate-before-move
+  case: refused by the existing primary-key-update rule.
 
 ## What shipped (first slice, 2026-10-02)
 
@@ -291,16 +292,30 @@ rows is refused with the same precise message a plain table gets. Extended
 plan with an external parameter and a multi-row join (still refused
 coarsely). Full 19-case SQL regression suite green, clippy clean.
 
+## What shipped (fourth slice, 2026-10-08): hydrate-on-write through the parent
+
+`hooks::hydrate_on_write` now returns a list of targets instead of at most one. For a
+partitioned/inherited `UPDATE`/`DELETE` (more than one entry in `PlannedStmt.resultRelations`),
+`leaf_targets` asks `where_deparse::deparse_where_for_leaf` for each managed leaf's own scan
+filter -- the clause a plain statement on that leaf would carry -- and hydrates each through the
+unchanged per-table path (`hydrate_target`), inserting straight into the leaf, never back through
+the parent. A leaf the plan never scans is skipped; a leaf whose filter cannot be attributed (a
+join across partitions, a volatile qual) is left to the write guard, which refuses it. One
+`CommandCounterIncrement` still covers every target. It composes with the third slice's
+recount: hydrating records the leaf as written, so the guard's recount is skipped for it.
+
+Tests (`tests/sql/partitioned_tables.sql`): a cold row updated through the parent; a delete
+without the partition key (both leaves scanned, only the managed one hydrates); a range update;
+an unmanaged sibling leaf unaffected; the cross-leaf move refused by the primary-key rule with
+nothing hydrated or moved; the cross-partition join and `MERGE` still refused; and a second
+partitioned table with **both** leaves managed, where one statement hydrates cold rows in each.
+Full 19-case SQL regression suite green, clippy clean.
+
 ## Next step (not started)
 
-`MERGE` through a partitioned/inherited parent still fails closed: it is a
-join, and the planner hook's MERGE probe is built against a single managed
-target. `koldstore.hydrate_on_write` still does not attempt a partitioned
-target (its `top_level_target` bails on more than one entry in
-`PlannedStmt.resultRelations`, so a cold row reached through the parent is
-refused with a pointer to `update_row`/`delete_row` rather than hydrated).
-The partition-key-changing-`UPDATE` hydration case (moving a cold-only row
-across leaves via PostgreSQL's native DELETE+INSERT) is a separate, harder
-follow-on, not designed yet.
+`MERGE` through a partitioned/inherited parent still fails closed: it is a join, and the planner
+hook's MERGE probe is built against a single managed target, so neither the write guard's
+recount nor hydration can attribute it to a leaf. It would need the MERGE probe to resolve its
+target per leaf. Nothing else about partitioned targets is open.
 
 See [[koldstore_remaining_gaps]] for where this sits in the overall gap list.
