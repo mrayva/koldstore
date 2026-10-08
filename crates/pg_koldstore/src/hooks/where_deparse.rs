@@ -124,10 +124,21 @@ pub(crate) unsafe fn deparse_where(
             return None;
         }
         let (scanrelid, qual_lists) = super::pk_predicate::scan_qual_sources(subplan)?;
+        deparse_scan_quals(scanrelid, &qual_lists, params, table_oid)
+    }
+}
+
+unsafe fn deparse_scan_quals(
+    scanrelid: pg_sys::Index,
+    qual_lists: &[*mut pg_sys::List],
+    params: pg_sys::ParamListInfo,
+    table_oid: pg_sys::Oid,
+) -> Option<String> {
+    unsafe {
         let dpcontext = pg_sys::deparse_context_for(c"t".as_ptr(), table_oid);
         let mut parts: Vec<String> = Vec::new();
         for qual_list in qual_lists {
-            for node in literals::list_node_pointers(qual_list) {
+            for node in literals::list_node_pointers(*qual_list) {
                 let node = node.cast::<pg_sys::Node>();
                 if node.is_null() || pg_sys::contain_volatile_functions(node) {
                     return None;
@@ -149,5 +160,99 @@ pub(crate) unsafe fn deparse_where(
             }
         }
         Some(if parts.is_empty() { "true".to_string() } else { parts.join(" AND ") })
+    }
+}
+
+/// What a partitioned/inherited UPDATE/DELETE does to one specific leaf (ADR-008).
+pub(crate) enum LeafWhere {
+    /// The plan has no scan of this leaf at all: plan-time partition pruning proved the
+    /// WHERE clause cannot match any of its rows, so the statement cannot touch it.
+    Absent,
+    /// The leaf's own scan filter, as SQL over the leaf aliased `t`.
+    Sql(String),
+    /// The plan's shape (a join, a sub-query, a volatile qual, ...) cannot be attributed to
+    /// this leaf; the caller must fail closed.
+    Unknown,
+}
+
+/// Collects every base-relation scan under `plan`, looking only through `Append` and
+/// `MergeAppend`. Returns `false` on any other node type, so an unrecognised shape is never
+/// mistaken for "this leaf is not scanned".
+unsafe fn collect_leaf_scans(plan: *mut pg_sys::Plan, out: &mut Vec<*mut pg_sys::Plan>) -> bool {
+    unsafe {
+        if plan.is_null() {
+            return false;
+        }
+        match (*plan).type_ {
+            pg_sys::NodeTag::T_Append => {
+                let append = plan.cast::<pg_sys::Append>();
+                literals::list_node_pointers((*append).appendplans)
+                    .into_iter()
+                    .all(|child| collect_leaf_scans(child.cast::<pg_sys::Plan>(), out))
+            }
+            pg_sys::NodeTag::T_MergeAppend => {
+                let merge = plan.cast::<pg_sys::MergeAppend>();
+                literals::list_node_pointers((*merge).mergeplans)
+                    .into_iter()
+                    .all(|child| collect_leaf_scans(child.cast::<pg_sys::Plan>(), out))
+            }
+            pg_sys::NodeTag::T_SeqScan | pg_sys::NodeTag::T_IndexScan | pg_sys::NodeTag::T_BitmapHeapScan => {
+                out.push(plan);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The part of a partitioned/inherited UPDATE/DELETE's WHERE clause that applies to one
+/// result relation `leaf_oid`. PostgreSQL gives `ModifyTable` a single child plan -- an
+/// `Append` of one filtered scan per leaf -- and lists every leaf in `resultRelations`, so the
+/// leaf's own scan is the only place its share of the filter lives. `rtable` maps each scan's
+/// `scanrelid` back to the relation it reads.
+#[must_use]
+pub(crate) unsafe fn deparse_where_for_leaf(
+    modify_table_plan: *mut pg_sys::Plan,
+    rtable: *mut pg_sys::List,
+    params: pg_sys::ParamListInfo,
+    leaf_oid: pg_sys::Oid,
+) -> LeafWhere {
+    unsafe {
+        if modify_table_plan.is_null() || rtable.is_null() {
+            return LeafWhere::Unknown;
+        }
+        let mut scans = Vec::new();
+        if !collect_leaf_scans((*modify_table_plan).lefttree, &mut scans) {
+            return LeafWhere::Unknown;
+        }
+        let mut found = None;
+        for scan in scans {
+            let Some((scanrelid, qual_lists)) = super::pk_predicate::scan_qual_sources(scan) else {
+                return LeafWhere::Unknown;
+            };
+            if scanrelid == 0 || scanrelid as i32 > (*rtable).length {
+                return LeafWhere::Unknown;
+            }
+            let rte = (*(*rtable).elements.add(scanrelid as usize - 1))
+                .ptr_value
+                .cast::<pg_sys::RangeTblEntry>();
+            if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                return LeafWhere::Unknown;
+            }
+            if (*rte).relid != leaf_oid {
+                continue;
+            }
+            if found.is_some() {
+                return LeafWhere::Unknown;
+            }
+            found = Some((scanrelid, qual_lists));
+        }
+        match found {
+            None => LeafWhere::Absent,
+            Some((scanrelid, qual_lists)) => match deparse_scan_quals(scanrelid, &qual_lists, params, leaf_oid) {
+                Some(sql) => LeafWhere::Sql(sql),
+                None => LeafWhere::Unknown,
+            },
+        }
     }
 }

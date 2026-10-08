@@ -63,11 +63,11 @@ mod live {
         is_merge: bool,
         /// This candidate is one of several result relations in the same statement
         /// (a partitioned/inherited target, ADR-008) rather than the lone target of
-        /// an ordinary single-table statement. `raw`/`where_sql`/`join_probe` are
-        /// always `None` for one of these (see `cold_only_update_delete_candidate`'s
-        /// doc comment for why a precise per-leaf recount isn't attempted yet), so
-        /// it always falls through to the unverifiable-shape guards, just with a
-        /// message naming the real reason instead of their default wording.
+        /// an ordinary single-table statement. `raw`/`join_probe` are always `None`
+        /// for one of these; `where_sql` is the leaf's own scan filter when the plan
+        /// shape allows it (`where_deparse::deparse_where_for_leaf`), otherwise the
+        /// candidate falls through to the unverifiable-shape guards, with a message
+        /// naming the real reason instead of their default wording.
         multi_relation: bool,
     }
 
@@ -225,39 +225,35 @@ mod live {
     /// and "the one candidate wasn't hot" are the same fact -- an
     /// early-skip based on the native statement's own affected-row count.
     ///
-    /// A **partitioned/inherited target** (`resultRelations.length > 1`,
-    /// ADR-008) is a materially different shape PostgreSQL itself produces:
-    /// confirmed live that even a maximally selective, literal-valued WHERE
-    /// clause on the partition key (`WHERE id = 3 AND region = 'east'`,
-    /// where `region` is the partition key) still lists *every* partition
-    /// in `resultRelations` -- PostgreSQL relies on *runtime* partition
-    /// pruning to skip touching the others, not plan-time elimination from
-    /// this list, so there is no "N happens to be 1" shortcut to lean on in
-    /// practice. Modern PostgreSQL's `ModifyTable` also has a single child
-    /// plan (no more `plans`/one-subplan-per-result-relation list), so
-    /// there is no straightforward way to recover which part of that single
-    /// plan tree belongs to which specific result relation the way the
-    /// `resultRelations.length == 1` path does. Building a precise per-leaf
-    /// recount here would need its own investigation into that shape (an
-    /// `Append` over per-leaf scans tagged by a hidden `tableoid` junk
-    /// column at best) -- not attempted this round; tracked as the next
-    /// step in ADR-008.
+    /// A **partitioned/inherited target** (`PlannedStmt.resultRelations.length
+    /// > 1`, ADR-008) is a materially different shape. That list keeps every
+    /// partition the statement could have touched, *including ones plan-time
+    /// pruning later removed* (kept for locking; `EXPLAIN` shows only the
+    /// survivors, taken from the `ModifyTable` node's own list), so even a
+    /// literal `WHERE id = 3 AND region = 'east'` reports two entries. Modern
+    /// PostgreSQL's `ModifyTable` also has a single child plan, not one subplan
+    /// per result relation, so there is no `resultRelations.length == 1`-style
+    /// shortcut to recover a leaf's WHERE clause. The child is, in the common
+    /// case, an `Append` of one filtered scan per surviving leaf (or just a scan
+    /// when one survives), so each leaf's share of the WHERE clause is recovered
+    /// from its own scan node (`where_deparse::deparse_where_for_leaf`, matching
+    /// `scanrelid` back to the leaf through the range table). A leaf with no scan
+    /// at all was pruned at plan time and cannot be touched, so it needs no
+    /// candidate. Each remaining managed leaf then gets the same generic
+    /// cold-match recount as a plain table, so a statement whose predicate
+    /// provably cannot match a cold row is no longer refused merely because the
+    /// leaf has cold data elsewhere.
     ///
-    /// Until that exists, a managed relation among `resultRelations` gets a
-    /// candidate with `raw`/`where_sql`/`join_probe` all `None` --
-    /// deliberately unverifiable by construction, so it always falls
-    /// through to `enforce_unverifiable_scan_guard`/
-    /// `enforce_unverifiable_merge_guard`, which already fail closed
-    /// (blanket-refuse whenever the table has cold data at all) for any
-    /// other shape this guard cannot safely re-run. This is less precise
-    /// than the single-table recount -- it refuses a statement whose WHERE
-    /// clause provably could not have matched a cold row -- but it is
-    /// *correct*, and replaces today's silent "UPDATE 0, no error" with a
-    /// loud, actionable rejection, matching the imprecision level the
-    /// codebase already accepts for other hard-to-verify shapes.
-    /// `koldstore.hydrate_on_write` does not attempt one of these targets
-    /// either (same missing precise-probe mechanism) -- see
-    /// `hydrate_on_write`'s own `top_level_target`.
+    /// Anything that cannot be attributed to a leaf this way -- MERGE (a join),
+    /// `UPDATE ... FROM`, a sub-query, a volatile qual, any plan node other than
+    /// `Append`/`MergeAppend` over plain scans -- yields a candidate with
+    /// `where_sql`/`join_probe` both `None`, which falls through to
+    /// `enforce_unverifiable_scan_guard`/`enforce_unverifiable_merge_guard` and
+    /// fails closed (refuse whenever the leaf has cold data at all), matching
+    /// the imprecision the codebase already accepts for other hard-to-verify
+    /// shapes. `koldstore.hydrate_on_write` does not attempt one of these
+    /// targets (see `hydrate_on_write`'s own `top_level_target`), so a cold
+    /// match is refused with a pointer to `update_row`/`delete_row`.
     ///
     /// `CMD_MERGE` reuses the exact same `extract_raw_attnum_equality`
     /// extraction as UPDATE/DELETE, not a MERGE-specific path -- confirmed
@@ -398,9 +394,12 @@ mod live {
 
     /// The `resultRelations.length > 1` branch of
     /// `cold_only_update_delete_candidate` (a partitioned/inherited DML
-    /// target, ADR-008): one deliberately-unverifiable candidate per
-    /// *managed* result relation, skipping any unmanaged sibling leaf
-    /// (e.g. an ordinary, unmanaged partition alongside a managed one).
+    /// target, ADR-008): one candidate per *managed* result relation,
+    /// skipping any unmanaged sibling leaf (e.g. an ordinary, unmanaged
+    /// partition alongside a managed one) and any leaf the plan provably
+    /// never scans. An UPDATE/DELETE leaf gets its own scan filter as
+    /// `where_sql`, so the generic cold-match recount is as precise as for a
+    /// plain table; MERGE and any unattributable shape stay unverifiable.
     unsafe fn multi_relation_candidates(
         query_desc: *mut pg_sys::QueryDesc,
         planned: *mut pg_sys::PlannedStmt,
@@ -426,10 +425,28 @@ mod live {
                 if !crate::catalog::cache::is_managed_relation(table_oid) {
                     continue;
                 }
+                // UPDATE/DELETE: recover this leaf's own filter from its scan under the
+                // shared `Append`. MERGE (a join, no probe mechanism for a partitioned
+                // target) and any shape that cannot be attributed to the leaf stay
+                // unverifiable and fail closed.
+                let where_sql = if is_merge || !crate::guc::guard_scan_writes() {
+                    None
+                } else {
+                    match crate::hooks::where_deparse::deparse_where_for_leaf(
+                        (*planned).planTree,
+                        rtable,
+                        (*query_desc).params,
+                        table_oid,
+                    ) {
+                        crate::hooks::where_deparse::LeafWhere::Absent => continue,
+                        crate::hooks::where_deparse::LeafWhere::Sql(sql) => Some(sql),
+                        crate::hooks::where_deparse::LeafWhere::Unknown => None,
+                    }
+                };
                 candidates.push(GuardCandidate {
                     table_oid,
                     raw: None,
-                    where_sql: None,
+                    where_sql,
                     join_probe: None,
                     single_valued: false,
                     es_processed: 0,

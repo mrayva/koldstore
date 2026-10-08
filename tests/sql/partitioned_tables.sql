@@ -84,23 +84,14 @@ BEGIN
   END IF;
 END $$;
 
--- ------------------------- write guard now covers the parent, coarsely
--- (docs/limitations.md, ADR-008). Confirmed live that PostgreSQL always
--- lists every partition in PlannedStmt.resultRelations for a parent-routed
--- statement -- even one with a literal, maximally selective WHERE clause on
--- the partition key -- so there is no "N happens to be 1" shortcut to lean
--- on the way the single-table/CTE cases do. Rather than attempt a precise
--- per-leaf recount (needs its own investigation into how multiple result
--- relations share one ModifyTable child plan in modern PostgreSQL, deferred
--- as ADR-008's next step), a managed leaf among the result relations gets a
--- deliberately unverifiable candidate, which falls through to the same
--- fail-closed guards already used for other hard-to-verify shapes (a CTE
--- join source, a volatile function): refuse whenever the leaf has cold data
--- ANYWHERE, not just in the rows this specific statement would touch. This
--- replaces the old silent "UPDATE 0, no error" with a loud rejection, at
--- the cost of also refusing a parent-routed statement that would only have
--- touched hot rows, as long as the leaf has cold data somewhere else too --
--- confirmed and documented below, not an oversight.
+-- ------------------------- write guard covers the parent, per leaf
+-- (docs/limitations.md, ADR-008). PostgreSQL lists every partition in
+-- PlannedStmt.resultRelations for a parent-routed statement but gives
+-- ModifyTable a single child plan: an Append of one filtered scan per leaf.
+-- The guard recovers each managed leaf's own filter from its scan node and
+-- runs the same cold-match recount as for a plain table; a leaf with no scan
+-- (pruned at plan time) cannot be touched and is skipped. Shapes that cannot
+-- be attributed to a leaf (a join, MERGE) still fail closed.
 CREATE FUNCTION sqlreg.try(stmt text) RETURNS text
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -112,32 +103,59 @@ END
 $$;
 
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 3 AND region = 'east'$$)
-  AS parent_update_of_cold_row_now_refused;
+  AS parent_update_of_cold_row_refused;
 SELECT amt FROM sqlreg.p_sales WHERE id = 3 AND region = 'east';
 
--- The identical statement issued directly against the managed leaf (not
--- through the parent) is unaffected -- today's single-table write guard
--- already covers it correctly, unchanged by this round.
+-- The identical statement issued directly against the managed leaf is
+-- unaffected by any of this -- the single-table write guard covers it.
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales_east SET amt = amt + 1 WHERE id = 4$$)
-  AS leaf_update_of_cold_row_correctly_refused;
+  AS leaf_update_of_cold_row_refused;
 SELECT amt FROM sqlreg.p_sales_east WHERE id = 4;
 
--- The coarser edge, confirmed on purpose: a parent-routed UPDATE that would
--- only ever touch a HOT row (id=999, inserted earlier in this file) is also
--- refused, because the east leaf has cold data elsewhere -- this guard
--- cannot yet tell "this leaf has cold data" apart from "this specific row
--- is cold", the same imprecision level the codebase already accepts for
--- other unverifiable shapes (see enforce_unverifiable_scan_guard's doc
--- comment).
+-- A parent-routed UPDATE that only touches a HOT row (id=999, inserted earlier)
+-- now succeeds even though the east leaf has cold data elsewhere.
 SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 999 AND region = 'east'$$)
-  AS parent_update_of_hot_row_also_refused_coarsely;
+  AS parent_update_of_hot_row_succeeds;
 SELECT amt FROM sqlreg.p_sales WHERE id = 999 AND region = 'east';
 
--- A parent-routed statement touching ONLY the unmanaged west leaf is
--- unaffected -- west was never a candidate at all (not managed).
-SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 101 AND region = 'west'$$)
-  AS parent_update_of_unmanaged_leaf_unaffected;
+-- Without the partition key in the WHERE clause both leaves are scanned; the
+-- east scan's own filter (id = 999, a hot row) matches no cold row. A cold id
+-- (every originally inserted row was flushed) is refused the same way.
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 999$$)
+  AS parent_update_hot_row_without_partition_key;
+SELECT amt FROM sqlreg.p_sales WHERE id = 999;
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = 5$$)
+  AS parent_update_cold_row_without_partition_key;
+SELECT amt FROM sqlreg.p_sales WHERE id = 5;
+
+-- A range / unconditional statement that does reach cold rows is refused.
+SELECT sqlreg.try($$DELETE FROM sqlreg.p_sales WHERE id < 3$$)
+  AS parent_range_delete_matching_cold_refused;
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1$$)
+  AS parent_unconditional_update_refused;
+SELECT count(*)::bigint AS parent_total_after_refusals FROM sqlreg.p_sales;
+
+-- Pruning the managed leaf at plan time means the statement cannot touch it,
+-- cold data or not.
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE region = 'west'$$)
+  AS parent_update_pruned_to_unmanaged_leaf;
 SELECT amt FROM sqlreg.p_sales WHERE id = 101 AND region = 'west';
+
+-- External parameters in a generic plan are resolved the same way.
+SET plan_cache_mode = force_generic_plan;
+PREPARE sqlreg_bump(bigint) AS UPDATE sqlreg.p_sales SET amt = amt + 1 WHERE id = $1;
+SELECT sqlreg.try($$EXECUTE sqlreg_bump(2)$$) AS generic_plan_cold_param_refused;
+SELECT sqlreg.try($$EXECUTE sqlreg_bump(999)$$) AS generic_plan_hot_param_succeeds;
+DEALLOCATE sqlreg_bump;
+RESET plan_cache_mode;
+
+-- A real join over several leaves cannot be attributed to a leaf: fails closed
+-- (coarsely) even for hot rows, the documented remaining imprecision. (A join
+-- the planner folds into a single-leaf index scan, e.g. a one-row VALUES with a
+-- literal partition key, is just an ordinary precise statement.)
+SELECT sqlreg.try($$UPDATE sqlreg.p_sales s SET amt = amt + 1
+                    FROM (VALUES (999::bigint), (998)) v(i) WHERE s.id = v.i$$)
+  AS parent_update_from_join_refused_coarsely;
 
 -- Detaching the managed leaf is an ordinary partition-maintenance operation,
 -- unaffected by its management status (ADR-008: a managed leaf's own

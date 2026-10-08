@@ -8,12 +8,13 @@ permanently unmanageable; `ATTACH PARTITION`/`INHERIT`/`DETACH PARTITION`
 work in either direction as long as the parent role isn't managed. Confirmed
 live: a plain `SELECT`/`INSERT` through the parent sees a managed leaf's hot
 and cold data correctly, with zero planner-level code added, exactly as this
-ADR predicted. `UPDATE`/`DELETE`/`MERGE` through the parent are now refused
-whenever a managed leaf has cold data anywhere (a coarse, table-wide check,
-not a precise per-row recount) instead of silently doing nothing -- see
-"What shipped" below and `docs/limitations.md`. A precise per-leaf recount
-and the partition-key-changing-`UPDATE` hydration case remain open, tracked
-in "Next step".
+ADR predicted. `UPDATE`/`DELETE` through the parent now get the same precise
+cold-match recount as a plain table, per managed leaf (a third slice,
+2026-10-07); `MERGE` and plan shapes that cannot be attributed to a leaf are
+still refused whenever the leaf has cold data anywhere, instead of silently
+doing nothing -- see "What shipped" below and `docs/limitations.md`.
+Hydrate-on-write for a partitioned target and the partition-key-changing-
+`UPDATE` case remain open, tracked in "Next step".
 
 ## Date
 
@@ -106,13 +107,12 @@ What this requires building:
   own storage changes by gaining a parent.
 - **Write-guard / hydrate-on-write generalization.** Both need to loop over
   `PlannedStmt.resultRelations` instead of assuming exactly one. Turned out
-  less mechanical than it looked from here: PostgreSQL lists *every*
-  partition in that list regardless of how selective the WHERE clause is
-  (runtime, not plan-time, pruning), and modern PostgreSQL's `ModifyTable`
-  has a single child plan rather than one subplan per result relation, so
-  there is no straightforward per-leaf WHERE clause to recover yet. Shipped
-  as a coarse, fail-closed "has cold data anywhere" check instead of a
-  precise recount -- see "What shipped" below.
+  less mechanical than it looked from here: `PlannedStmt.resultRelations`
+  keeps plan-time-pruned partitions too, and modern PostgreSQL's
+  `ModifyTable` has a single child plan rather than one subplan per result
+  relation. First shipped as a coarse, fail-closed "has cold data anywhere"
+  check; made precise per leaf in the third slice -- see "What shipped"
+  below.
 - **Cross-partition tuple routing.** PostgreSQL implements a partition-key
   `UPDATE` that moves a row to a different leaf as a `DELETE` on the old leaf
   plus an `INSERT` on the new one. If the row being moved is cold-only on the
@@ -254,15 +254,53 @@ unmanaged sibling leaf correctly unaffected. Full SQL regression suite green
 "flush finalize could not acquire slot lock before deadline" flakiness on
 random *other* files, not on `partitioned_tables`), clippy clean.
 
+## What shipped (third slice, 2026-10-07): precise per-leaf recount
+
+The second slice's "every partition is always listed in
+`PlannedStmt.resultRelations`" finding was only half right, and the missing
+half is what made a precise recount possible. `PlannedStmt.resultRelations`
+keeps partitions that plan-time pruning removed (they stay for locking),
+while the `ModifyTable` node's own list -- what `EXPLAIN` prints -- holds only
+the survivors. So `WHERE id = 3 AND region = 'east'` reports two entries in
+the former but plans a single `Index Scan on p_sales_east`. The second slice
+read the former and concluded pruning never happened at plan time.
+
+The `ModifyTable` child plan is an `Append` (or `MergeAppend`) of one
+filtered scan per surviving leaf, or just that scan when one survives.
+`where_deparse::deparse_where_for_leaf` walks it, maps each scan's
+`scanrelid` back to a relation through the range table, and deparses the
+matching leaf's own scan filter exactly as the single-table path does.
+Three outcomes per managed leaf:
+
+- the leaf has **no scan** -- plan-time pruning proved the WHERE clause
+  cannot match any of its rows, so it gets no candidate at all;
+- the leaf has **one scan with a reproducible filter** -- it gets that filter
+  as `where_sql`, so the existing generic cold-match recount runs against the
+  leaf exactly as for a plain table (an `OR` across columns, ranges, `NOT
+  IN`, no WHERE at all, and external parameters in a generic plan all work);
+- **anything else** -- a join, a sub-query, a volatile qual, MERGE, a plan
+  node other than `Append`/`MergeAppend` over plain scans, two scans of one
+  leaf -- stays unverifiable and fails closed as before.
+
+So a parent-routed `UPDATE ... WHERE id = 999 AND region = 'east'` against a
+hot row now succeeds even though the east leaf has cold data elsewhere, and
+`WHERE region = 'west'` is unaffected by the east leaf's cold data, while
+`DELETE ... WHERE id < 3` or an unconditional `UPDATE` that does reach cold
+rows is refused with the same precise message a plain table gets. Extended
+`tests/sql/partitioned_tables.sql` covers each outcome, including a generic
+plan with an external parameter and a multi-row join (still refused
+coarsely). Full 19-case SQL regression suite green, clippy clean.
+
 ## Next step (not started)
 
-A **precise per-leaf recount** for a partitioned/inherited UPDATE/DELETE/
-MERGE, replacing the current coarse "has cold data anywhere" refusal --
-needs investigating modern PostgreSQL's single-child-plan shape for a
-multi-result-relation `ModifyTable` first (see "What shipped" above).
-`koldstore.hydrate_on_write` support for a partitioned target depends on the
-same missing mechanism. The partition-key-changing-`UPDATE` hydration case
-(moving a cold-only row across leaves via PostgreSQL's native DELETE+INSERT)
-is a separate, harder follow-on, not designed yet.
+`MERGE` through a partitioned/inherited parent still fails closed: it is a
+join, and the planner hook's MERGE probe is built against a single managed
+target. `koldstore.hydrate_on_write` still does not attempt a partitioned
+target (its `top_level_target` bails on more than one entry in
+`PlannedStmt.resultRelations`, so a cold row reached through the parent is
+refused with a pointer to `update_row`/`delete_row` rather than hydrated).
+The partition-key-changing-`UPDATE` hydration case (moving a cold-only row
+across leaves via PostgreSQL's native DELETE+INSERT) is a separate, harder
+follow-on, not designed yet.
 
 See [[koldstore_remaining_gaps]] for where this sits in the overall gap list.

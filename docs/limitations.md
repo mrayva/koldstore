@@ -97,32 +97,26 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   `Append`/`MergeAppend` construction calls the same per-relation scan hook
   used for a standalone managed table) and a plain `INSERT` through the
   parent routes to the leaf's hot heap exactly as it would for an unmanaged
-  partition -- both verified live. **`UPDATE`/`DELETE`/`MERGE` through the
-  parent are now refused, coarsely, rather than silently wrong.** The write
-  guard and `koldstore.hydrate_on_write` were both written assuming a single
-  result relation; PostgreSQL always lists *every* partition in
-  `PlannedStmt.resultRelations` for a parent-routed statement -- confirmed
-  live even for a maximally selective, literal-valued WHERE clause on the
-  partition key -- so there is no "only one leaf is reachable" shortcut to
-  lean on (modern PostgreSQL also gives `ModifyTable` a single child plan
-  rather than one subplan per result relation, so there is no
-  straightforward way yet to recover a precise per-leaf WHERE clause either).
-  A managed leaf among the result relations is therefore refused whenever it
-  has cold data *anywhere*, the same fail-closed treatment already used for
-  other hard-to-verify shapes (a CTE join source, a volatile function) --
-  this replaced the old silent "`UPDATE 0`, no error" outcome, but it also
-  means a parent-routed statement that would only ever touch a **hot** row
-  is refused too, as long as that leaf has cold data elsewhere (confirmed
-  live and covered by a regression case, not an oversight).
-  `koldstore.hydrate_on_write` still does not attempt to hydrate one of
-  these targets either (same missing precise-probe mechanism) -- it falls
-  through to the now-corrected write guard instead of doing nothing
-  unguarded. Run `UPDATE`/`DELETE`/`MERGE` directly against the managed leaf
-  relation instead of through the parent for the precise, per-row guard
-  behavior. A precise per-leaf recount, and a partition-key-changing
-  `UPDATE` that would move a cold-only row to a different leaf (PostgreSQL
-  implements this as a `DELETE` + `INSERT` pair), remain open -- tracked in
-  ADR-008's "Next step". `manage_table` still refuses foreign, temporary and
+  partition -- both verified live. **`UPDATE`/`DELETE` through the
+  parent get the same precise cold-match check as a plain table, per managed
+  leaf.** PostgreSQL gives `ModifyTable` a single child plan -- an `Append` of
+  one filtered scan per leaf -- so the guard recovers each managed leaf's own
+  filter from its scan; a leaf the plan never scans (plan-time pruning) cannot
+  be touched and is skipped. A statement whose predicate reaches cold rows is
+  refused with the usual "matches N cold row(s)" message, and one that only
+  touches hot rows, or only an unmanaged sibling leaf, runs normally.
+  **`MERGE` through the parent, and any `UPDATE`/`DELETE` whose plan cannot be
+  attributed to a leaf (a join across several partitions, a sub-query, a
+  volatile function), are refused whenever the managed leaf has cold data
+  *anywhere*** -- the same fail-closed treatment as other hard-to-verify
+  shapes, so a statement that would only touch hot rows can be refused too.
+  `koldstore.hydrate_on_write` does not attempt to hydrate through the parent:
+  a cold row reached that way is refused with a pointer to `update_row`/
+  `delete_row` rather than hydrated. Running the statement against the managed
+  leaf directly avoids both limits. A partition-key-changing `UPDATE` that
+  would move a cold-only row to a different leaf (PostgreSQL implements this as
+  a `DELETE` + `INSERT` pair) remains open -- tracked in ADR-008's "Next
+  step". `manage_table` still refuses foreign, temporary and
   unlogged tables, views, materialized views and sequences as before.
 - Schema, table and column names may be any valid PostgreSQL identifier:
   mixed case, reserved words, spaces, embedded quotes and dots, slashes,
