@@ -11,6 +11,8 @@
 #[cfg(feature = "pg")]
 pub mod apply;
 #[cfg(feature = "pg")]
+pub(crate) mod fence_progress;
+#[cfg(feature = "pg")]
 pub mod lifecycle;
 #[cfg(feature = "pg")]
 pub mod provision;

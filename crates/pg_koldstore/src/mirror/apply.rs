@@ -205,6 +205,14 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
     // *record* a new applied_lsn in the uncommitted flush txn, but they must
     // not pin recyclable WAL either).
     acknowledge_committed_apply(&slot, durable.as_ref())?;
+    // Also acknowledge whatever committed hydrate-on-write fences (and the applier) have published
+    // to the shared watermark: their mirror rows are committed, and without this nobody moves the
+    // slot while hydrators hold its lock back to back (see `fence_progress`). A watermark of 0
+    // (nothing published since startup) is a no-op.
+    let published = crate::worker::wal::applied_through(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
+    if published > 0 {
+        acknowledge_slot_lsn(&slot, published)?;
+    }
 
     let row_budget = row_budget_for(&request);
     let time_budget = time_budget_for(&request);
@@ -1072,6 +1080,7 @@ pub fn fence_for_read() -> Result<(), String> {
             max_ms: Some(0),
         })?;
         if !outcome.budget_exhausted {
+            super::fence_progress::note_fence(fence.get());
             return Ok(());
         }
         pgrx::check_for_interrupts!();

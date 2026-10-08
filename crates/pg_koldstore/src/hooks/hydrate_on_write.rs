@@ -448,6 +448,18 @@ fn hydrate_target(target: &HydrateTarget) -> bool {
         return false;
     }
     let mut locked = std::collections::HashSet::<String>::new();
+    // The fence below takes the slot lock, which this transaction then holds to its end, so
+    // lock the candidate keys *first*: the same order `update_row`/`delete_row` use, and one that
+    // lets the common case settle after a single fence and cold read instead of two. A stale
+    // probe can only over-report (an extra, harmless lock), and a row it missed is picked up by
+    // the loop. Over the row cap, leave it to the loop's own accounting and error.
+    let fence_first = crate::guc::hydrate_fence_mirror();
+    if fence_first && probe.len() <= crate::guc::max_hydrate_rows() {
+        let probe_keys: Vec<String> = probe.iter().map(|(key, _)| key.clone()).collect();
+        crate::sql::cold_dml::key_lock::lock_keys_bounded(table_oid, &probe_keys)
+            .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write: {error}"));
+        locked.extend(probe_keys);
+    }
     let mut rows: Vec<(String, serde_json::Value)> = Vec::new();
     let mut settled = false;
     for _ in 0..6 {
@@ -464,7 +476,16 @@ fn hydrate_target(target: &HydrateTarget) -> bool {
         if locked.len() + new_keys.len() > crate::guc::max_hydrate_rows() {
             break; // over the cap: reported below
         }
-        crate::sql::cold_dml::key_lock::lock_keys_bounded(table_oid, &new_keys)
+        // With the fence on this transaction usually holds the slot lock already, so anyone else
+        // holding one of these keys is queued behind us for that lock and waiting out the full key
+        // timeout would only stall both of us: wait briefly (a free-skipped fence took no lock, so
+        // a holder may still be making progress), then fail and let the statement be retried.
+        let wait = if fence_first {
+            std::time::Duration::from_millis(250)
+        } else {
+            crate::sql::cold_dml::key_lock::KEY_LOCK_TIMEOUT
+        };
+        crate::sql::cold_dml::key_lock::lock_keys_within(table_oid, &new_keys, wait)
             .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write: {error}"));
         locked.extend(new_keys);
     }

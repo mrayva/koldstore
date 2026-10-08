@@ -596,3 +596,46 @@ first pass (a cold flush silently no-opped under `koldstore.flush_execution`'s d
 with a worker-process-starved dev cluster), so it is not conclusive proof for the genuinely-cold
 case and is not the basis for the fix above; it is recorded here only as a secondary sanity check
 that curcid-forcing does not globally disable SSI tracking for a transaction.
+
+Slot-lock contention under concurrent hydrators (2026-10-08). Measured first, not guessed: per-phase
+timers on the fence and the hydrate path showed the earlier "the applier is the bottleneck" and
+"priority/batching" framings were each aimed at a symptom. Two things were wrong, both in how a
+hydrating transaction uses the slot lock it holds to its end.
+
+(1) *The backlog grew without bound.* A read fence applies WAL inside the caller's own transaction and
+(correctly) records and acknowledges nothing, so while hydrators hold the slot lock back to back nobody
+moves the slot: each fence re-decoded and re-applied everything since the last applier pass (about 12
+row changes per fence with one client, ~100 with polling and ~200 with queueing at eight, growing; a
+fence cost 11 ms at 12 rows and 100+ ms at 200). The fix does not touch who may take the lock and does
+not defer any work to the applier. A fence that ran in a transaction that then *commits* has committed
+mirror state, so `mirror::fence_progress` remembers each fence's LSN with its subtransaction level
+(`koldstore_wal_mirror::wal::fence_pending::PendingFences`, unit-tested: a subtransaction abort drops
+its fences, a subtransaction commit hands them to the parent, a top-level abort or PREPARE drops
+everything), publishes the maximum to the shared `applied_through` watermark at top-level commit, and
+`apply_bounded_locked` acknowledges the slot up to that watermark exactly as it already did for the
+durable `applied_lsn`. Nothing uncommitted is ever acknowledged, so the "lost tombstone" class stays
+closed; the watermark is in shared memory, so a crash only costs a re-decode of idempotent upserts.
+Result: fence backlog ~2 rows regardless of client count.
+
+(2) *Two fences and two cold reads per statement, all under the lock.* `hydrate_target` fenced first and
+locked keys second, which forced a second fence and cold read to re-check after the locks. It now locks
+the stale probe's candidate keys first (the order `update_row`/`delete_row` already used; a stale probe
+can only over-report) and the common case settles after one fence and one cold read. A key that
+first shows up after the fence is locked with a 250 ms bound instead of 5 s: this transaction then
+usually holds the slot lock, so whoever holds that key is queued behind it and waiting longer only
+stalls both; the error is the existing retryable one.
+
+Measured on the dev cluster with `scripts/stress-hydrate-on-write.sh` (tps; 8 clients unless noted):
+
+| | before | after |
+|---|---|---|
+| 1 client, no flusher | 21 | 36 |
+| 8 clients, queueing | 8.8 | 39 |
+| 8 clients, `hydrate_slot_lock_poll_ms=5000` | 13 | 52 |
+| 8 clients + flusher, update / delete / mixed phases | 9.7 / 5.5 / 17.8 | 15.9 / 7.8 / 26.0 |
+
+All three phases of the stress script report zero violations before and after (lost/doubled updates,
+resurrected or duplicated keys, updates succeeding after a delete). The remaining cost is one fence
+(~10 ms: ~4 decode, ~3 slot acknowledgement, the rest applying) plus commit, still serialized by the
+lock; with a flusher looping, flush finalize holding the same lock is the next limit. Real parallelism
+would still need a way to share one slot's decoded changes across backends, which this does not attempt.

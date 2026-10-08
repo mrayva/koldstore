@@ -50,11 +50,20 @@ pub(crate) fn key_of_pk_json(table_oid: pgrx::pg_sys::Oid, pk_json: &serde_json:
 /// Takes the xact-level lock of every key (table-scoped), waiting at most
 /// [`KEY_LOCK_TIMEOUT`] in total.
 pub(crate) fn lock_keys_bounded(table_oid: pgrx::pg_sys::Oid, keys: &[String]) -> Result<(), String> {
+    lock_keys_within(table_oid, keys, KEY_LOCK_TIMEOUT)
+}
+
+/// Like [`lock_keys_bounded`] with an explicit total wait; `Duration::ZERO` tries each key once.
+pub(crate) fn lock_keys_within(
+    table_oid: pgrx::pg_sys::Oid,
+    keys: &[String],
+    timeout: Duration,
+) -> Result<(), String> {
     if keys.is_empty() {
         return Ok(());
     }
     let namespace = i32::from_ne_bytes(table_oid.to_u32().to_ne_bytes());
-    let deadline = Instant::now() + KEY_LOCK_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut pending: Vec<String> = keys.to_vec();
     loop {
         // Returns the keys that could NOT be locked; the others are now held.

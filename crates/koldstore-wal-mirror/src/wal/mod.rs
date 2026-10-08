@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 /// Bounded apply request/outcome contracts and budget helpers.
 pub mod apply_contract;
+/// Which foreground read-fence progress is committed yet (subtransaction-aware).
+pub mod fence_pending;
 /// Capture infrastructure naming (publication, slot, flush origin).
 pub mod naming;
 /// Pure `async_mirror_status` JSON composition.

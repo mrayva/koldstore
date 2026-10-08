@@ -304,12 +304,16 @@ unsafe extern "C-unwind" fn wake_xact_callback(
     }
     match event {
         pg_sys::XactEvent::XACT_EVENT_COMMIT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT => {
+            crate::mirror::fence_progress::on_commit();
             publish_pending_commit()
         }
         pg_sys::XactEvent::XACT_EVENT_ABORT
         | pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT
         | pg_sys::XactEvent::XACT_EVENT_PREPARE
-        | pg_sys::XactEvent::XACT_EVENT_PRE_PREPARE => clear_pending(),
+        | pg_sys::XactEvent::XACT_EVENT_PRE_PREPARE => {
+            crate::mirror::fence_progress::on_abort();
+            clear_pending()
+        }
         _ => {}
     }
 }
@@ -386,6 +390,7 @@ unsafe extern "C-unwind" fn wake_subxact_callback(
         return;
     }
     let nesting_level = current_nesting_level();
+    crate::mirror::fence_progress::on_subxact(event, nesting_level);
     update_subxact_dirty(&MANAGED_DML_PENDING, event, nesting_level);
     update_subxact_dirty(&FLUSH_QUEUE_PENDING, event, nesting_level);
     update_subxact_dirty(&SCHEDULE_PENDING, event, nesting_level);
