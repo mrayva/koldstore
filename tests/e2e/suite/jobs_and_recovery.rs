@@ -257,7 +257,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
 }
 
 #[tokio::test]
-async fn extension_catalog_dml_is_blocked_but_storage_api_is_allowed_on_pgrx() -> Result<()> {
+async fn extension_catalog_dml_and_storage_api_require_superuser_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "catalog_dml_blocked").await?;
         let app_role = db.ensure_app_role().await?;
@@ -280,25 +280,50 @@ async fn extension_catalog_dml_is_blocked_but_storage_api_is_allowed_on_pgrx() -
                 &[],
             )
             .await;
-        assert!(direct_insert.is_err());
+        assert!(direct_insert.is_err(), "direct catalog DML must be blocked");
 
-        let api_insert = db
+        // #120: the management API is superuser-only, so an ordinary application role is refused
+        // here as well (it used to be allowed, which let any role redirect where cold data lives).
+        let api_as_app_role = db
             .client
             .query_one(
                 r#"
                 SELECT koldstore.register_storage(
-                  'api_allowed',
-                  'filesystem',
-                  '/tmp/api-allowed',
-                  '{}'::jsonb,
-                  '{}'::jsonb
+                  'api_refused', 'filesystem', '/tmp/api-refused', '{}'::jsonb, '{}'::jsonb
                 )
                 "#,
                 &[],
             )
             .await;
         db.client.batch_execute("RESET ROLE").await?;
-        assert!(api_insert.is_ok());
+        let error =
+            api_as_app_role.expect_err("register_storage must be refused for a non-superuser");
+        let message = error
+            .as_db_error()
+            .map_or_else(|| error.to_string(), |db| db.message().to_string());
+        assert!(
+            message.contains("must be superuser"),
+            "unexpected register_storage refusal: {message}"
+        );
+
+        // The connecting (superuser) role can still use the API. The name is unique per run
+        // because storages persist in the (reused) test database.
+        let storage_name = format!("api_allowed_{}", db.schema);
+        let api_as_superuser = db
+            .client
+            .query_one(
+                r#"
+                SELECT koldstore.register_storage(
+                  $1, 'filesystem', '/tmp/api-allowed', '{}'::jsonb, '{}'::jsonb
+                )
+                "#,
+                &[&storage_name],
+            )
+            .await;
+        assert!(
+            api_as_superuser.is_ok(),
+            "register_storage must work for a superuser: {api_as_superuser:?}"
+        );
     }
 
     Ok(())

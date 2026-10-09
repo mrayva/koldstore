@@ -3,6 +3,26 @@
 use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
+/// Brings one cold row back into the hot heap with `koldstore.hydrate_pk`.
+///
+/// Re-inserting over an existing cold key (`INSERT .. ON CONFLICT`) is refused by the cold-insert
+/// guard (#122) because the conflict check only sees the hot heap; this is the supported way to
+/// "rematerialize" a row. `pk_json` is the primary-key object, for example `{"id": 5}`.
+///
+/// # Errors
+///
+/// Returns an error when the call fails.
+pub async fn hydrate_pk(client: &Client, relation: &str, pk_json: &str) -> Result<()> {
+    client
+        .execute(
+            "SELECT koldstore.hydrate_pk($1::text::regclass, $2::text::jsonb)",
+            &[&relation, &pk_json],
+        )
+        .await
+        .with_context(|| format!("hydrate_pk({relation}, {pk_json})"))?;
+    Ok(())
+}
+
 /// Cold segment object key under the default `{namespace}/{tableName}/` template.
 ///
 /// Requires aliases `n` (`pg_namespace`), `c` (`pg_class`), and `cs` (`cold_segments`).

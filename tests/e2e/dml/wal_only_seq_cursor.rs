@@ -29,7 +29,12 @@ async fn wal_only_empty_activation_has_no_capture_triggers() -> Result<()> {
             .await?;
         manage_table(&db.client, &relation, &db.storage_name).await?;
 
-        let triggers = source_triggers(&db.client, &relation).await?;
+        let (triggers, cold_guards) =
+            common::without_cold_insert_guard(source_triggers(&db.client, &relation).await?);
+        assert_eq!(
+            cold_guards, 1,
+            "a managed table carries exactly one cold-insert guard trigger"
+        );
         assert_eq!(
             triggers,
             vec![common::change_log_pk_guard_trigger_name(&relation)],
@@ -365,7 +370,12 @@ async fn populated_activation_under_concurrent_dml_is_gap_free() -> Result<()> {
         manage_table(&db.client, &relation, &db.storage_name).await?;
         writer.await??;
 
-        let triggers = source_triggers(&db.client, &relation).await?;
+        let (triggers, cold_guards) =
+            common::without_cold_insert_guard(source_triggers(&db.client, &relation).await?);
+        assert_eq!(
+            cold_guards, 1,
+            "a managed table carries exactly one cold-insert guard trigger"
+        );
         assert_eq!(
             triggers,
             vec![common::change_log_pk_guard_trigger_name(&relation)],

@@ -35,6 +35,7 @@ pub use async_mirror::{
 };
 
 pub use catalog::{
+    without_cold_insert_guard, COLD_INSERT_GUARD_TRIGGER_SUFFIX,
     active_job_count, assert_catalog_has_active_schema, assert_change_log_mirror_exists,
     assert_cold_metadata_present, assert_no_active_jobs, assert_primary_key_columns_match,
     assert_system_columns_absent, change_log_mirror_relation, change_log_mirror_relation_name,
@@ -71,7 +72,7 @@ pub use peer::{
     barrier_lock, barrier_unlock, connect_flush_peer, connect_peer, BARRIER_LOCK_NAMESPACE,
 };
 pub use sql::{
-    assert_index_scan, explain, explain_analyze, explain_analyze_json,
+    assert_index_scan, explain, hydrate_pk, explain_analyze, explain_analyze_json,
     explain_with_seqscan_disabled, hot_row_count, relation_size, row_count, row_count_from_sql,
     RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY, SQL_DEFAULT_MANIFEST_OBJECT_KEY,
 };

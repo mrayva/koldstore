@@ -57,15 +57,23 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
                     let id = 2_000_000 + (worker_id as i64) * 100_000 + (seq % 500);
                     match seq % 5 {
                         0 => {
-                            peer.execute(
-                                &format!(
-                                    "INSERT INTO {relation} (id, account_id, title, qty, category) \
-                                     VALUES ($1, 1, $2, 1, 'soak') \
-                                     ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title"
-                                ),
-                                &[&id, &format!("soak-{worker_id}-{seq}")],
-                            )
-                            .await?;
+                            // With a flusher running, the id may already be cold, and the cold-insert
+                            // guard (#122) then refuses the INSERT: an expected outcome here.
+                            if let Err(error) = peer
+                                .execute(
+                                    &format!(
+                                        "INSERT INTO {relation} (id, account_id, title, qty, category) \
+                                         VALUES ($1, 1, $2, 1, 'soak') \
+                                         ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title"
+                                    ),
+                                    &[&id, &format!("soak-{worker_id}-{seq}")],
+                                )
+                                .await
+                            {
+                                if !is_cold_insert_refusal(&error) {
+                                    return Err(error.into());
+                                }
+                            }
                         }
                         1 => {
                             peer.execute(
@@ -175,15 +183,23 @@ async fn async_mixed_load_soak_across_two_databases() -> Result<()> {
                     let id = 2_000_000 + (worker_id as i64) * 100_000 + (seq % 500);
                     match seq % 5 {
                         0 => {
-                            peer.execute(
-                                &format!(
-                                    "INSERT INTO {relation} (id, account_id, title, qty, category) \
-                                     VALUES ($1, 1, $2, 1, 'soak') \
-                                     ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title"
-                                ),
-                                &[&id, &format!("soak-{worker_id}-{seq}")],
-                            )
-                            .await?;
+                            // With a flusher running, the id may already be cold, and the cold-insert
+                            // guard (#122) then refuses the INSERT: an expected outcome here.
+                            if let Err(error) = peer
+                                .execute(
+                                    &format!(
+                                        "INSERT INTO {relation} (id, account_id, title, qty, category) \
+                                         VALUES ($1, 1, $2, 1, 'soak') \
+                                         ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title"
+                                    ),
+                                    &[&id, &format!("soak-{worker_id}-{seq}")],
+                                )
+                                .await
+                            {
+                                if !is_cold_insert_refusal(&error) {
+                                    return Err(error.into());
+                                }
+                            }
                         }
                         1 => {
                             peer.execute(
@@ -257,4 +273,11 @@ async fn async_mixed_load_soak_across_two_databases() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// True when `error` is the cold-insert guard (#122) refusing an INSERT over an existing key.
+fn is_cold_insert_refusal(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.message().contains("refusing INSERT on managed table"))
 }

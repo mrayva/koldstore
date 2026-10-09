@@ -214,11 +214,14 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
                 relation = table.relation,
             ))
             .await?;
+        // Move cold row 1 to another scope. A scope-changing re-insert over the existing cold key
+        // is refused by the cold-insert guard (#122), so hydrate it into the heap and update it.
+        common::hydrate_pk(&db.client, &table.relation, r#"{"id": 1}"#).await?;
         let moved = db
             .client
             .execute(
                 &format!(
-                    "INSERT INTO {} (id, user_id, title, body) VALUES (1, 'user-b', 'moved-b', 'moved-hot')",
+                    "UPDATE {} SET user_id = 'user-b', title = 'moved-b', body = 'moved-hot' WHERE id = 1",
                     table.relation
                 ),
                 &[],
@@ -295,11 +298,19 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
             db.flush_table(&relation).await? > 0,
             "expected text-PK flush"
         );
+        // Move the cold key to another scope: re-inserting over a cold key is refused by the
+        // cold-insert guard (#122), so hydrate it into the heap and update it. The key is built
+        // with serde_json because it deliberately contains quote characters.
+        common::hydrate_pk(
+            &db.client,
+            &relation,
+            &serde_json::json!({ "id": key }).to_string(),
+        )
+        .await?;
         db.client
             .execute(
                 &format!(
-                    "INSERT INTO {relation} (id, user_id, payload, migration_seq) \
-                     VALUES ($1, 'user-b', 'hot-b', 2)"
+                    "UPDATE {relation} SET user_id = 'user-b', payload = 'hot-b' WHERE id = $1"
                 ),
                 &[&key],
             )

@@ -260,15 +260,12 @@ async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Re
         // Committed delete of a previously cold PK must be invisible before flush.
         // Rematerialize into hot first so DELETE writes a mirror tombstone (op=3);
         // a cold-only DELETE that matches zero heap rows does not fire triggers.
+        // (A plain INSERT .. ON CONFLICT over an existing cold key is refused by the cold-insert
+        // guard, #122; koldstore.hydrate_pk is the supported way to bring the row back into hot.)
+        common::hydrate_pk(&db.client, &table.relation, r#"{"id": 2}"#).await?;
         db.client
             .batch_execute(&format!(
-                r#"
-                INSERT INTO {relation} (id, account_id, title, qty, category)
-                VALUES (2, 1, 'rematerialized', 2, 'hot')
-                ON CONFLICT (id) DO UPDATE
-                SET title = EXCLUDED.title, qty = EXCLUDED.qty, category = EXCLUDED.category;
-                DELETE FROM {relation} WHERE id = 2;
-                "#,
+                "DELETE FROM {relation} WHERE id = 2;",
                 relation = table.relation
             ))
             .await?;

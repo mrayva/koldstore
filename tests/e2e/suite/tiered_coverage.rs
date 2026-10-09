@@ -193,15 +193,10 @@ async fn rematerialize_update_and_reflush_keeps_latest_overlay() -> Result<()> {
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
         // Cold-only SQL UPDATE is a no-op in MVP; rematerialize then update (Timescale path).
+        common::hydrate_pk(&db.client, &table.relation, r#"{"id": 5}"#).await?;
         db.client
             .batch_execute(&format!(
-                r#"
-                INSERT INTO {relation} (id, account_id, title, qty, category)
-                VALUES (5, 1, 'rematerialized', 5, 'hot')
-                ON CONFLICT (id) DO UPDATE
-                SET title = EXCLUDED.title, qty = EXCLUDED.qty, category = EXCLUDED.category;
-                UPDATE {relation} SET title = 'after-reflush', qty = 55 WHERE id = 5;
-                "#,
+                "UPDATE {relation} SET title = 'after-reflush', qty = 55 WHERE id = 5",
                 relation = table.relation
             ))
             .await?;

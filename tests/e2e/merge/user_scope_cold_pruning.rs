@@ -183,9 +183,14 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
         );
         let opened = explain_counter(&plan, "Parquet Segments Opened")?;
         let considered = explain_counter(&plan, "Candidate Segments")?;
+        // The ordered progressive strategy late-materializes: it opens each candidate once to
+        // compete on the order key and again for the body columns, and `Parquet Segments Opened`
+        // counts both. "Nothing was pruned" therefore means every candidate was opened for the
+        // compete phase (and nothing beyond compete + body opens happened).
+        let compete = explain_counter(&plan, "Cold Compete Opens").unwrap_or(opened);
         anyhow::ensure!(
-            opened == considered,
-            "unsupported text pruning should conservatively open all candidates; opened={opened} considered={considered}\n{plan}"
+            compete == considered && opened >= considered && opened <= 2 * considered,
+            "unsupported text pruning should conservatively open all candidates; opened={opened} compete={compete} considered={considered}\n{plan}"
         );
 
         let visible: i64 = db

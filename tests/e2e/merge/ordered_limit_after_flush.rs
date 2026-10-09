@@ -366,15 +366,15 @@ async fn ordered_limit_late_materialization_stages() -> Result<()> {
         anyhow::ensure!(db.flush_table(&relation).await? > 0);
         common::assert_no_active_jobs(&db.client, &relation).await?;
 
-        // Flush prune frees heap PK slots; re-insert newer hot versions of the
-        // lowest ids so ASC LIMIT can stop on hot after compete expands cold.
+        // Give the lowest ids newer hot versions so ASC LIMIT can stop on hot after compete
+        // expands cold. Re-inserting over a cold key is refused by the cold-insert guard (#122),
+        // so hydrate each row into the heap and update it.
+        for id in 1..=8 {
+            common::hydrate_pk(&db.client, &relation, &format!(r#"{{"id": {id}}}"#)).await?;
+        }
         db.client
             .batch_execute(&format!(
-                r#"
-                INSERT INTO {relation} (id, title, body)
-                SELECT gs, 'hot-t-' || gs, 'hot-' || gs
-                FROM generate_series(1, 8) AS gs;
-                "#
+                "UPDATE {relation} SET title = 'hot-t-' || id, body = 'hot-' || id WHERE id <= 8"
             ))
             .await?;
         common::fence_async_mirror(&db.client).await?;

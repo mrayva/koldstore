@@ -60,6 +60,19 @@ pub fn change_log_pk_guard_trigger_name(source_relation: &str) -> String {
     koldstore_wal_mirror::pk_guard_trigger_name(&change_log_mirror_relation_name(source_relation))
 }
 
+/// Name suffix of the BEFORE INSERT cold-key guard trigger every managed table carries (#122).
+pub const COLD_INSERT_GUARD_TRIGGER_SUFFIX: &str = "__cold_ins_guard_trg";
+
+/// Splits a table's trigger names into everything except the cold-insert guard and the number of
+/// cold-insert guard triggers found (a managed table must carry exactly one).
+#[must_use]
+pub fn without_cold_insert_guard(triggers: Vec<String>) -> (Vec<String>, usize) {
+    let (guards, rest): (Vec<String>, Vec<String>) = triggers
+        .into_iter()
+        .partition(|name| name.ends_with(COLD_INSERT_GUARD_TRIGGER_SUFFIX));
+    (rest, guards.len())
+}
+
 /// Returns the mirror seq index name for a source table.
 #[must_use]
 pub fn change_log_mirror_seq_index_name(source_relation: &str) -> String {

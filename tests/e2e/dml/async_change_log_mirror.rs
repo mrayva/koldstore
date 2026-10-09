@@ -215,10 +215,16 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
                 &[&relation],
             )
             .await?;
-        let triggers = trigger_rows
-            .iter()
-            .map(|row| row.get::<_, String>(0))
-            .collect::<Vec<_>>();
+        let (triggers, cold_guards) = common::without_cold_insert_guard(
+            trigger_rows
+                .iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            cold_guards, 1,
+            "a managed table carries exactly one cold-insert guard trigger"
+        );
         assert_eq!(
             triggers,
             vec![common::change_log_pk_guard_trigger_name(&relation)],

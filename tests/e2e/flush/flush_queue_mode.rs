@@ -797,6 +797,14 @@ async fn queue_orphan_reclaim_across_repeated_waves_with_dml() -> Result<()> {
                     .with_context(|| format!("join wave {wave} flusher {idx}"))??;
                 any_rows = any_rows.max(rows);
             }
+            if any_rows == 0 {
+                // The concurrent flushers are enqueued while the writer is still committing, so
+                // they can finish before its rows reach the async mirror (the mirror was only
+                // fenced above) and legitimately archive nothing. The invariant this wave checks
+                // is that the rows stay flushable and nothing is wedged after the planted orphan
+                // was reclaimed: once the mirror has caught up, a force flush must archive them.
+                any_rows = db.flush_table_with_force(&table.relation, true).await?;
+            }
             anyhow::ensure!(
                 any_rows > 0,
                 "wave {wave}: reclaim force flush must archive rows"
