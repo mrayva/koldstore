@@ -76,6 +76,10 @@ pub struct PackedColumnIndex {
     pub row_group_max_values: Vec<Option<Vec<u8>>>,
     /// Per-row-group null counts; `None` means the footer did not report one.
     pub row_group_null_counts: Vec<Option<i64>>,
+    /// Optional membership bitmap over this column's values (see `koldstore_sortkey::summary`).
+    /// Filled by the flush writer, not derivable from the footer; `None` never prunes.
+    #[serde(default)]
+    pub value_summary: Option<Vec<u8>>,
 }
 
 /// Footer-derived metadata persisted beside one immutable cold segment.
@@ -290,6 +294,7 @@ fn extract_column_index(
         row_group_min_values,
         row_group_max_values,
         row_group_null_counts,
+        value_summary: None,
     })
 }
 

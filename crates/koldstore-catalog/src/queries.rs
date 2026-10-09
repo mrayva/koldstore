@@ -541,6 +541,38 @@ pub fn plan_cold_segment_candidates_closed_range() -> SqlResult<SqlStatement> {
     )
 }
 
+/// Builds active cold-segment candidates for a single value (`lower == upper`), additionally
+/// dropping segments whose `value_summary` proves they cannot contain it.
+///
+/// Parameters are those of [`plan_cold_segment_candidates_closed_range`] plus `$8`, the
+/// non-negative `bigint` `koldstore_sortkey::summary_hash` of the encoded value. A segment without
+/// a summary (`NULL`: written before summaries existed, too large, or an unsupported type) is
+/// never pruned here. The test mirrors [`koldstore_sortkey::summary_may_contain`]: bit
+/// `hash % (8 * octet_length)` as read by `get_bit(bytea, n)`.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_segment_candidates_point() -> SqlResult<SqlStatement> {
+    plan_cold_segment_candidates_with(
+        "resolve active cold segment candidates for a point lookup",
+        "AND csi.min_value <= $7::bytea\n      AND csi.max_value >= $6::bytea",
+        "csi.min_value IS NULL",
+        "AND (csi.value_summary IS NULL OR get_bit(csi.value_summary, \
+         ($8::bigint % (octet_length(csi.value_summary) * 8)::bigint)::integer) = 1)",
+        vec![
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Bytea,
+            SqlParamType::Bytea,
+            SqlParamType::BigInt,
+        ],
+    )
+}
+
 /// Builds active cold-segment candidates for an inclusive lower bound.
 ///
 /// Parameters are table OID, scope key, stable column ID, type OID, codec
@@ -723,6 +755,24 @@ fn plan_cold_segment_candidates(
     unknown_predicate: &str,
     param_types: Vec<SqlParamType>,
 ) -> SqlResult<SqlStatement> {
+    plan_cold_segment_candidates_with(
+        operation,
+        bound_predicate,
+        unknown_predicate,
+        "",
+        param_types,
+    )
+}
+
+/// `extra_predicate` is an optional `AND ...` fragment applied to both index arms (for example the
+/// point-lookup value-summary test).
+fn plan_cold_segment_candidates_with(
+    operation: &str,
+    bound_predicate: &str,
+    unknown_predicate: &str,
+    extra_predicate: &str,
+    param_types: Vec<SqlParamType>,
+) -> SqlResult<SqlStatement> {
     // UNION ALL (not OR) keeps each arm index-friendly on cold_segment_index.
     // Physical-name JSON is expanded once per schema version, not per segment.
     SqlStatement::read_with_params(
@@ -745,6 +795,7 @@ WITH matching_index AS (
       AND csi.type_oid = $4::oid
       AND csi.codec_version = $5::smallint
       {bound_predicate}
+      {extra_predicate}
 
     UNION ALL
 
@@ -763,6 +814,7 @@ WITH matching_index AS (
       AND csi.type_oid = $4::oid
       AND csi.codec_version = $5::smallint
       AND {unknown_predicate}
+      {extra_predicate}
 ),
 table_prefix AS (
     SELECT {SQL_TABLE_PREFIX} AS prefix

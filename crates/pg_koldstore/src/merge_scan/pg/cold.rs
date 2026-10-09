@@ -629,7 +629,25 @@ fn load_segment_index_candidates(
         .get(&column.column_id.get())
         .cloned()
         .unwrap_or((None, None));
+    // A single value (`WHERE col = $1`): besides the min/max overlap, drop segments whose stored
+    // value summary proves they cannot hold it. Only columns whose summaries can exist take this
+    // path; the label stays `bounded_range` and the saving shows up in the existing
+    // "Segments Pruned by Catalog Index" counter.
+    let point_hash = match (&lower, &upper) {
+        (Some(low), Some(high))
+            if low == high
+                && koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+                    .is_some_and(koldstore_parquet::supports_value_summary) =>
+        {
+            i64::try_from(koldstore_sortkey::summary_hash(low)).ok()
+        }
+        _ => None,
+    };
     let (statement, shape) = match (&lower, &upper) {
+        (Some(_), Some(_)) if point_hash.is_some() => (
+            koldstore_catalog::queries::plan_cold_segment_candidates_point(),
+            SegmentIndexLookupShape::BoundedRange,
+        ),
         (Some(_), Some(_)) => (
             koldstore_catalog::queries::plan_cold_segment_candidates_closed_range(),
             SegmentIndexLookupShape::BoundedRange,
@@ -689,6 +707,9 @@ fn load_segment_index_candidates(
     }
     if let Some(value) = &upper {
         args.push(DatumWithOid::from(value.clone()));
+    }
+    if let Some(hash) = point_hash {
+        args.push(DatumWithOid::from(hash));
     }
 
     // Report the index PostgreSQL is expected to prefer for this bound shape.

@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segment_index (
     row_group_min_values bytea[] NOT NULL,
     row_group_max_values bytea[] NOT NULL,
     row_group_null_counts bigint[] NOT NULL,
+    -- Membership bitmap over this column's values in the segment (koldstore-sortkey summary);
+    -- NULL means "cannot prune". Lets point lookups skip segments that cannot hold the key.
+    value_summary bytea,
     PRIMARY KEY (segment_id, column_id),
     CHECK ((min_value IS NULL) = (max_value IS NULL)),
     CHECK (min_value IS NULL OR min_value <= max_value),

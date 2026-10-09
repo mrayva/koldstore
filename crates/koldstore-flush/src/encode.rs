@@ -9,9 +9,9 @@
 
 use koldstore_common::{CellValue, ColumnRef, QualifiedTableName, SqlParamType, SqlStatement};
 use koldstore_parquet::{
-    extract_packed_segment_metadata, CleanColdRecordBatchBuilder, ColdMetadataColumn,
-    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, SortingColumnSpec,
-    StreamingParquetSegmentWriter, WriterOptions,
+    CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
+    SegmentSplitPolicy, SortingColumnSpec, StreamingParquetSegmentWriter, WriterOptions,
+    add_column_to_value_summary, extract_packed_segment_metadata, supports_value_summary,
 };
 
 use crate::write::FlushWriteChunk;
@@ -110,6 +110,65 @@ pub enum MirrorFlushPageCursor {
     },
 }
 
+/// Accumulates the primary-key membership summary of the segment being written.
+///
+/// Only single-column primary keys of a supported type get one. `builder` is `None` once anything
+/// went wrong for the current segment: a half-filled summary would cause false negatives, so the
+/// segment then simply has none.
+struct PkSummaryState {
+    column: String,
+    column_id: koldstore_common::ColumnId,
+    sort_key_type: koldstore_sortkey::SortKeyType,
+    builder: Option<koldstore_sortkey::ValueSummaryBuilder>,
+}
+
+impl PkSummaryState {
+    fn for_input(input: &StreamEncodeInput) -> Option<Self> {
+        let [pk] = input.primary_key_columns.as_slice() else {
+            return None;
+        };
+        let indexed = input
+            .indexed_columns
+            .iter()
+            .find(|column| &column.name == pk)?;
+        let column = input
+            .parquet_columns
+            .iter()
+            .find(|column| &column.name == pk)?;
+        let sort_key_type =
+            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+        supports_value_summary(sort_key_type).then(|| Self {
+            column: pk.clone(),
+            column_id: indexed.column_id,
+            sort_key_type,
+            builder: Some(koldstore_sortkey::ValueSummaryBuilder::new()),
+        })
+    }
+
+    fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
+        if let Some(builder) = self.builder.as_mut() {
+            if add_column_to_value_summary(builder, batch, &self.column, self.sort_key_type)
+                .is_err()
+            {
+                self.builder = None;
+            }
+        }
+    }
+
+    /// Finishes the segment's summary (only if it covered exactly `row_count` values) and resets
+    /// the state for the next segment.
+    fn finish(&mut self, row_count: usize) -> Option<Vec<u8>> {
+        let builder = self.builder.take();
+        self.builder = Some(koldstore_sortkey::ValueSummaryBuilder::new());
+        let builder = builder?;
+        // Oversized segments report len 0 and are skipped by `finish`; any other mismatch means a
+        // row was missed, so do not trust the summary.
+        (builder.len() == row_count)
+            .then(|| builder.finish())
+            .flatten()
+    }
+}
+
 struct SegmentBuilder {
     options: WriterOptions,
     split_policy: SegmentSplitPolicy,
@@ -118,6 +177,7 @@ struct SegmentBuilder {
     parquet_columns: Vec<PgColumn>,
     indexed_columns: Vec<ColumnRef>,
     primary_key_columns: Vec<String>,
+    pk_summary: Option<PkSummaryState>,
 }
 
 impl SegmentBuilder {
@@ -153,6 +213,7 @@ impl SegmentBuilder {
             parquet_columns: input.parquet_columns.clone(),
             indexed_columns: input.indexed_columns.clone(),
             primary_key_columns: input.primary_key_columns.clone(),
+            pk_summary: PkSummaryState::for_input(input),
         }
     }
 
@@ -173,6 +234,9 @@ impl SegmentBuilder {
         writer
             .write_batch(&batch.batch)
             .map_err(|error| error.to_string())?;
+        if let Some(summary) = self.pk_summary.as_mut() {
+            summary.add_batch(&batch.batch);
+        }
         self.row_count = self.row_count.saturating_add(batch_row_count);
         // PERFORMANCE: drop Arrow immediately after encode so uncompressed row
         // groups never sit beside the growing compressed Parquet buffer.
@@ -189,12 +253,24 @@ impl SegmentBuilder {
         let encoded = writer
             .finish_with_metadata()
             .map_err(|error| error.to_string())?;
-        let packed_metadata = extract_packed_segment_metadata(
+        let mut packed_metadata = extract_packed_segment_metadata(
             encoded.metadata.as_ref(),
             &self.parquet_columns,
             &self.indexed_columns,
             &self.primary_key_columns,
         )?;
+        if let Some(state) = self.pk_summary.as_mut() {
+            let column_id = state.column_id;
+            if let Some(summary) = state.finish(self.row_count) {
+                if let Some(index) = packed_metadata
+                    .column_indexes
+                    .iter_mut()
+                    .find(|index| index.column_id == column_id)
+                {
+                    index.value_summary = Some(summary);
+                }
+            }
+        }
         let chunk = FlushWriteChunk::from_encoded(encoded, packed_metadata);
         self.row_count = 0;
         Ok(Some(chunk))
@@ -366,7 +442,7 @@ mod tests {
     use super::*;
     use koldstore_common::{ColumnId, ColumnRef};
     use koldstore_parquet::{CellValue, PgType};
-    use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue};
+    use koldstore_sortkey::{SortKeyType, SortKeyValue, decode_sort_key, encode_sort_key};
 
     fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
         StreamEncodeInput {
@@ -499,6 +575,70 @@ mod tests {
                 SortKeyValue::Int8(5),
             ]
         );
+        // The single-column bigint PK carries a membership summary covering exactly the segment's
+        // keys, hashed through the same Sort Key bytes the planner probes with.
+        let summary = id
+            .value_summary
+            .as_deref()
+            .expect("single bigint PK gets a summary");
+        for key in [1_i64, 2, 3, 4, 5] {
+            let probe = encode_sort_key(&SortKeyValue::Int8(key)).unwrap();
+            assert!(
+                koldstore_sortkey::summary_may_contain(summary, &probe),
+                "key {key}"
+            );
+        }
+        assert!(summary.len() <= koldstore_sortkey::SUMMARY_MAX_BYTES);
+    }
+
+    fn packed_for(mut encode_input: StreamEncodeInput) -> koldstore_parquet::PackedSegmentMetadata {
+        encode_input.row_group_size = 2;
+        let mut fetched = false;
+        let mut packed = None;
+        stream_flush_chunks(
+            &encode_input,
+            |_, _, _| {
+                if fetched {
+                    Ok(Vec::new())
+                } else {
+                    fetched = true;
+                    Ok(rows())
+                }
+            },
+            |chunk| {
+                packed = Some(chunk.packed_metadata.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        packed.unwrap()
+    }
+
+    #[test]
+    fn composite_primary_keys_get_no_summary() {
+        let mut encode_input = input(None, 100);
+        encode_input.primary_key_columns = vec!["id".to_string(), "body".to_string()];
+        encode_input.primary_key_param_types = vec![SqlParamType::BigInt, SqlParamType::Text];
+        let packed = packed_for(encode_input);
+        assert!(
+            packed
+                .column_indexes
+                .iter()
+                .all(|index| index.value_summary.is_none())
+        );
+    }
+
+    #[test]
+    fn a_summary_is_dropped_when_it_does_not_cover_every_row() {
+        let mut state = PkSummaryState::for_input(&input(None, 100)).unwrap();
+        // Two values collected but the segment holds three rows: never trust it.
+        let mut builder = koldstore_sortkey::ValueSummaryBuilder::new();
+        builder.insert(&encode_sort_key(&SortKeyValue::Int8(1)).unwrap());
+        builder.insert(&encode_sort_key(&SortKeyValue::Int8(2)).unwrap());
+        state.builder = Some(builder);
+        assert!(state.finish(3).is_none());
+        // And the state is reset for the next segment.
+        assert!(state.builder.is_some());
     }
 
     #[test]

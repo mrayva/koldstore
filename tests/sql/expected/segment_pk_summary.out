@@ -1,0 +1,209 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 1200
+ sps_managed
+-------------
+ t
+(1 row)
+
+ sps_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+ round1
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round2
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round3
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round4
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round5
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round6
+--------
+ t
+(1 row)
+
+RESET
+ several_segments
+------------------
+ t
+(1 row)
+
+ every_segment_has_pk_summary | one_index_row_per_segment | summary_at_least_one_word | summary_within_cap
+------------------------------+---------------------------+---------------------------+--------------------
+ t                            | t                         | t                         | t
+(1 row)
+
+ every_key_found
+-----------------
+ t
+(1 row)
+
+ updated_rows_visible
+----------------------
+                   18
+(1 row)
+
+ total_updates
+---------------
+            18
+(1 row)
+
+ many_candidates | few_opened | catalog_pruned
+-----------------+------------+----------------
+ t               | t          | t
+(1 row)
+
+BEGIN
+UPDATE 7
+ no_summary_prunes_less
+------------------------
+ t
+(1 row)
+
+ value_without_summaries
+-------------------------
+                       0
+(1 row)
+
+ hits_without_summaries
+------------------------
+                      3
+(1 row)
+
+ROLLBACK
+CREATE TABLE
+INSERT 0 40
+ sps_int_managed
+-----------------
+ t
+(1 row)
+
+ sps_int_flushed
+-----------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 40
+ sps_small_managed
+-------------------
+ t
+(1 row)
+
+ sps_small_flushed
+-------------------
+ t
+(1 row)
+
+CREATE TABLE
+ sps_uuid_managed
+------------------
+ t
+(1 row)
+
+INSERT 0 40
+ sps_uuid_mirror_caught_up
+---------------------------
+ t
+(1 row)
+
+ sps_uuid_flushed
+------------------
+ t
+(1 row)
+
+ sps_uuid_has_cold_rows
+------------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 40
+ sps_text_managed
+------------------
+ t
+(1 row)
+
+ sps_text_flushed
+------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 40
+ sps_comp_managed
+------------------
+ t
+(1 row)
+
+ sps_comp_flushed
+------------------
+ t
+(1 row)
+
+     relation     | has_summary
+------------------+-------------
+ sqlreg.sps_comp  | f
+ sqlreg.sps_int   | t
+ sqlreg.sps_small | t
+ sqlreg.sps_text  | f
+ sqlreg.sps_uuid  | t
+(5 rows)
+
+ int_hits
+----------
+       40
+(1 row)
+
+ smallint_in_list_hits
+-----------------------
+                     5
+(1 row)
+
+ uuid_hits
+-----------
+        40
+(1 row)
+
+ text_hits
+-----------
+        40
+(1 row)
+
+ composite_hits
+----------------
+             40
+(1 row)
+
+ absent_int_hits
+-----------------
+               0
+(1 row)
+

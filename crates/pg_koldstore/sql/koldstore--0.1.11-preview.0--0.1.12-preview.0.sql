@@ -358,3 +358,6 @@ CREATE FUNCTION koldstore."purge_deferred_cold_objects"(
 SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'purge_deferred_cold_objects_pg_wrapper';
+
+-- Point-lookup segment pruning: per-segment membership bitmap of the primary-key values.
+ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS value_summary bytea;

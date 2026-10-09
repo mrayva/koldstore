@@ -1455,6 +1455,7 @@ dependencies = [
 name = "koldstore-flush"
 version = "0.1.12-preview.0"
 dependencies = [
+ "arrow-array",
  "hex",
  "koldstore-catalog",
  "koldstore-common",

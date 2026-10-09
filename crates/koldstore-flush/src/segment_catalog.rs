@@ -43,6 +43,7 @@ impl From<ManifestAssemblyError> for SegmentCatalogError {
 /// - `$29` writer_attempt_token
 /// - `$30` pass_id
 /// - `$31` physically_sorted_sort_order_id (`0` = none; else marks matching order index)
+/// - `$32` per-index-row `value_summary` bitmaps (`bytea[]`, aligned with `$17..$24`; NULL = none)
 ///
 /// `segment_ordinal` is taken from each row's `batch_number`.
 ///
@@ -151,7 +152,8 @@ index_input AS (
         $21::bytea[],
         $22::bytea[],
         $23::integer[],
-        $24::integer[]
+        $24::integer[],
+        $32::bytea[]
     ) AS i(
         segment_id,
         column_id,
@@ -160,7 +162,8 @@ index_input AS (
         min_value,
         max_value,
         row_group_count,
-        row_group_offset
+        row_group_offset,
+        value_summary
     )
 ),
 inserted_index AS (
@@ -175,7 +178,8 @@ INSERT INTO koldstore.cold_segment_index (
     max_value,
     row_group_min_values,
     row_group_max_values,
-    row_group_null_counts
+    row_group_null_counts,
+    value_summary
 )
 SELECT
     cs.segment_id,
@@ -197,7 +201,8 @@ SELECT
     ($27::bigint[])[
         (i.row_group_offset + 1):
         (i.row_group_offset + i.row_group_count)
-    ]
+    ],
+    i.value_summary
 FROM inserted_segments cs
 JOIN index_input i ON i.segment_id = cs.segment_id
 ON CONFLICT (segment_id, column_id)
@@ -210,7 +215,8 @@ DO UPDATE SET
     max_value = EXCLUDED.max_value,
     row_group_min_values = EXCLUDED.row_group_min_values,
     row_group_max_values = EXCLUDED.row_group_max_values,
-    row_group_null_counts = EXCLUDED.row_group_null_counts
+    row_group_null_counts = EXCLUDED.row_group_null_counts,
+    value_summary = EXCLUDED.value_summary
 RETURNING
     segment_id,
     table_oid,

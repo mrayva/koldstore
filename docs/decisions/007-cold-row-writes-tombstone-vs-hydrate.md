@@ -667,5 +667,6 @@ looping every 50 ms). Per-phase timers and wait-event sampling of the stress run
   O(segments) and enabling Bloom filters changed neither the opened count nor the latency. This (not the flush lock) explains most of the
   throughput that does not come back after a flush in this benchmark; the benchmark amplifies it by forcing flushes of a handful of rows.
   Real fixes are a segment-level PK summary in the catalog (so non-matching segments are never opened) and compaction of small segments.
+  The summary is done: see [ADR-009](009-segment-pk-value-summaries.md) (a looping inline flusher then costs ~0-19% instead of 35-50%).
 
 The stress script gained `FLUSH_SLEEP`, `FLUSH_EXECUTION`, `ONLY_PHASE1`, `PGBENCH_EXTRA` and `BLOOM_FPP` for these measurements.

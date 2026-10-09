@@ -9,6 +9,7 @@ pub mod pg_type_codec;
 pub mod prune;
 pub mod reader;
 pub mod schema;
+pub mod value_summary;
 pub mod writer;
 
 pub use batch_builder::{
@@ -36,6 +37,7 @@ pub use reader::{
     ParquetReadProfile, ParquetReadRequest,
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
+pub use value_summary::{add_column_to_value_summary, supports_value_summary};
 pub use writer::{
     encode_parquet_segment_bytes, plan_clean_cold_record, record_batch_from_clean_cold_records,
     validate_finalized_parquet_segment, validate_parquet_bytes, CleanColdRecordPlan,
