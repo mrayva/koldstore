@@ -49,9 +49,27 @@ std::thread_local! {
 /// Stages `keys` (already listed under the table's cold-object prefix by the caller)
 /// for deletion after this transaction commits. Call this in place of deleting
 /// immediately from `DROP TABLE`/`DROP SCHEMA`/`unmanage_table`'s cleanup paths.
-pub(crate) fn stage(storage: FlushStorageContext, table_oid: u32, keys: Vec<String>) {
+///
+/// With `koldstore.cold_object_retention_seconds > 0` nothing is deleted at commit: the keys are
+/// recorded in `koldstore.deferred_cold_deletes` inside this transaction (so an abort discards
+/// them like every other catalog change) and `koldstore.purge_deferred_cold_objects()` deletes
+/// them after the window. That keeps a backup taken before the DROP restorable. If the keys
+/// cannot be recorded this fails, so the DDL aborts rather than deleting objects a backup may need.
+///
+/// # Errors
+///
+/// Returns an error when retention is on and the keys cannot be recorded.
+pub(crate) fn stage(
+    storage: FlushStorageContext,
+    table_oid: u32,
+    keys: Vec<String>,
+) -> Result<(), String> {
     if keys.is_empty() {
-        return;
+        return Ok(());
+    }
+    #[cfg(feature = "pg")]
+    if crate::guc::cold_object_retention_seconds() > 0 {
+        return defer_in_catalog(&storage.storage_id, table_oid, &keys);
     }
     PENDING.with(|pending| {
         pending.borrow_mut().push(PendingDeletion {
@@ -60,6 +78,38 @@ pub(crate) fn stage(storage: FlushStorageContext, table_oid: u32, keys: Vec<Stri
             keys,
         });
     });
+    Ok(())
+}
+
+/// Records `keys` for deferred deletion, restarting the window for keys already queued.
+#[cfg(feature = "pg")]
+fn defer_in_catalog(storage_id: &str, table_oid: u32, keys: &[String]) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    if storage_id.is_empty() {
+        return Err(
+            "cold object retention is on but this table's storage id is unknown; refusing to \
+             delete its objects"
+                .to_string(),
+        );
+    }
+    pgrx::Spi::run_with_args(
+        "INSERT INTO koldstore.deferred_cold_deletes (storage_id, table_oid, object_key) \
+         SELECT $1, $2, k FROM unnest($3::text[]) AS k \
+         ON CONFLICT (storage_id, object_key) DO UPDATE \
+         SET table_oid = EXCLUDED.table_oid, staged_at = now()",
+        &[
+            DatumWithOid::from(storage_id),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            DatumWithOid::from(keys.to_vec()),
+        ],
+    )
+    .map_err(|error| format!("record deferred cold-object deletion: {error}"))?;
+    pgrx::log!(
+        "koldstore: cold object retention: table_oid={table_oid} deferred {} object(s) in storage {storage_id}",
+        keys.len()
+    );
+    Ok(())
 }
 
 /// Registers the permanent xact callback that performs (on commit) or discards (on

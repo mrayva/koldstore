@@ -56,6 +56,8 @@ pub struct InSyncManifestScanContext {
 /// Storage context required to publish a flush segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlushStorageContext {
+    /// `koldstore.storage.id` this table's cold objects live in (empty when unknown).
+    pub storage_id: String,
     /// Object-store base path.
     pub base_path: String,
     /// Catalog storage backend type (`filesystem`, `s3`, …).
@@ -304,6 +306,9 @@ pub fn async_managed_relation(
 pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageContext, String> {
     let schema_version = required_i32(value, "schema_version")?;
     Ok(FlushStorageContext {
+        storage_id: optional_string(value, "storage_id")
+            .unwrap_or_default()
+            .to_string(),
         base_path: required_string(value, "base_path")?.to_string(),
         storage_type: optional_string(value, "storage_type")
             .unwrap_or("filesystem")

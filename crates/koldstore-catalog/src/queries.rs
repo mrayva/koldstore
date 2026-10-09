@@ -274,6 +274,7 @@ pub fn plan_active_flush_storage_context() -> SqlResult<SqlStatement> {
         "resolve active flush storage context",
         r#"
 SELECT jsonb_build_object(
+    'storage_id', st.id,
     'base_path', st.base_path,
     'storage_type', st.storage_type,
     'credentials', COALESCE(st.credentials, '{}'::jsonb),

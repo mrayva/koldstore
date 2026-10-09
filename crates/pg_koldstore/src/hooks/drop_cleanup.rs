@@ -152,7 +152,7 @@ fn cleanup_one_managed_table_before_drop(
     let objects = client.list(&prefix).map_err(|error| error.to_string())?;
     let staged = objects.len();
     let keys: Vec<String> = objects.into_iter().map(|object| object.key).collect();
-    crate::pending_cold_delete::stage(storage, table_oid.to_u32(), keys);
+    crate::pending_cold_delete::stage(storage, table_oid.to_u32(), keys)?;
     pgrx::log!(
         "koldstore drop: table_oid={} staged_for_post_commit_deletion={} prefix={}",
         table_oid.to_u32(),

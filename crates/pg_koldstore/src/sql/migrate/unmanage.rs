@@ -110,7 +110,7 @@ fn delete_cold_artifacts(
     let objects = client.list(prefix).map_err(|error| error.to_string())?;
     let staged = objects.len();
     let keys: Vec<String> = objects.into_iter().map(|object| object.key).collect();
-    crate::pending_cold_delete::stage(storage.clone(), table_oid_u32, keys);
+    crate::pending_cold_delete::stage(storage.clone(), table_oid_u32, keys)?;
     pgrx::log!(
         "koldstore unmanage: table_oid={table_oid_u32} staged_for_post_commit_deletion={staged} prefix={prefix}"
     );

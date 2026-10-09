@@ -76,6 +76,9 @@ static FLUSH_JOB_MAX_RUNTIME_SECONDS: GucSetting<i32> =
 static JOB_RETENTION_DAYS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_JOB_RETENTION_DAYS);
 #[cfg(feature = "pg")]
+static COLD_OBJECT_RETENTION_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_COLD_OBJECT_RETENTION_SECONDS);
+#[cfg(feature = "pg")]
 static FLUSH_EXECUTION: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"queue"));
 #[cfg(feature = "pg")]
@@ -359,6 +362,16 @@ pub fn define_gucs() {
         GucContext::Userset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.cold_object_retention_seconds",
+        c"Seconds to keep the cold objects of a dropped or unmanaged table before purge.",
+        c"0 (default) deletes them when the DROP / unmanage_table(drop_cold) commits. A positive value records them in koldstore.deferred_cold_deletes instead and leaves them in place until koldstore.purge_deferred_cold_objects() runs after the window, so a backup taken before the DROP stays restorable. Superuser-only so a table owner cannot switch the guard off. Clamped to 0..=315360000.",
+        &COLD_OBJECT_RETENTION_SECONDS,
+        settings::MIN_COLD_OBJECT_RETENTION_SECONDS,
+        settings::MAX_COLD_OBJECT_RETENTION_SECONDS,
+        GucContext::Suset,
+        flags,
+    );
     GucRegistry::define_string_guc(
         c"koldstore.flush_execution",
         c"How flush_table runs after enqueueing a durable job.",
@@ -592,6 +605,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::JOB_RETENTION_DAYS_GUC,
             internal: false,
             default_value: "30",
+        },
+        GucDefinition {
+            name: settings::COLD_OBJECT_RETENTION_SECONDS_GUC,
+            internal: false,
+            default_value: "0",
         },
         GucDefinition {
             name: settings::FLUSH_EXECUTION_GUC,
@@ -1048,6 +1066,20 @@ pub fn flush_job_max_runtime_seconds() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    }
+}
+
+/// Seconds to keep a dropped table's cold objects before purge (`0` = delete at commit).
+#[must_use]
+pub fn cold_object_retention_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_cold_object_retention_seconds(COLD_OBJECT_RETENTION_SECONDS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_COLD_OBJECT_RETENTION_SECONDS
     }
 }
 

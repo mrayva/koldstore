@@ -155,10 +155,21 @@ fn backup_manifest_value(only: Option<pgrx::pg_sys::Oid>) -> Result<Value, Strin
     )?;
     let async_mirror = crate::mirror::status::async_mirror_status_value()
         .unwrap_or_else(|error| json!({ "error": error, "healthy": false }));
+    // Whether dropped tables' cold objects were being retained when this backup was taken, and how
+    // many were still waiting to be purged (those objects exist now; a later purge removes them).
+    let retention = json_query(
+        "SELECT jsonb_build_object(
+             'cold_object_retention_seconds', current_setting('koldstore.cold_object_retention_seconds')::bigint,
+             'deferred_objects', count(*),
+             'oldest_staged_at', min(staged_at))::text
+         FROM koldstore.deferred_cold_deletes",
+        &[],
+    )?;
     Ok(json!({
         "format": 1,
         "cluster": cluster,
         "async_mirror": async_mirror,
+        "retention": retention,
         "tables": tables,
     }))
 }
@@ -277,4 +288,162 @@ pub fn validate_cold_storage_pg(
     validate_cold_storage_value(table, deep)
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("validate cold storage failed: {error}"))
+}
+
+/// Prefixes (with their storage) that currently-managed tables write to.
+fn live_prefixes() -> Result<Vec<(String, String)>, String> {
+    let mut prefixes = Vec::new();
+    for oid in managed_table_oids(None)? {
+        let target = table_target(oid)?;
+        prefixes.push((target.storage.storage_id.clone(), target.prefix));
+    }
+    Ok(prefixes)
+}
+
+/// Opens a client for `koldstore.storage.id = storage_id`, or why it cannot be opened.
+fn storage_client(storage_id: &str) -> Result<koldstore_storage::ObjectStoreClient, String> {
+    let ctx = json_query(
+        "SELECT jsonb_build_object('storage_type', storage_type, 'base_path', base_path,
+                                   'credentials', credentials, 'config', config)::text
+         FROM koldstore.storage WHERE id = $1",
+        &[DatumWithOid::from(storage_id)],
+    )?;
+    if ctx.is_null() {
+        return Err(format!("storage {storage_id} is no longer registered"));
+    }
+    crate::object_store::open_managed_object_store_client(
+        ctx["storage_type"].as_str().unwrap_or("filesystem"),
+        ctx["base_path"].as_str().unwrap_or_default(),
+        &ctx["credentials"],
+        &ctx["config"],
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn purge_deferred_value(
+    batch_limit: i64,
+    older_than_seconds: Option<i64>,
+    dry_run: bool,
+) -> Result<Value, String> {
+    let window = older_than_seconds
+        .unwrap_or_else(|| i64::from(crate::guc::cold_object_retention_seconds()))
+        .max(0);
+    type Row = (i64, String, String);
+    let rows: Vec<Row> = pgrx::Spi::connect(|client| {
+        client
+            .select(
+                "SELECT id, storage_id, object_key FROM koldstore.deferred_cold_deletes
+                 WHERE staged_at <= now() - make_interval(secs => $1::double precision)
+                 ORDER BY id LIMIT $2",
+                None,
+                &[DatumWithOid::from(window), DatumWithOid::from(batch_limit)],
+            )?
+            .map(|row| {
+                Ok((
+                    row.get::<i64>(1)?.unwrap_or_default(),
+                    row.get::<String>(2)?.unwrap_or_default(),
+                    row.get::<String>(3)?.unwrap_or_default(),
+                ))
+            })
+            .collect::<Result<Vec<Row>, pgrx::spi::Error>>()
+    })
+    .map_err(|error| error.to_string())?;
+
+    // Two concurrent purges may both delete an object; deletes are idempotent, so no row lock.
+    // A table dropped and recreated under the same name writes to the same prefix (including its
+    // own manifest), so a key under a prefix a live table uses must never be deleted here.
+    let live = live_prefixes()?;
+    let mut clients = std::collections::HashMap::new();
+    let (mut deleted, mut skipped_live, mut failed) = (0_i64, 0_i64, 0_i64);
+    let mut errors = Vec::new();
+    let mut done_ids = Vec::new();
+    for (id, storage_id, key) in &rows {
+        if live
+            .iter()
+            .any(|(sid, prefix)| sid == storage_id && key.starts_with(prefix.as_str()))
+        {
+            skipped_live += 1;
+            done_ids.push(*id);
+            continue;
+        }
+        if dry_run {
+            deleted += 1;
+            continue;
+        }
+        let client = clients
+            .entry(storage_id.clone())
+            .or_insert_with(|| storage_client(storage_id));
+        match client
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|client| client.delete(key).map_err(|error| error.to_string()))
+        {
+            Ok(()) => {
+                deleted += 1;
+                done_ids.push(*id);
+            }
+            Err(error) => {
+                failed += 1;
+                if errors.len() < 5 {
+                    errors.push(json!({ "key": key, "error": error }));
+                }
+            }
+        }
+    }
+    if !dry_run && !done_ids.is_empty() {
+        pgrx::Spi::run_with_args(
+            "DELETE FROM koldstore.deferred_cold_deletes WHERE id = ANY($1)",
+            &[DatumWithOid::from(done_ids)],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    let remaining =
+        pgrx::Spi::get_one::<i64>("SELECT count(*) FROM koldstore.deferred_cold_deletes")
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+    Ok(json!({
+        "dry_run": dry_run,
+        "window_seconds": window,
+        "considered": rows.len(),
+        "deleted": deleted,
+        "skipped_live_prefix": skipped_live,
+        "failed": failed,
+        "errors": errors,
+        "remaining": remaining,
+    }))
+}
+
+/// Deletes cold objects whose retention window has passed.
+///
+/// SQL contract: `koldstore.purge_deferred_cold_objects(batch_limit integer default 1000,
+/// older_than_seconds integer default null, dry_run boolean default false) → jsonb`.
+///
+/// Objects of a table dropped (or unmanaged with `drop_cold`) while
+/// `koldstore.cold_object_retention_seconds > 0` wait in `koldstore.deferred_cold_deletes`; this
+/// removes those staged at least `older_than_seconds` ago (default: the setting) and returns
+/// `{considered, deleted, skipped_live_prefix, failed, errors[], remaining}`. A key under a prefix a
+/// currently managed table uses is dropped from the queue without deleting the object, because a
+/// recreated table of the same name owns that prefix again. Run it periodically (for example from
+/// pg_cron); safe to repeat. Superuser only.
+#[pgrx::pg_extern(
+    name = "purge_deferred_cold_objects",
+    schema = "koldstore",
+    security_definer
+)]
+pub fn purge_deferred_cold_objects_pg(
+    batch_limit: pgrx::default!(i32, 1000),
+    older_than_seconds: pgrx::default!(Option<i32>, "NULL"),
+    dry_run: pgrx::default!(bool, false),
+) -> pgrx::JsonB {
+    crate::security::require_superuser("purge deferred cold objects");
+    if batch_limit < 1 {
+        pgrx::error!("batch_limit must be at least 1");
+    }
+    purge_deferred_value(
+        i64::from(batch_limit),
+        older_than_seconds.map(i64::from),
+        dry_run,
+    )
+    .map(pgrx::JsonB)
+    .unwrap_or_else(|error| pgrx::error!("purge deferred cold objects failed: {error}"))
 }

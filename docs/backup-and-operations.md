@@ -18,9 +18,25 @@ operations that delete referenced cold objects are:
 - `recover_segments(...)` on objects the *current* catalog no longer references (orphans relative to
   now, but possibly referenced by an older backup).
 
-Retain the cold object prefix (object-store versioning, a lifecycle rule, or simply not running the
-operations above) for as long as any backup taken before them may be restored. Objects flushed after a
-backup are harmless to an earlier restore: they are simply unreferenced by the older catalog.
+Backups taken before such an operation stay restorable only while those objects survive. Two ways to
+guarantee that:
+
+- **Retention guard (recommended).** Set `koldstore.cold_object_retention_seconds` to at least your
+  backup retention (superuser-only; in `postgresql.conf` so every session inherits it). `DROP TABLE` and
+  `unmanage_table(drop_cold)` then record the objects in `koldstore.deferred_cold_deletes`
+  (inside the same transaction, so an aborted DROP records nothing) and leave them in place. Schedule
+  `koldstore.purge_deferred_cold_objects()` (for example from pg_cron) to remove them once the window has
+  passed. If the keys cannot be recorded the DDL fails rather than deleting. A table dropped and recreated
+  under the same name owns the same prefix again, so the purge never deletes a key under a live table's
+  prefix. The default is `0`, the historical delete-at-commit behavior.
+- Or retain the object prefix yourself (object-store versioning or a lifecycle rule) and avoid the
+  operations above while old backups may be restored.
+
+`recover_segments` copies an orphan to a `.quarantine.` key before removing it, and only objects the
+current catalog never referenced become orphans, so it does not threaten a restorable backup.
+
+Objects flushed after a backup are harmless to an earlier restore: they are simply unreferenced by the
+older catalog.
 
 ### Procedure
 
@@ -38,8 +54,9 @@ backup are harmless to an earlier restore: they are simply unreferenced by the o
    the restored slot re-decodes retained WAL exactly as after a crash.
 
 `scripts/backup-restore-drill.sh` runs this end to end on throwaway clusters (base backup, further
-writes and flushes, restore to two restore points, then damage and `DROP TABLE` cases) and asserts that
-the merged hot+cold table equals what it was at each restore point. It passes against a filesystem
+writes and flushes, restore to several restore points, then damage, unprotected `DROP TABLE`, retained
+`DROP TABLE` and purge cases) and asserts that the merged hot+cold table equals what it was at each
+restore point. It passes against a filesystem
 store; object stores take the same code path through the storage client, but the drill does not
 exercise one. Use `PG_OPTS` to point it at a staged build.
 
@@ -53,8 +70,10 @@ exercise one. Use `PG_OPTS` to point it at a staged build.
   registered with `pg_extension_config_dump`, so the dump carries no cold-tier metadata and the
   restored database does not know the table is managed. Use the physical procedure above.
 - `koldstore.validate_cold_storage` does not report *unreferenced* objects (use
-  `recover_segments(..., dry_run => true)`), and does not protect objects from deletion; retention is
-  the operator's responsibility today.
+  `recover_segments(..., dry_run => true)`). The retention guard defers deletion by a fixed window; it
+  does not know which backups still exist, so size the window to your backup retention. It does not
+  survive `DROP EXTENSION koldstore`, which drops the queue table, and it is off by default.
+- The deferred queue is never purged automatically; schedule `purge_deferred_cold_objects()`.
 - Packaged export/import (`EXPORT TABLE` / `IMPORT TABLE`) is not shipped.
 
 ## `pg_dump` and `COPY`
@@ -85,7 +104,9 @@ The end-to-end backup, restore, PITR, and unsafe-dump contract is tracked in
 both stage the table's cold objects for deletion, then physically delete them
 only after the enclosing PostgreSQL transaction commits (a background xact
 callback, matching PostgreSQL's own pending-delete pattern for relation
-files). If that transaction later aborts, the staged deletion is discarded and
+files). With `koldstore.cold_object_retention_seconds > 0` the objects are not deleted at commit at all;
+they are queued in `koldstore.deferred_cold_deletes` and removed later by
+`purge_deferred_cold_objects()` (see above). If that transaction later aborts, the staged deletion is discarded and
 the objects are left in place, alongside the catalog rows PostgreSQL itself
 rolled back -- closing the [#100](https://github.com/kalamdb/koldstore/issues/100)
 gap where an aborted DROP could leave catalog state pointing at objects that

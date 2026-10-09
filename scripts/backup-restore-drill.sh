@@ -8,7 +8,9 @@
 #     though later flushes added cold segments (extra objects are harmless);
 #   * koldstore.validate_cold_storage() reports ok after each restore, and DOES report the problem
 #     when the retained object prefix is damaged or when a DROP TABLE after the backup deleted the
-#     objects (which is why the object prefix must be retained as long as old backups may be restored).
+#     objects (which is why the object prefix must be retained as long as old backups may be restored);
+#   * koldstore.cold_object_retention_seconds keeps a dropped table's objects so an older backup stays
+#     valid, and only koldstore.purge_deferred_cold_objects() removes them.
 #
 # Usage: scripts/backup-restore-drill.sh
 #   env: PG_BIN       PostgreSQL bin dir               (default /usr/lib/postgresql/18/bin)
@@ -148,14 +150,43 @@ check "damaged object is reported" \
 stop_all_b b3
 cp "$W/seg.keep" "${seg:?}"
 
-say "DROP TABLE on A after the backup deletes the cold objects: restoring an older point must NOT validate"
-q "$PORT_A" drill -c "DROP TABLE t" >/dev/null
+say "DROP TABLE with retention off deletes the cold objects: an older restore must NOT validate"
+# (a separate table keeps this destructive case away from the retention case below)
+q "$PORT_A" drill >/dev/null <<EOF
+CREATE TABLE gone (id bigint PRIMARY KEY, v text NOT NULL);
+INSERT INTO gone SELECT g, 'g' || g FROM generate_series(1, 3) g;
+EOF
+q "$PORT_A" drill -c "SELECT koldstore.manage_table('gone'::regclass, storage=>'drill_fs', hot_row_limit=>10, min_flush_rows=>1,
+  max_rows_per_file=>1000, migration_order_by=>'id', auto_flush=>false) IS NOT NULL" >/dev/null
+q "$PORT_A" drill -c "SET koldstore.flush_execution='inline'; SET koldstore.min_max_rows_per_file=1; SELECT koldstore.flush_table('gone'::regclass, true)->>'status'" >/dev/null
+q "$PORT_A" postgres -c "SELECT pg_switch_wal()" >/dev/null
+q "$PORT_A" drill -c "SELECT pg_create_restore_point('s3')" >/dev/null
+q "$PORT_A" postgres -c "SELECT pg_switch_wal()" >/dev/null
+sleep 3
+q "$PORT_A" drill -c "DROP TABLE gone" >/dev/null
 sleep 2
-restore_to b4 s1
-check "restore after DROP TABLE reports missing objects" \
-  "$(q "$PORT_B" drill -c "SELECT (koldstore.validate_cold_storage('t'::regclass)->>'ok')")" false
-echo "  (this is why the object prefix must be retained for as long as backups taken before a DROP may be restored)"
+restore_to b4 s3
+check "restore after an unprotected DROP TABLE reports missing objects" \
+  "$(q "$PORT_B" drill -c "SELECT (koldstore.validate_cold_storage('gone'::regclass)->>'ok')")" false
 stop_all_b b4
+
+say "DROP TABLE with koldstore.cold_object_retention_seconds > 0 keeps the objects: the older restore stays valid"
+q "$PORT_A" drill -c "SET koldstore.cold_object_retention_seconds = 3600; DROP TABLE t" >/dev/null
+check "dropped table's objects are queued, not deleted" \
+  "$(q "$PORT_A" drill -c "SELECT count(*) > 0 FROM koldstore.deferred_cold_deletes")" t
+restore_to b5 s1
+check "merged table at s1 still equals S1 after the DROP" "$(snapshot "$PORT_B")" "$S1"
+check "validate_cold_storage (deep) still ok after the DROP" \
+  "$(q "$PORT_B" drill -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'")" true
+stop_all_b b5
+
+say "after the window the objects are purged; only then is the older restore no longer valid"
+check "purge reports the objects as deleted" \
+  "$(q "$PORT_A" drill -c "SELECT (koldstore.purge_deferred_cold_objects(older_than_seconds => 0)->>'deleted')::int > 0")" t
+restore_to b6 s1
+check "restore after the purge reports missing objects" \
+  "$(q "$PORT_B" drill -c "SELECT (koldstore.validate_cold_storage('t'::regclass)->>'ok')")" false
+stop_all_b b6
 
 echo
 if [ "$fail" = 0 ]; then echo "DRILL PASSED"; else echo "DRILL FAILED"; exit 1; fi

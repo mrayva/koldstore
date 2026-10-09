@@ -215,6 +215,27 @@ pub const fn bounded_flush_job_max_runtime_seconds(value: i32) -> i32 {
     }
 }
 
+/// GUC name: seconds to keep cold objects of a dropped / unmanaged table before they may be purged.
+pub const COLD_OBJECT_RETENTION_SECONDS_GUC: &str = "koldstore.cold_object_retention_seconds";
+/// Default retention (`0` = delete at commit, the historical behavior).
+pub const DEFAULT_COLD_OBJECT_RETENTION_SECONDS: i32 = 0;
+/// Lower bound for `koldstore.cold_object_retention_seconds`.
+pub const MIN_COLD_OBJECT_RETENTION_SECONDS: i32 = 0;
+/// Upper bound for `koldstore.cold_object_retention_seconds` (10 years).
+pub const MAX_COLD_OBJECT_RETENTION_SECONDS: i32 = 315_360_000;
+
+/// Validates and clamps `koldstore.cold_object_retention_seconds` (`0` = no retention).
+#[must_use]
+pub const fn bounded_cold_object_retention_seconds(value: i32) -> i32 {
+    if value < MIN_COLD_OBJECT_RETENTION_SECONDS {
+        MIN_COLD_OBJECT_RETENTION_SECONDS
+    } else if value > MAX_COLD_OBJECT_RETENTION_SECONDS {
+        MAX_COLD_OBJECT_RETENTION_SECONDS
+    } else {
+        value
+    }
+}
+
 /// Validates and clamps `koldstore.job_retention_days` (`0` disables purge).
 #[must_use]
 pub const fn bounded_job_retention_days(value: i32) -> i32 {

@@ -100,6 +100,13 @@ pgrx::extension_sql_file!(
     requires = ["koldstore_catalog"]
 );
 
+#[cfg(feature = "pg")]
+pgrx::extension_sql_file!(
+    "../sql/koldstore-cold-retention.sql",
+    name = "koldstore_cold_retention",
+    requires = ["koldstore_catalog"]
+);
+
 /// Returns the extension version.
 #[must_use]
 #[cfg_attr(feature = "pg", pgrx::pg_extern(name = "koldstore_version"))]

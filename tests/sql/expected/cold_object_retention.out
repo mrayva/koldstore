@@ -1,0 +1,195 @@
+CREATE FUNCTION
+CREATE ROLE
+SET
+psql:<PATH>: ERROR:  permission denied to set parameter "koldstore.cold_object_retention_seconds"
+psql:<PATH>: ERROR:  must be superuser to purge deferred cold objects
+RESET
+CREATE TABLE
+INSERT 0 5
+ ret0_managed
+--------------
+ t
+(1 row)
+
+ ret0_flushed
+--------------
+ t
+(1 row)
+
+ objects_before
+----------------
+ t
+(1 row)
+
+DROP TABLE
+ files_after_plain_drop
+------------------------
+                      0
+(1 row)
+
+ queued_when_retention_off
+---------------------------
+                         0
+(1 row)
+
+SET
+CREATE TABLE
+INSERT 0 5
+ ret1_managed
+--------------
+ t
+(1 row)
+
+ ret1_flushed
+--------------
+ t
+(1 row)
+
+DROP TABLE
+ objects_kept_after_drop
+-------------------------
+ t
+(1 row)
+
+ every_object_queued | storages | keys_under_table_prefix
+---------------------+----------+-------------------------
+ t                   |        1 | t
+(1 row)
+
+ considered_inside_window | deleted_inside_window
+--------------------------+-----------------------
+                        0 |                     0
+(1 row)
+
+ dry_run | would_delete_all
+---------+------------------
+ t       | t
+(1 row)
+
+ still_there_after_dry_run
+---------------------------
+ t
+(1 row)
+
+ manifest_retention | manifest_counts_deferred
+--------------------+--------------------------
+               3600 | t
+(1 row)
+
+ deleted_all | failed | remaining
+-------------+--------+-----------
+ t           |      0 |         0
+(1 row)
+
+ files_after_purge
+-------------------
+                 0
+(1 row)
+
+CREATE TABLE
+INSERT 0 5
+ ret2_managed
+--------------
+ t
+(1 row)
+
+ ret2_flushed
+--------------
+ t
+(1 row)
+
+BEGIN
+DROP TABLE
+ROLLBACK
+ queued_after_rollback
+-----------------------
+                     0
+(1 row)
+
+ objects_untouched
+-------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 5
+ ret4_managed
+--------------
+ t
+(1 row)
+
+ ret4_flushed
+--------------
+ t
+(1 row)
+
+ unmanaged
+-----------
+ t
+(1 row)
+
+ objects_kept_after_unmanage
+-----------------------------
+ t
+(1 row)
+
+ ret4_queued
+-------------
+ t
+(1 row)
+
+ ret4_purged
+-------------
+ t
+(1 row)
+
+ files_ret4_after_purge
+------------------------
+                      0
+(1 row)
+
+CREATE TABLE
+INSERT 0 5
+ ret3_managed
+--------------
+ t
+(1 row)
+
+ ret3_flushed
+--------------
+ t
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 5
+ ret3_managed
+--------------
+ t
+(1 row)
+
+ ret3_flushed
+--------------
+ t
+(1 row)
+
+ skipped_live_prefix | deleted | remaining
+---------------------+---------+-----------
+ t                   |       0 |         0
+(1 row)
+
+ recreated_table_cold_tier_intact
+----------------------------------
+ t
+(1 row)
+
+ recreated_table_rows
+----------------------
+                    5
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  must be superuser to purge deferred cold objects
+RESET
+DROP ROLE
+RESET

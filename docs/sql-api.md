@@ -94,6 +94,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.flush_job_max_runtime_seconds` | int | `1800` | Wall-clock budget for one flush job attempt. Checked between passes and between streamed batches within a pass (so one oversized force-flush pass cannot outrun the budget); exceeded attempts fail with an error so a stuck worker cannot run forever. `0` disables. Clamped to `0..=86400`. |
 | `koldstore.flush_execution` | string | `queue` | `queue`: `flush_table` enqueues a durable job and returns its UUID; a one-shot executor runs the work. `inline`: enqueue then run in the calling backend (SPI / `#[pg_test]` only). |
 | `koldstore.job_retention_days` | int | `30` | Days to retain terminal jobs before purge; `0` disables. Jobs still referenced by pending cold segments are never deleted. |
+| `koldstore.cold_object_retention_seconds` | int | `0` | Seconds to keep the cold objects of a dropped table (or `unmanage_table(drop_cold)`) before `purge_deferred_cold_objects()` may delete them; `0` deletes at commit. Superuser-only, so a table owner cannot disable it. See [Backup and Operations](backup-and-operations.md). |
 | `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Idle wake interval for the persistent WAL applier (clamped `1000..=300000`). Managed commits `SetLatch` it immediately regardless; this interval only matters while it is otherwise idle. Two roles: a missed-wake safety net, and bounding how far this database's slot can fall behind *unrelated* WAL other databases on the same PostgreSQL instance write while idle (every idle wake also runs a normal, cheap-when-caught-up drain pass). `SET`/`ALTER SYSTEM` + reload; the worker picks up changes on SIGHUP. |
 | `koldstore.hydrate_slot_lock_poll_ms` | int | `0` | Hydrate-on-write only. `0` (default): queue on the async-mirror slot lock, so the deadlock detector resolves lock cycles, but many concurrent hydrating transactions can starve the WAL applier and flush. A positive value polls instead (about 1.5-3x the throughput at 8 clients), but fails the statement with a retryable `serialization_failure` if still busy at the deadline. |
 | `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). Cap this on small machines (for example `8192`) via `ALTER DATABASE` so background workers see it. |
@@ -136,6 +137,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
 | `koldstore.validate_cold_storage(...)` | `jsonb` | Catalog vs object store: `{ok, problems[]}` |
+| `koldstore.purge_deferred_cold_objects(...)` | `jsonb` | Deletes retained cold objects whose window has passed |
 
 ## Storage and Migration
 
@@ -715,6 +717,22 @@ manifest generation / etag / row counts, the number of `pending` segments, and e
 segment with its object `key`, `byte_size`, SHA-256 `checksum` and sequence range. Storage
 credentials are never included. Take it together with the physical base backup; see
 [Backup and Operations](backup-and-operations.md).
+
+### `koldstore.purge_deferred_cold_objects`
+
+```sql
+SELECT koldstore.purge_deferred_cold_objects();                          -- objects past the window
+SELECT koldstore.purge_deferred_cold_objects(older_than_seconds => 0, dry_run => true);
+```
+
+With `koldstore.cold_object_retention_seconds > 0`, `DROP TABLE` and `unmanage_table(..., drop_cold =>
+true)` leave the table's cold objects in place and record their keys in
+`koldstore.deferred_cold_deletes` inside the same transaction (a rolled-back DROP records nothing).
+This deletes the ones staged at least `older_than_seconds` ago (default: the setting), in batches of
+`batch_limit` (default 1000), and returns `{dry_run, window_seconds, considered, deleted,
+skipped_live_prefix, failed, errors[], remaining}`. A key under a prefix a currently managed table uses
+(a table dropped and recreated under the same name) is removed from the queue without deleting the
+object. Safe to repeat; run it periodically, for example from pg_cron. Superuser only.
 
 ### `koldstore.validate_cold_storage`
 

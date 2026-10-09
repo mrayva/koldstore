@@ -115,10 +115,10 @@ must be **KoldStore-aware** and keep both tiers consistent.
   cold folders are per `scopeId`
 
 Shipped: `koldstore.backup_manifest` and `koldstore.validate_cold_storage`, plus a documented and
-scripted (`scripts/backup-restore-drill.sh`) physical-backup / PITR procedure. Still open: packaged
+scripted (`scripts/backup-restore-drill.sh`) physical-backup / PITR procedure, and a retention guard (`koldstore.cold_object_retention_seconds` +
+`purge_deferred_cold_objects`) that defers cold-object deletion so older backups stay restorable. Still open: packaged
 export/import, a logical-dump story (`pg_dump` is refused for tables with cold data, and the koldstore
-catalog tables are not registered with `pg_extension_config_dump`), and a retention guard that refuses
-or defers cold-object deletion while a backup that needs them is still restorable. The remaining operator
+catalog tables are not registered with `pg_extension_config_dump`). The remaining operator
 surface is tracked in [#103](https://github.com/kalamdb/koldstore/issues/103). `EXPORT TABLE` is
 the intended archive boundary; `IMPORT TABLE` remains rejected until ownership,
 conflict, and schema rules land.
