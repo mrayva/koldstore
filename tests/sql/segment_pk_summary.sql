@@ -164,9 +164,14 @@ ORDER BY 1;
 -- every key of every type is still found by a literal-key point lookup
 SELECT sqlreg.sum_counts(ARRAY(SELECT format('SELECT count(*) FROM sqlreg.sps_int WHERE id = %s', g)
                                FROM generate_series(1, 40) g)) AS int_hits;
--- (smallint keys are checked with an IN list: a bare `smallint_pk = const` equality lookup is a
--- separate, pre-existing problem in the exact-primary-key strategy and is not covered here.)
+-- smallint keys: bare equality lookups (the exact-primary-key path) used to return no rows because
+-- the row-level key matcher did not know 16-bit columns; IN lists were never affected.
+SELECT sqlreg.sum_counts(ARRAY(SELECT format('SELECT count(*) FROM sqlreg.sps_small WHERE id = %s', g)
+                               FROM generate_series(1, 40) g)) AS smallint_hits;
+SELECT sqlreg.sum_counts(ARRAY(SELECT format('SELECT count(*) FROM sqlreg.sps_small WHERE id = %s::smallint', g)
+                               FROM generate_series(1, 40) g)) AS smallint_cast_hits;
 SELECT count(*) AS smallint_in_list_hits FROM sqlreg.sps_small WHERE id IN (1, 7, 20, 33, 40, 99);
+SELECT count(*) AS smallint_single_in_hits FROM sqlreg.sps_small WHERE id IN (7);
 SELECT sqlreg.sum_counts(ARRAY(SELECT format('SELECT count(*) FROM sqlreg.sps_uuid WHERE id = %L::uuid',
                                              '00000000-0000-4000-8000-' || lpad(g::text, 12, '0'))
                                FROM generate_series(1, 40) g)) AS uuid_hits;

@@ -58,9 +58,17 @@ returns only the segments that may contain the key.
   natural extension (probe each element) but are not done here.
 * Storage grows by up to 8 KiB per segment per summarized column, against segment files that are far larger.
 
-## Known, separate problems found while testing (not caused by this change)
+## Separate problems found while testing
 
-* A `smallint` primary key's equality lookup (`WHERE id = 7`) returns no rows on the *Exact Primary Key* path,
-  while `IN`, `BETWEEN` and `id + 0 = 7` return them.
-* A populated table with a `uuid` primary key and a `migration_order_by` column cannot be flushed
+* **Fixed:** a `smallint` primary key's equality lookup (`WHERE id = 7`, also `IN (7)`) returned no rows on the
+  *Exact Primary Key* path while `IN` lists of several values, `BETWEEN` and `id + 0 = 7` worked. Cause: the
+  row-level recheck of the PK probe (`koldstore-parquet::reader::decode::arrow_cell_matches_pk_values`) knew
+  `Int64`, `Int32` and string columns but not `Int16`, so it rejected every row of the (correctly selected) row
+  group. It now also matches 16-bit and boolean columns, and an Arrow type it cannot compare keeps the row instead
+  of dropping it, because the planner re-applies the equality qual to every returned row anyway. Covered by a
+  Parquet-level test, matcher unit tests and the `segment_pk_summary` SQL case.
+* **Open:** a populated table with a `uuid` primary key and a `migration_order_by` column cannot be flushed
   (`invalid uuid keyset value: invalid length: found 0`); `uuid` itself is rejected as the order column.
+* **Open (limits, not bugs):** `date`, `timestamp`, `boolean` and `numeric` primary keys cannot be managed or
+  flushed in the same configurations (unsupported column type, or "ordered flush keyset does not support
+  primary-key type"). Only `smallint`, `integer`, `bigint`, `text` and `uuid` keys were exercised end to end.

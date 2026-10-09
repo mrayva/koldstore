@@ -182,9 +182,24 @@ INSERT 0 40
        40
 (1 row)
 
+ smallint_hits
+---------------
+            40
+(1 row)
+
+ smallint_cast_hits
+--------------------
+                 40
+(1 row)
+
  smallint_in_list_hits
 -----------------------
                      5
+(1 row)
+
+ smallint_single_in_hits
+-------------------------
+                       1
 (1 row)
 
  uuid_hits

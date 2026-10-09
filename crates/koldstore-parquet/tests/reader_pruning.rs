@@ -111,8 +111,8 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_with_options, select_row_groups_for_pk_values, ParquetSegmentWriter,
-        PgColumn, PgType, WriterOptions,
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions, read_clean_cold_rows_with_options,
+        select_row_groups_for_pk_values,
     };
 
     let dir = tempfile::tempdir().unwrap();
@@ -182,8 +182,8 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store, ParquetSegmentWriter, PgColumn, PgType,
-        WriterOptions,
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        read_clean_cold_rows_from_object_store,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -247,8 +247,8 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store_with_stats, ObjectStoreReadStats,
-        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        ObjectStoreReadStats, ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        read_clean_cold_rows_from_object_store_with_stats,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -328,8 +328,8 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetProfileMode,
-        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        BloomPruneMode, ParquetProfileMode, ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        read_clean_cold_rows_from_object_store_with_size,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -474,8 +474,8 @@ fn object_store_pk_probe_applies_page_index_row_selection() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store_with_size, PageIndexPruneMode, ParquetProfileMode,
-        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+        PageIndexPruneMode, ParquetProfileMode, ParquetSegmentWriter, PgColumn, PgType,
+        WriterOptions, read_clean_cold_rows_from_object_store_with_size,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -552,4 +552,68 @@ fn object_store_pk_probe_applies_page_index_row_selection() {
     );
     assert!(profile.format_page_index_summary().contains("applied"));
     assert!(profile.bytes_read < file_size);
+}
+
+/// A 16-bit primary key is stored as Parquet INT32 with 16-bit logical annotation; a point lookup must
+/// still find its row (regression guard for smallint primary keys).
+#[test]
+fn smallint_pk_point_lookup_finds_rows_via_stats_and_bloom() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions, read_clean_cold_rows_with_options,
+        select_row_groups_for_pk_values,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("smallint-pk.parquet");
+    let ids = vec![1_i16, 2, 3, 4, 5, 6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int16, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int16Array::from(ids.clone())),
+            Arc::new(Int64Array::from(vec![1_i64, 2, 3, 4, 5, 6])),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
+            Arc::new(BooleanArray::from(vec![false; ids.len()])),
+            Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
+        ],
+    )
+    .unwrap();
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let file = std::fs::File::create(&path).unwrap();
+    let metadata = writer
+        .write_record_batches(file, schema, vec![batch])
+        .unwrap();
+    assert_eq!(metadata.num_row_groups(), 3);
+
+    let decision = select_row_groups_for_pk_values(&path, "id", &["4".to_string()]).unwrap();
+    assert_eq!(decision.selected_row_groups, vec![1], "row group holding id 4");
+    let columns = vec![PgColumn::new("id", PgType::Int2, false)];
+    let rows = read_clean_cold_rows_with_options(
+        &path,
+        &columns,
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pk_json["id"], json!(4));
 }

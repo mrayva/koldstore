@@ -10,6 +10,13 @@ use crate::schema::{ColdMetadataColumn, PgColumn};
 use super::options::{ParquetReadOptions, PkValues};
 use super::types::CleanColdRow;
 
+/// Row-level recheck of a primary-key equality probe against one decoded cell.
+///
+/// Row-group, Bloom and page-index pruning already narrowed the read; this drops the remaining rows
+/// whose key differs. It must never drop a row it cannot compare: an Arrow type this function does not
+/// know returns `true` (keep the row), because the planner re-applies the equality qual to every
+/// returned row anyway. Returning `false` for an unknown type silently empties the result (that was
+/// the smallint primary-key bug: `Int16Array` fell through to `false`).
 fn arrow_cell_matches_pk_values(array: &dyn Array, row_index: usize, values: &[String]) -> bool {
     if array.is_null(row_index) {
         return false;
@@ -26,11 +33,26 @@ fn arrow_cell_matches_pk_values(array: &dyn Array, row_index: usize, values: &[S
             .iter()
             .any(|expected| expected.parse::<i32>().is_ok_and(|parsed| parsed == actual));
     }
+    if let Some(ints) = array.as_any().downcast_ref::<Int16Array>() {
+        let actual = ints.value(row_index);
+        return values
+            .iter()
+            .any(|expected| expected.parse::<i16>().is_ok_and(|parsed| parsed == actual));
+    }
+    if let Some(flags) = array.as_any().downcast_ref::<BooleanArray>() {
+        let actual = flags.value(row_index);
+        return values.iter().any(|expected| match expected.as_str() {
+            "true" | "t" | "1" => actual,
+            "false" | "f" | "0" => !actual,
+            _ => false,
+        });
+    }
     if let Some(texts) = array.as_any().downcast_ref::<arrow_array::StringArray>() {
         let actual = texts.value(row_index);
         return values.iter().any(|expected| expected == actual);
     }
-    false
+    // Unknown Arrow type: keep the row (see the function comment).
+    true
 }
 
 /// Converts a clean-schema parquet row into the shared [`ColdRow`] model.
@@ -224,4 +246,63 @@ fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Arr
         .column_by_name(name)
         .map(|column| column.as_ref())
         .ok_or_else(|| format!("cold segment is missing required column `{name}`"))
+}
+
+#[cfg(test)]
+mod pk_match_tests {
+    use std::sync::Arc;
+
+    use arrow_array::{
+        ArrayRef, BooleanArray, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
+    };
+
+    use super::arrow_cell_matches_pk_values;
+
+    fn matches(array: ArrayRef, row: usize, values: &[&str]) -> bool {
+        let values: Vec<String> = values.iter().map(|value| (*value).to_string()).collect();
+        arrow_cell_matches_pk_values(array.as_ref(), row, &values)
+    }
+
+    #[test]
+    fn integer_keys_of_every_width_match_by_value() {
+        let small: ArrayRef = Arc::new(Int16Array::from(vec![1_i16, 7, -3]));
+        let int: ArrayRef = Arc::new(Int32Array::from(vec![1_i32, 7, -3]));
+        let big: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 7, -3]));
+        for array in [small, int, big] {
+            assert!(matches(array.clone(), 1, &["7"]));
+            assert!(!matches(array.clone(), 0, &["7"]));
+            assert!(matches(array.clone(), 2, &["-3"]));
+            assert!(
+                matches(array.clone(), 1, &["x", "7"]),
+                "any of the probe values"
+            );
+            assert!(!matches(array, 1, &["not-a-number"]));
+        }
+    }
+
+    #[test]
+    fn smallint_probe_out_of_range_matches_nothing() {
+        let small: ArrayRef = Arc::new(Int16Array::from(vec![7_i16]));
+        assert!(!matches(small, 0, &["70000"]));
+    }
+
+    #[test]
+    fn booleans_and_text_match() {
+        let flags: ArrayRef = Arc::new(BooleanArray::from(vec![true, false]));
+        assert!(matches(flags.clone(), 0, &["true"]));
+        assert!(matches(flags.clone(), 1, &["f"]));
+        assert!(!matches(flags, 0, &["false"]));
+        let text: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+        assert!(matches(text.clone(), 1, &["b"]));
+        assert!(!matches(text, 0, &["b"]));
+    }
+
+    #[test]
+    fn nulls_never_match_but_unknown_types_keep_the_row() {
+        let nullable: ArrayRef = Arc::new(Int16Array::from(vec![Some(7_i16), None]));
+        assert!(!matches(nullable, 1, &["7"]));
+        // An Arrow type this matcher cannot compare must not drop rows: the planner re-applies the qual.
+        let other: ArrayRef = Arc::new(Float64Array::from(vec![1.5_f64]));
+        assert!(matches(other, 0, &["2.5"]));
+    }
 }
