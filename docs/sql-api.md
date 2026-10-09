@@ -134,6 +134,8 @@ Every SQL-callable function the extension installs today:
 | `koldstore.flush_table(...)` | `jsonb` | Flush result object (`job_id`, `status`, `error`, …); see below |
 | `koldstore.table_status(...)` | `jsonb` | Operator view: table hot/mirror/cold/jobs + `async_mirror` |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
+| `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
+| `koldstore.validate_cold_storage(...)` | `jsonb` | Catalog vs object store: `{ok, problems[]}` |
 
 ## Storage and Migration
 
@@ -698,6 +700,37 @@ that merge scan still needs.
 found). With `dry_run => true`, the count is still returned and no objects are
 changed.
 
+### `koldstore.backup_manifest`
+
+```sql
+SELECT koldstore.backup_manifest();                       -- every managed table (superuser)
+SELECT koldstore.backup_manifest('chat.messages');        -- one table (owner or superuser)
+```
+
+Records what the catalog references in cold storage so a backup can be paired with the object
+prefix and checked after a restore. **Returns:** `jsonb` with `format`, `cluster` (database, system
+identifier, WAL position, server version, timestamp), `async_mirror` (the same health object as
+`async_mirror_status`) and `tables[]`: per table the storage type, base path and prefix, per-scope
+manifest generation / etag / row counts, the number of `pending` segments, and every `active`
+segment with its object `key`, `byte_size`, SHA-256 `checksum` and sequence range. Storage
+credentials are never included. Take it together with the physical base backup; see
+[Backup and Operations](backup-and-operations.md).
+
+### `koldstore.validate_cold_storage`
+
+```sql
+SELECT koldstore.validate_cold_storage();                              -- all tables, sizes only
+SELECT koldstore.validate_cold_storage('chat.messages', deep => true); -- one table, also checksums
+```
+
+Checks every active cold segment in the catalog against the object store. **Returns:** `jsonb`
+`{ok, deep, tables_checked, segments_checked, problems[]}`; each problem names the table, segment,
+object key and a `problem` of `missing`, `size_mismatch`, `checksum_mismatch` (only with
+`deep => true`, which downloads and hashes every object) or `storage_error`. `ok = true` means every
+cold reference the catalog holds is intact. Run it after restoring a backup or recovering to a point
+in time, before cutover. It does not report unreferenced objects; use
+`recover_segments(..., dry_run => true)` for those.
+
 ## DML Boundaries
 
 - Normal hot `INSERT`, `UPDATE`, and `DELETE` operate on the heap and mark local
@@ -751,11 +784,10 @@ options:
 `last_rows` must be `<= limit_rows`. A positive `since_seq` older than the
 retained floor raises a retention-gap error. `source` is `hot` or `cold`.
 
-The following operator SQL functions are planned but not yet exposed by the
-extension (tracked: https://github.com/kalamdb/koldstore/issues/56):
+The following operator surface is planned but not yet exposed by the extension
+(tracked: https://github.com/kalamdb/koldstore/issues/56); `backup_manifest` and
+`validate_cold_storage` are shipped (see above):
 
-- `koldstore.backup_manifest(...)`
-- `koldstore.validate_cold_storage(...)`
 - `koldstore_exec('EXPORT TABLE ...')` — `IMPORT TABLE` remains rejected until
   ownership and conflict rules are complete
 

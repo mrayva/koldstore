@@ -146,8 +146,11 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   issues under the hood) never goes through the planner, so it can never enter `KoldMergeScan`
   and would silently export the hot heap only. Refused when the table has cold data
   ([#126](https://github.com/kalamdb/koldstore/issues/126)); use `COPY (SELECT * FROM table) TO ...`
-  instead, which plans normally and sees cold data too. Coordinated backup/PITR across hot and cold
-  storage is still not shipped.
+  instead, which plans normally and sees cold data too. Backup and PITR are supported through a
+  physical base backup plus WAL archive and a retained cold object prefix, checked with
+  `koldstore.backup_manifest` / `koldstore.validate_cold_storage` (see
+  [Backup and Operations](backup-and-operations.md)); a logical `pg_dump` of the database is **not** a
+  supported backup of a managed table.
 
 ### Compatibility matrix
 

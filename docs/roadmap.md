@@ -114,10 +114,12 @@ must be **KoldStore-aware** and keep both tiers consistent.
 - Scoped storage should make per-tenant backup/export a natural subset once
   cold folders are per `scopeId`
 
-Today, the catalog and storage layers contain pieces needed for this design,
-but `koldstore.backup_manifest`, cold-storage validation, and packaged
-export/import are not shipped SQL interfaces. Their operator surface is tracked
-in [#103](https://github.com/kalamdb/koldstore/issues/103). `EXPORT TABLE` is
+Shipped: `koldstore.backup_manifest` and `koldstore.validate_cold_storage`, plus a documented and
+scripted (`scripts/backup-restore-drill.sh`) physical-backup / PITR procedure. Still open: packaged
+export/import, a logical-dump story (`pg_dump` is refused for tables with cold data, and the koldstore
+catalog tables are not registered with `pg_extension_config_dump`), and a retention guard that refuses
+or defers cold-object deletion while a backup that needs them is still restorable. The remaining operator
+surface is tracked in [#103](https://github.com/kalamdb/koldstore/issues/103). `EXPORT TABLE` is
 the intended archive boundary; `IMPORT TABLE` remains rejected until ownership,
 conflict, and schema rules land.
 

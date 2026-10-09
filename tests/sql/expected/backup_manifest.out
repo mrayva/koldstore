@@ -1,0 +1,89 @@
+CREATE TABLE
+INSERT 0 5
+ bk_managed
+------------
+ t
+(1 row)
+
+ flushed
+---------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  backup manifest failed: table is not managed by koldstore
+psql:<PATH>: ERROR:  validate cold storage failed: table is not managed by koldstore
+ format | tables | table_name | storage_type |   prefix   | database_recorded | system_identifier_recorded | wal_lsn_recorded | has_async_mirror
+--------+--------+------------+--------------+------------+-------------------+----------------------------+------------------+------------------
+ 1      |      1 | sqlreg.bk  | filesystem   | sqlreg/bk/ | t                 | t                          | t                | t
+(1 row)
+
+ lists_every_active_segment | keys_are_prefix_plus_path | checksums_are_sha256 | sizes_positive
+----------------------------+---------------------------+----------------------+----------------
+ t                          | t                         | t                    | t
+(1 row)
+
+ leaks_credentials
+-------------------
+ f
+(1 row)
+
+ all_tables_includes_bk
+------------------------
+ t
+(1 row)
+
+ ok | checked_all | problems
+----+-------------+----------
+ t  | t           |        0
+(1 row)
+
+ deep_ok | deep
+---------+------
+ t       | t
+(1 row)
+
+BEGIN
+UPDATE 1
+    problem
+---------------
+ size_mismatch
+(1 row)
+
+ROLLBACK
+BEGIN
+UPDATE 1
+ problem
+---------
+ missing
+(1 row)
+
+ROLLBACK
+BEGIN
+UPDATE 1
+ shallow_ok
+------------
+ t
+(1 row)
+
+      problem
+-------------------
+ checksum_mismatch
+(1 row)
+
+ROLLBACK
+ ok_after_rollback
+-------------------
+ t
+(1 row)
+
+CREATE ROLE
+GRANT
+SET
+psql:<PATH>: ERROR:  must be owner of relation or superuser to produce a backup manifest
+psql:<PATH>: ERROR:  must be owner of relation or superuser to validate cold storage
+psql:<PATH>: ERROR:  must be superuser to produce a backup manifest
+psql:<PATH>: ERROR:  must be superuser to validate cold storage
+RESET
+REVOKE
+DROP ROLE

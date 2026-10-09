@@ -2,23 +2,60 @@
 
 KoldStore has two durability domains: PostgreSQL owns the hot heap and local
 catalog state, while cold row images live in filesystem or object-store
-artifacts. The developer preview does not yet ship a coordinated backup,
-restore, or point-in-time-recovery protocol across those domains.
+artifacts. A backup is sound when **both** are recoverable to the same point.
 
-## Current recovery boundary
+## Supported recovery: physical backup + WAL archive + retained cold objects
 
-A PostgreSQL base backup, WAL archive, or logical dump is not sufficient to
-recover a managed table after rows have been pruned from the heap. Copying an
-object prefix beside a PostgreSQL backup is also not, by itself, a consistent
-snapshot: catalog publication and object writes have to agree on the same
-manifest generation.
+A physical base backup (`pg_basebackup`) plus a WAL archive restores the hot heap, the KoldStore
+catalog (`koldstore.*` tables), the async mirror and the replication slot together, as of any
+recovery target, exactly like any other PostgreSQL data. The cold tier then needs only one thing:
+**every cold object the restored catalog references must still exist, unchanged.** Cold objects are
+immutable (no compaction rewrites them), so this holds as long as nothing deleted them. The only
+operations that delete referenced cold objects are:
 
-Until a generation-pinning protocol is implemented, treat managed data as
-non-production data unless the application has an independent authoritative
-copy. Operators experimenting with manual snapshots must capture PostgreSQL
-and immutable cold prefixes, record the active manifest/catalog identities,
-retain every referenced object, and validate the pairing before cutover. That
-is an operator procedure, not a recovery guarantee provided by KoldStore.
+- `DROP TABLE` / `DROP SCHEMA` of a managed table,
+- `unmanage_table(..., drop_cold => true)`,
+- `recover_segments(...)` on objects the *current* catalog no longer references (orphans relative to
+  now, but possibly referenced by an older backup).
+
+Retain the cold object prefix (object-store versioning, a lifecycle rule, or simply not running the
+operations above) for as long as any backup taken before them may be restored. Objects flushed after a
+backup are harmless to an earlier restore: they are simply unreferenced by the older catalog.
+
+### Procedure
+
+1. Record the cold references with the backup:
+   `SELECT koldstore.backup_manifest();` (store the JSON next to the base backup; it contains no
+   credentials, and lists each segment's key, size and SHA-256).
+2. Take the base backup and keep archiving WAL as usual.
+3. To restore or recover to a point in time, restore the base backup, configure `restore_command` and
+   a recovery target, and start the server.
+4. **Before cutover**, run `SELECT koldstore.validate_cold_storage(deep => true);` on the restored
+   cluster. `ok = true` means every cold segment the restored catalog references exists with the
+   catalogued size and checksum. Any `missing`, `size_mismatch` or `checksum_mismatch` problem names the
+   object; restore it from the object store's own backup/versioning before using the table.
+5. Allow the async mirror to catch up (`koldstore.wait_for_async_mirror()`) before comparing results;
+   the restored slot re-decodes retained WAL exactly as after a crash.
+
+`scripts/backup-restore-drill.sh` runs this end to end on throwaway clusters (base backup, further
+writes and flushes, restore to two restore points, then damage and `DROP TABLE` cases) and asserts that
+the merged hot+cold table equals what it was at each restore point. It passes against a filesystem
+store; object stores take the same code path through the storage client, but the drill does not
+exercise one. Use `PG_OPTS` to point it at a staged build.
+
+## Not covered
+
+- A **logical** dump (`pg_dump` of the database) is not a backup of a managed table. For a managed
+  table that has cold data, `pg_dump` fails outright: the plain-table `COPY ... TO` it issues is
+  refused by the [#126](https://github.com/kalamdb/koldstore/issues/126) guard (verified: `pg_dump:
+  error: query failed: ERROR: koldstore: refusing COPY public.t TO ...`). Even where a dump succeeds
+  (a schema-only dump, or a table with no cold data yet), the KoldStore catalog tables are not
+  registered with `pg_extension_config_dump`, so the dump carries no cold-tier metadata and the
+  restored database does not know the table is managed. Use the physical procedure above.
+- `koldstore.validate_cold_storage` does not report *unreferenced* objects (use
+  `recover_segments(..., dry_run => true)`), and does not protect objects from deletion; retention is
+  the operator's responsibility today.
+- Packaged export/import (`EXPORT TABLE` / `IMPORT TABLE`) is not shipped.
 
 ## `pg_dump` and `COPY`
 
@@ -63,16 +100,13 @@ The `drop_cold` argument to `unmanage_table` deletes the table's cold objects
 `rehydrate => false`, since that combination would destroy the only copy of
 rows never brought back into the heap.
 
-## Available diagnostics and planned APIs
+## Available diagnostics
 
 `koldstore.table_status` reports current table, manifest, segment, job, and
 async-mirror information. It is operational telemetry, not a backup manifest.
 
-The following interfaces are planned but are not shipped SQL functions:
-
-- `koldstore.backup_manifest`
-- `koldstore.validate_cold_storage`
-- packaged export/import
+`koldstore.backup_manifest` and `koldstore.validate_cold_storage` are the backup tools described
+above. Packaged export/import is planned but not shipped.
 
 `koldstore.recover_segments` is a maintenance surface for orphan/pending
 objects; it does not create a coordinated backup or reconstruct arbitrary

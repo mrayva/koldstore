@@ -313,3 +313,19 @@ END
 $$;
 
 REVOKE ALL ON FUNCTION koldstore.reconcile_spock_conflicts(integer) FROM PUBLIC;
+
+-- Backup support: catalog manifest of cold-tier references, and validation of them against storage.
+CREATE FUNCTION koldstore."backup_manifest"(
+	"table_name" regclass DEFAULT NULL
+) RETURNS jsonb
+SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'backup_manifest_pg_wrapper';
+
+CREATE FUNCTION koldstore."validate_cold_storage"(
+	"table_name" regclass DEFAULT NULL,
+	"deep" bool DEFAULT false
+) RETURNS jsonb
+SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'validate_cold_storage_pg_wrapper';
