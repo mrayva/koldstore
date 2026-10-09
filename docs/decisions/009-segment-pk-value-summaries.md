@@ -67,8 +67,13 @@ returns only the segments that may contain the key.
   group. It now also matches 16-bit and boolean columns, and an Arrow type it cannot compare keeps the row instead
   of dropping it, because the planner re-applies the equality qual to every returned row anyway. Covered by a
   Parquet-level test, matcher unit tests and the `segment_pk_summary` SQL case.
-* **Open:** a populated table with a `uuid` primary key and a `migration_order_by` column cannot be flushed
-  (`invalid uuid keyset value: invalid length: found 0`); `uuid` itself is rejected as the order column.
+* **Fixed:** a populated table with a `uuid` primary key and a `migration_order_by` column could not be flushed
+  (`invalid uuid keyset value: invalid length: found 0`). The ordered flush pages through the mirror with a keyset
+  cursor; its first-page parameters are placeholders that the `$2::boolean OR ...` guard never compares, but they
+  still have to parse as the column type, and the uuid placeholder was an empty string. It is now the nil UUID.
+  Covered by the `uuid_pk_ordered_flush` SQL case (2,500 rows, 50 distinct order keys, three segments, so the
+  uuid tiebreak across page boundaries is exercised); verified red without the fix. `uuid` itself is still rejected
+  as the *order column* (a separate validation).
 * **Open (limits, not bugs):** `date`, `timestamp`, `boolean` and `numeric` primary keys cannot be managed or
   flushed in the same configurations (unsupported column type, or "ordered flush keyset does not support
   primary-key type"). Only `smallint`, `integer`, `bigint`, `text` and `uuid` keys were exercised end to end.

@@ -1,0 +1,49 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 2500
+SELECT 60
+ sampled
+---------
+      60
+(1 row)
+
+ uu_managed
+------------
+ t
+(1 row)
+
+ uu_flushed
+------------
+ t
+(1 row)
+
+ most_rows_are_cold | several_segments
+--------------------+------------------
+ t                  | t
+(1 row)
+
+ total_rows | distinct_ids
+------------+--------------
+       2500 |         2500
+(1 row)
+
+ rows_per_order_key_ok
+-----------------------
+                    50
+(1 row)
+
+ sample_hits
+-------------
+          60
+(1 row)
+
+ payloads_intact
+-----------------
+              60
+(1 row)
+
+ lowest_order_key | highest_order_key
+------------------+-------------------
+                1 |                50
+(1 row)
+

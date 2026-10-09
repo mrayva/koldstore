@@ -149,14 +149,18 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Int8 | PgType::Timestamptz => CellValue::Int64(0),
         PgType::Float4 => CellValue::Float32(0.0),
         PgType::Float8 => CellValue::Float64(0.0),
-        PgType::Text
-        | PgType::Uuid
-        | PgType::Jsonb
-        | PgType::Bytea
-        | PgType::Numeric
-        | PgType::TextArray => CellValue::Utf8(String::new()),
+        // The first-page placeholder is bound but never compared (the `$2::boolean OR ...` guard
+        // short-circuits), yet it must still parse as the column's type: an empty string is not a
+        // valid uuid, which made every ordered flush of a uuid-keyed table fail on its first page.
+        PgType::Uuid => CellValue::Utf8(NIL_UUID_PLACEHOLDER.to_string()),
+        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::Numeric | PgType::TextArray => {
+            CellValue::Utf8(String::new())
+        }
     }
 }
+
+/// First-page keyset placeholder for a `uuid` primary key (see [`default_cell_value`]).
+const NIL_UUID_PLACEHOLDER: &str = "00000000-0000-0000-0000-000000000000";
 
 fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedBind, String> {
     match (pg_type, value) {
