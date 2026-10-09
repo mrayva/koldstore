@@ -13,7 +13,14 @@
 #     valid, and only koldstore.purge_deferred_cold_objects() removes them.
 #
 # Usage: scripts/backup-restore-drill.sh
-#   env: PG_BIN       PostgreSQL bin dir               (default /usr/lib/postgresql/18/bin)
+#   env: STORAGE      fs (default) or s3. s3 needs a build with the `s3` cargo feature and an
+#                     S3-compatible server, e.g.
+#                       docker run -d --name ks-drill-minio -p 127.0.0.1:19090:9000 \
+#                         -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+#                         minio/minio server /data
+#        S3_ENDPOINT  (http://127.0.0.1:19090)  S3_BUCKET (koldstore-drill, created if absent)
+#        S3_ACCESS_KEY / S3_SECRET_KEY (minioadmin)   -- objects go under a unique per-run prefix
+#        PG_BIN       PostgreSQL bin dir               (default /usr/lib/postgresql/18/bin)
 #        PG_OPTS      extra server options, e.g. "-c dynamic_library_path='/tmp/kl-stage/lib:\$libdir'
 #                     -c extension_control_path='/tmp/kl-stage/share:\$system'" to test a staged build
 #        PORT_A PORT_B  ports for the source and restored clusters (28901 / 28902)
@@ -29,11 +36,43 @@ SOCK="$W/sock"; STORE="$W/cold"; ARCH="$W/archive"
 mkdir -p "$SOCK" "$STORE" "$ARCH"; chmod 777 "$STORE"
 fail=0
 
+STORAGE="${STORAGE:-fs}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:19090}"; S3_BUCKET="${S3_BUCKET:-koldstore-drill}"
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-minioadmin}"; S3_SECRET_KEY="${S3_SECRET_KEY:-minioadmin}"
+S3_PREFIX="drill-$(basename "$W")"
+export S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY
+s3() { python3 -I "$HERE/lib/s3_tool.py" "$@"; }
+
+# Object-store operations on a "locator": a file path (fs) or an object key (s3).
+if [ "$STORAGE" = s3 ]; then
+  list_segments() { s3 ls "$S3_BUCKET" "$S3_PREFIX/" | cut -f1 | grep 'segment-.*\.parquet$' | sort; }
+  obj_get() { s3 get "$S3_BUCKET" "$1" "$2"; }
+  obj_put() { s3 put "$S3_BUCKET" "$1" "$2"; }
+  obj_rm()  { s3 rm "$S3_BUCKET" "$1"; }
+  storage_sql() { echo "SELECT koldstore.register_storage('drill_fs','s3','s3://$S3_BUCKET/$S3_PREFIX/',
+    '{\"access_key_id\":\"$S3_ACCESS_KEY\",\"secret_access_key\":\"$S3_SECRET_KEY\"}'::jsonb,
+    '{\"endpoint\":\"$S3_ENDPOINT\",\"region\":\"us-east-1\",\"path_style\":true,\"allow_http\":true}'::jsonb) IS NOT NULL;"; }
+  s3 mb "$S3_BUCKET"
+else
+  list_segments() { find "$STORE" -name 'segment-*.parquet' | sort; }
+  obj_get() { cp "$1" "$2"; }
+  obj_put() { cp "$2" "$1"; }
+  obj_rm()  { rm -f -- "${1:?}"; }
+  storage_sql() { echo "SELECT koldstore.register_storage('drill_fs','filesystem','$STORE','{}'::jsonb,'{}'::jsonb) IS NOT NULL;"; }
+fi
+
 stop_all() {
   "$PG_BIN/pg_ctl" -D "${W:?}/a" -m immediate stop >/dev/null 2>&1 || true
   "$PG_BIN/pg_ctl" -D "${W:?}/b" -m immediate stop >/dev/null 2>&1 || true
 }
-cleanup() { stop_all; [ "${KEEP:-0}" = 1 ] && echo "kept: $W" || rm -rf "${W:?}"; }
+cleanup() {
+  stop_all
+  if [ "$STORAGE" = s3 ] && [ "${KEEP:-0}" != 1 ]; then
+    s3 ls "$S3_BUCKET" "$S3_PREFIX/" 2>/dev/null | cut -f1 | while read -r key; do s3 rm "$S3_BUCKET" "$key" || true; done
+  fi
+  [ "${KEEP:-0}" = 1 ] && echo "kept: $W" || rm -rf "${W:?}"
+}
 trap cleanup EXIT
 
 say() { echo; echo "== $*"; }
@@ -69,7 +108,7 @@ start "$W/a" "$PORT_A"
 q "$PORT_A" postgres -c "CREATE DATABASE drill"
 q "$PORT_A" drill >/dev/null <<EOF
 CREATE EXTENSION koldstore;
-SELECT koldstore.register_storage('drill_fs','filesystem','$STORE','{}'::jsonb,'{}'::jsonb) IS NOT NULL;
+$(storage_sql)
 CREATE TABLE t (id bigint PRIMARY KEY, v text NOT NULL);
 INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 6000) g;
 SELECT koldstore.manage_table('t'::regclass, storage=>'drill_fs', hot_row_limit=>10, min_flush_rows=>1,
@@ -104,6 +143,7 @@ EOF
 S2="$(snapshot "$PORT_A")"
 SEG2="$(q "$PORT_A" drill -c "SELECT count(*) FROM koldstore.cold_segments WHERE status='active'")"
 echo "  state S2 = $S2 ; $SEG2 active segments now"
+check "the $STORAGE object store holds exactly the $SEG2 active segments" "$(list_segments | wc -l)" "$SEG2"
 check "S2 differs from S1" "$([ "$S1" != "$S2" ] && echo yes || echo no)" yes
 q "$PORT_A" drill -c "SELECT pg_create_restore_point('s2')" >/dev/null
 q "$PORT_A" postgres -c "SELECT pg_switch_wal()" >/dev/null
@@ -140,15 +180,30 @@ check "merged table at s2 equals state S2" "$(snapshot "$PORT_B")" "$S2"
 check "validate_cold_storage (deep) ok at s2" "$(q "$PORT_B" drill -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'")" true
 stop_all_b b2
 
-say "damage the retained object prefix: validation must notice"
-seg="$(find "$STORE" -name 'segment-*.parquet' | sort | head -1)"
-cp "$seg" "$W/seg.keep"
-truncate -s -10 "${seg:?}"
+say "damage the retained object prefix ($STORAGE): truncated, deleted and same-size-corrupted objects must be noticed"
+mapfile -t SEGS < <(list_segments | head -3)
+[ "${#SEGS[@]}" = 3 ] || { echo "expected at least 3 segments, found ${#SEGS[@]}" >&2; exit 1; }
+SA="${SEGS[0]}"; SB="${SEGS[1]}"; SC="${SEGS[2]}"
+obj_get "$SA" "$W/a.keep"; obj_get "$SB" "$W/b.keep"; obj_get "$SC" "$W/c.keep"
+head -c "$(( $(stat -c %s "$W/a.keep") - 10 ))" "$W/a.keep" > "$W/a.bad"
+python3 -I - "$W/c.keep" "$W/c.bad" <<'PY'
+import sys
+b = bytearray(open(sys.argv[1], "rb").read()); b[100] ^= 0xFF; open(sys.argv[2], "wb").write(b)
+PY
+obj_put "$SA" "$W/a.bad"      # truncated
+obj_rm  "$SB"                 # deleted
+obj_put "$SC" "$W/c.bad"      # same size, one byte flipped
 restore_to b3 s2
-check "damaged object is reported" \
-  "$(q "$PORT_B" drill -c "SELECT p->>'problem' FROM jsonb_array_elements(koldstore.validate_cold_storage('t'::regclass)->'problems') p")" size_mismatch
+problems() { q "$PORT_B" drill -c "SELECT COALESCE(string_agg(p->>'problem', ',' ORDER BY p->>'problem'), 'none')
+  FROM jsonb_array_elements(koldstore.validate_cold_storage('t'::regclass, $1)->'problems') p"; }
+check "shallow validation reports the deleted and the truncated object" "$(problems false)" "missing,size_mismatch"
+check "deep validation also reports the same-size corruption" "$(problems true)" "checksum_mismatch,missing,size_mismatch"
 stop_all_b b3
-cp "$W/seg.keep" "${seg:?}"
+obj_put "$SA" "$W/a.keep"; obj_put "$SB" "$W/b.keep"; obj_put "$SC" "$W/c.keep"
+restore_to b3 s2
+check "after repairing the objects validation is clean again" \
+  "$(q "$PORT_B" drill -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'")" true
+stop_all_b b3
 
 say "DROP TABLE with retention off deletes the cold objects: an older restore must NOT validate"
 # (a separate table keeps this destructive case away from the retention case below)

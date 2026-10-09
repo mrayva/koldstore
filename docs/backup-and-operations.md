@@ -57,8 +57,10 @@ older catalog.
 writes and flushes, restore to several restore points, then damage, unprotected `DROP TABLE`, retained
 `DROP TABLE` and purge cases) and asserts that the merged hot+cold table equals what it was at each
 restore point. It passes against a filesystem
-store; object stores take the same code path through the storage client, but the drill does not
-exercise one. Use `PG_OPTS` to point it at a staged build.
+store and against an S3-compatible server (`STORAGE=s3`, verified with MinIO: the object operations are
+done through a small SigV4 helper, `scripts/lib/s3_tool.py`, so no AWS CLI is needed). S3 needs a build with the
+`s3` cargo feature (`--features "pg18 s3"`); a build without it rejects `register_storage(..., 's3', ...)`
+with `unsupported storage_type`. Use `PG_OPTS` to point the drill at a staged build.
 
 ## Not covered
 
