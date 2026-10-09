@@ -639,3 +639,33 @@ resurrected or duplicated keys, updates succeeding after a delete). The remainin
 (~10 ms: ~4 decode, ~3 slot acknowledgement, the rest applying) plus commit, still serialized by the
 lock; with a flusher looping, flush finalize holding the same lock is the next limit. Real parallelism
 would still need a way to share one slot's decoded changes across backends, which this does not attempt.
+
+Flush-finalize contention (2026-10-08): measured, no change to finalize. After the fence work, a looping
+flusher was the next throughput limit (8 hydrating clients: ~35 tps alone, 16 tps with `flush_table`
+looping every 50 ms). Per-phase timers and wait-event sampling of the stress run showed:
+
+- *What finalize holds.* From taking `SHARE ROW EXCLUSIVE` on the source table to commit, writers are blocked.
+  Median under the table lock was ~35 ms: ~22 ms of it is the pre-lock WAL catch-up, which only runs inside the lock
+  in `Nested` (inline) flush mode because that mode has no commit boundary; the prune fence is ~10 ms, the hot/mirror prune
+  ~1.5 ms, catalog activation ~1.5 ms (generation read 0.7 ms + one `UPDATE` 0.8 ms) and the global cache invalidation ~0.
+  In the default `queue` (Short) mode the catch-up runs in committed passes before the table lock, so the hold is correspondingly
+  shorter.
+- *Where writers wait.* While the flusher's blocking table-lock request is pending (median ~300 ms), it sits behind the in-flight
+  hydrators, which are themselves queued on the slot lock while holding `ROW EXCLUSIVE`; new writers queue behind the request.
+  Sampled during a run, hydrators were waiting on the relation lock 45% of the time, the slot/key advisory locks 36% and running 18%;
+  the flusher spent ~89% of its time waiting for the table lock.
+- *Cost per flush.* In inline mode each completed flush costs writers roughly 200-350 ms of lost throughput: 34.9 tps with no flusher,
+  31.9 with 11 flushes in 25 s, 21.5 with 28, 16.5 with 52. In the default queue mode the same request rates (a force flush requested every
+  0.5 s or every 50 ms) gave 37.9 and 41.3 tps, i.e. no measurable loss, because the job queue coalesces requests (3 finalizes completed in 25 s).
+  So the lock stall only matters when flushes complete very often; it is not worth restructuring the lock protocol (the table lock is what
+  makes the hot prune safe against concurrent writers).
+- *The larger effect is on cold reads, not locks.* Every flush adds small segments whose keys are scattered, so their key ranges overlap and
+  the catalog's min/max pruning cannot discard them. A cold point lookup (`Strategy: Exact Primary Key`) took 2.0 ms with 4 segments and
+  16.9 ms with 14 (509 vs 59 lookups/s, 8.6x): 14 candidates, 3 pruned by the catalog index, **11 opened**. Parquet Bloom filters
+  (`parquet_bloom_filter_fpp`) are written (verified in the files with DuckDB) and the Parquet reader's Bloom/row-group pruning works
+  (`koldstore-parquet` tests), but it cannot avoid *opening* each candidate segment to read its footer (~1.5 ms each), so a point lookup stays
+  O(segments) and enabling Bloom filters changed neither the opened count nor the latency. This (not the flush lock) explains most of the
+  throughput that does not come back after a flush in this benchmark; the benchmark amplifies it by forcing flushes of a handful of rows.
+  Real fixes are a segment-level PK summary in the catalog (so non-matching segments are never opened) and compaction of small segments.
+
+The stress script gained `FLUSH_SLEEP`, `FLUSH_EXECUTION`, `ONLY_PHASE1`, `PGBENCH_EXTRA` and `BLOOM_FPP` for these measurements.

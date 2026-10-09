@@ -10,6 +10,11 @@
 # Usage: scripts/stress-hydrate-on-write.sh
 #   env: PGHOST PGPORT PGUSER PSQL PGBENCH  ROWS(20000) CLIENTS(8) DURATION(30) FLUSHERS(1)
 #        KEYS (updaters draw keys from 1..KEYS; small = many collisions, default ROWS)
+#        BLOOM_FPP (Parquet Bloom-filter false-positive rate for the fixture table, e.g. 0.01; default off)
+#        FLUSH_EXECUTION (inline|queue for the sessions; default inline)
+#        FLUSH_SLEEP (seconds the flusher sleeps between flushes, default 0.05)
+#        ONLY_PHASE1=1 (stop after the update phase and its checks)
+#        PGBENCH_EXTRA (extra pgbench args for the update phase, e.g. "-P 1" for a per-second timeline)
 set -euo pipefail
 PSQL="${PSQL:-psql}"; PGBENCH="${PGBENCH:-pgbench}"
 ROWS="${ROWS:-20000}"; KEYS="${KEYS:-${ROWS:-20000}}"; KEYS3="${KEYS3:-400}"; CLIENTS="${CLIENTS:-8}"; SECONDS_RUN="${DURATION:-30}"; FLUSHERS="${FLUSHERS:-1}"
@@ -32,7 +37,7 @@ CREATE TABLE st.deleted (id bigint NOT NULL);
 CREATE TABLE st.errors (op text, msg text);
 CREATE TABLE st.oplog (id bigint NOT NULL, op text NOT NULL, xid xid8 NOT NULL DEFAULT pg_current_xact_id());
 SELECT koldstore.manage_table(table_name=>'st.t'::regclass, storage=>'stress_fs', hot_row_limit=>10,
-  min_flush_rows=>1, max_rows_per_file=>5000, migration_order_by=>'id', auto_flush=>false) IS NOT NULL;
+  min_flush_rows=>1, max_rows_per_file=>5000, migration_order_by=>'id', auto_flush=>false${BLOOM_FPP:+, parquet_bloom_filter_fpp=>$BLOOM_FPP}) IS NOT NULL;
 CREATE FUNCTION st.bump(k bigint) RETURNS boolean LANGUAGE plpgsql AS \$\$
 DECLARE n bigint;
 BEGIN
@@ -85,13 +90,13 @@ cat > "$work/bump.sql" <<EOSQL
 \set k random(1, $KEYS)
 SELECT st.bump(:k);
 EOSQL
-cat > "$work/flush.sql" <<'EOSQL'
+cat > "$work/flush.sql" <<EOSQL
 SELECT st.flush_once();
-SELECT pg_sleep(0.05);
+SELECT pg_sleep(${FLUSH_SLEEP:-0.05});
 EOSQL
-export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=inline"
+export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=${FLUSH_EXECUTION:-inline}"
 echo "== phase 1: $CLIENTS updaters + $FLUSHERS flusher(s), ${SECONDS_RUN}s"
-"$PGBENCH" -n -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_RUN" -f "$work/bump.sql" -d "$DB" 2>&1 | grep -E "transactions actually|failed transactions|latency average|tps|aborted" &
+"$PGBENCH" -n -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_RUN" ${PGBENCH_EXTRA:-} -f "$work/bump.sql" -d "$DB" 2>&1 | grep -E "transactions actually|failed transactions|latency average|tps|aborted|^progress" &
 PB=$!
 if [ "$FLUSHERS" -gt 0 ]; then "$PGBENCH" -n -c "$FLUSHERS" -j 1 -T "$SECONDS_RUN" -f "$work/flush.sql" -d "$DB" 2>&1 | grep -E "transactions actually|failed transactions|aborted" | sed 's/^/flusher: /' & fi
 wait
@@ -109,13 +114,14 @@ SELECT 'sum(ver) vs bumps', sum(ver), (SELECT count(*) FROM st.applied) FROM st.
 SELECT 'errors: ' || op || ' | ' || msg, count(*) FROM st.errors GROUP BY op, msg ORDER BY 2 DESC;
 EOSQL
 echo "storage dir: $STORE (remove when done); database: $DB"
+if [ "${ONLY_PHASE1:-0}" = 1 ]; then exit 0; fi
 
 echo "== phase 2: $CLIENTS deleters + $FLUSHERS flusher(s), ${SECONDS_RUN}s (each success recorded in st.deleted)"
 cat > "$work/drop.sql" <<EOSQL
 \set k random(1, $ROWS)
 SELECT st.drop_key(:k);
 EOSQL
-export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=inline ${EXTRA_PGOPTIONS:-}"
+export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=${FLUSH_EXECUTION:-inline} ${EXTRA_PGOPTIONS:-}"
 "$PGBENCH" -n -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_RUN" -f "$work/drop.sql" -d "$DB" 2>&1 | grep -E "transactions actually|tps" &
 if [ "$FLUSHERS" -gt 0 ]; then "$PGBENCH" -n -c "$FLUSHERS" -j 1 -T "$SECONDS_RUN" -f "$work/flush.sql" -d "$DB" 2>&1 | grep -E "transactions actually" | sed 's/^/flusher: /' & fi
 wait
@@ -145,7 +151,7 @@ if [ "$(p -d "$DB" -c "SHOW track_commit_timestamp")" = "on" ]; then
 \set r random(1, 100)
 SELECT CASE WHEN :r <= 30 THEN st.drop_key(:k) ELSE st.bump(:k) END;
 EOSQL
-  export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=inline ${EXTRA_PGOPTIONS:-}"
+  export PGOPTIONS="-c koldstore.hydrate_on_write=on -c koldstore.min_max_rows_per_file=1 -c koldstore.flush_execution=${FLUSH_EXECUTION:-inline} ${EXTRA_PGOPTIONS:-}"
   "$PGBENCH" -n -c "$CLIENTS" -j "$CLIENTS" -T "$SECONDS_RUN" -f "$work/mixed.sql" -d "$DB" 2>&1 | grep -E "transactions actually|tps" &
   if [ "$FLUSHERS" -gt 0 ]; then "$PGBENCH" -n -c "$FLUSHERS" -j 1 -T "$SECONDS_RUN" -f "$work/flush.sql" -d "$DB" 2>&1 | grep -E "transactions actually" | sed 's/^/flusher: /' & fi
   wait
