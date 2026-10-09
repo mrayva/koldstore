@@ -42,6 +42,10 @@ pub enum SqlParamType {
     Integer,
     /// PostgreSQL `timestamp with time zone`.
     TimestampWithTimeZone,
+    /// PostgreSQL `timestamp` (without time zone).
+    Timestamp,
+    /// PostgreSQL `date`.
+    Date,
     Text,
     Jsonb,
     Bytea,

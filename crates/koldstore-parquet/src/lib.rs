@@ -9,6 +9,7 @@ pub mod pg_type_codec;
 pub mod prune;
 pub mod reader;
 pub mod schema;
+pub mod temporal;
 pub mod value_summary;
 pub mod writer;
 

@@ -134,7 +134,37 @@ unsafe fn execute_batched_mirror_probe(
     execute_mirror_overlay_query(&bound_query, pk_columns)
 }
 
+/// Runs `f` with the session `TimeZone` set to UTC, restoring it afterwards (an error aborts the
+/// (sub)transaction, which restores it too). A `timestamptz` key renders into `jsonb` in the session
+/// zone, while the cold side's keys are always rendered in UTC, so the overlay must be read in UTC.
+pub(super) fn in_utc<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: plain GUC bookkeeping; the nest level is closed on every non-error path.
+    let nest = unsafe { pg_sys::NewGUCNestLevel() };
+    unsafe {
+        pg_sys::set_config_option(
+            c"timezone".as_ptr(),
+            c"UTC".as_ptr(),
+            pg_sys::GucContext::PGC_USERSET,
+            pg_sys::GucSource::PGC_S_SESSION,
+            pg_sys::GucAction::GUC_ACTION_SAVE,
+            true,
+            0,
+            false,
+        );
+    }
+    let result = f();
+    unsafe { pg_sys::AtEOXact_GUC(true, nest) };
+    result
+}
+
 unsafe fn execute_mirror_overlay_query(
+    query: &str,
+    pk_columns: &[PkColumn],
+) -> Result<MirrorOverlay, String> {
+    in_utc(|| unsafe { run_mirror_overlay_query(query, pk_columns) })
+}
+
+unsafe fn run_mirror_overlay_query(
     query: &str,
     pk_columns: &[PkColumn],
 ) -> Result<MirrorOverlay, String> {

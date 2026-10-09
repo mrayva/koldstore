@@ -38,6 +38,12 @@ pub enum CellValue {
     /// (`TimestampTzADT`). Arrow physical storage remains Unix-epoch micros;
     /// convert at the Arrow boundary only.
     TimestamptzMicros(i64),
+    /// `timestamp` (without time zone) stored as PostgreSQL-epoch microseconds
+    /// (`Timestamp`). Arrow physical storage remains Unix-epoch micros.
+    TimestampMicros(i64),
+    /// `date` stored as days since the PostgreSQL epoch (2000-01-01) (`DateADT`).
+    /// Arrow physical storage remains Unix-epoch days (`Date32`).
+    DateDays(i32),
 }
 
 impl CellValue {
@@ -61,8 +67,10 @@ impl CellValue {
     pub const fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int16(value) => Some(*value as i64),
-            Self::Int32(value) => Some(*value as i64),
-            Self::Int64(value) | Self::TimestamptzMicros(value) => Some(*value),
+            Self::Int32(value) | Self::DateDays(value) => Some(*value as i64),
+            Self::Int64(value) | Self::TimestamptzMicros(value) | Self::TimestampMicros(value) => {
+                Some(*value)
+            }
             _ => None,
         }
     }
@@ -94,7 +102,15 @@ impl CellValue {
             Self::Bool(value) => Value::Bool(*value),
             Self::Int16(value) => Value::Number((*value).into()),
             Self::Int32(value) => Value::Number((*value).into()),
-            Self::Int64(value) | Self::TimestamptzMicros(value) => Value::Number((*value).into()),
+            Self::Int64(value) => Value::Number((*value).into()),
+            // Temporal cells render as the text PostgreSQL's `to_jsonb` gives the value (timestamptz in
+            // UTC), so a key built here compares equal to one the heap or the change-log mirror reports.
+            Self::DateDays(value) => crate::temporal::format_date_pg_days(*value)
+                .map_or_else(|_| Value::Number((*value).into()), Value::String),
+            Self::TimestampMicros(value) => crate::temporal::format_timestamp_pg_micros(*value)
+                .map_or_else(|_| Value::Number((*value).into()), Value::String),
+            Self::TimestamptzMicros(value) => crate::temporal::format_timestamptz_json_utc(*value)
+                .map_or_else(|_| Value::Number((*value).into()), Value::String),
             Self::Float32(value) => Number::from_f64(f64::from(*value))
                 .map(Value::Number)
                 .unwrap_or(Value::Null),
@@ -152,8 +168,10 @@ impl CellValue {
             Self::Null => "null".to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Int16(value) => value.to_string(),
-            Self::Int32(value) => value.to_string(),
-            Self::Int64(value) | Self::TimestamptzMicros(value) => value.to_string(),
+            Self::Int32(value) | Self::DateDays(value) => value.to_string(),
+            Self::Int64(value) | Self::TimestamptzMicros(value) | Self::TimestampMicros(value) => {
+                value.to_string()
+            }
             Self::Float32(value) => value.to_string(),
             Self::Float64(value) => value.to_string(),
             Self::Utf8(value) => value.clone(),

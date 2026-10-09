@@ -1032,7 +1032,24 @@ fn encode_leading_key(
 ) -> Option<Vec<u8>> {
     let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(leading_type_oid)?;
     let value = row.row_image.get(leading_column)?;
-    koldstore_sortkey::encode_sort_key_json(sort_type, &value.to_json()).ok()
+    // Temporal cells hold PostgreSQL-epoch integers; encode them directly rather than through their
+    // JSON text, which the JSON codec does not parse for `infinity` or BC values.
+    let typed = match (sort_type, value) {
+        (koldstore_sortkey::SortKeyType::Date, koldstore_common::CellValue::DateDays(days)) => {
+            Some(koldstore_sortkey::SortKeyValue::Date(*days))
+        }
+        (koldstore_sortkey::SortKeyType::Timestamp, koldstore_common::CellValue::TimestampMicros(micros)) => {
+            Some(koldstore_sortkey::SortKeyValue::Timestamp(*micros))
+        }
+        (koldstore_sortkey::SortKeyType::Timestamptz, koldstore_common::CellValue::TimestamptzMicros(micros)) => {
+            Some(koldstore_sortkey::SortKeyValue::Timestamptz(*micros))
+        }
+        _ => None,
+    };
+    match typed {
+        Some(typed) => koldstore_sortkey::encode_sort_key(&typed).ok(),
+        None => koldstore_sortkey::encode_sort_key_json(sort_type, &value.to_json()).ok(),
+    }
 }
 
 fn load_overlay<P: ScanProfileSink>(

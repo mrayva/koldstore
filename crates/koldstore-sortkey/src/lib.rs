@@ -17,5 +17,6 @@ pub use summary::{
     summary_hash, summary_may_contain, ValueSummaryBuilder, SUMMARY_MAX_BYTES, SUMMARY_MAX_ROWS,
 };
 pub use types::{
-    SortKeyType, SortKeyValue, CODEC_VERSION, PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX,
+    pg_days_to_unix, pg_micros_to_unix, unix_days_to_pg, unix_micros_to_pg, SortKeyType, SortKeyValue,
+    CODEC_VERSION, PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX,
 };

@@ -1,0 +1,237 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 6
+SELECT 66
+ tev_managed
+-------------
+ t
+(1 row)
+
+ tev_flushed
+-------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+ predicate_mismatches
+----------------------
+                    0
+(1 row)
+
+ infinities
+------------
+          2
+(1 row)
+
+ order_by_ts_matches
+---------------------
+ t
+(1 row)
+
+ order_by_d_desc_matches
+-------------------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ tev_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ rows_after
+------------
+         65
+(1 row)
+
+CREATE TABLE
+INSERT 0 45
+INSERT 0 3
+CREATE TABLE
+INSERT 0 45
+INSERT 0 3
+CREATE TABLE
+INSERT 0 45
+INSERT 0 3
+CREATE TABLE
+INSERT 0 45
+CREATE TABLE
+INSERT 0 45
+SELECT 48
+SELECT 48
+SELECT 48
+SELECT 45
+SELECT 45
+ managed
+---------
+ t
+ t
+ t
+(3 rows)
+
+ managed_key_ordered
+---------------------
+ t
+ t
+(2 rows)
+
+        t        | flushed
+-----------------+---------
+ sqlreg.pk_date  | t
+ sqlreg.pk_ts    | t
+ sqlreg.pk_tz    | t
+ sqlreg.pk_datek | t
+ sqlreg.pk_tsk   | t
+(5 rows)
+
+ date_pk_rows | ts_pk_rows | tz_pk_rows | date_key_ordered_rows | ts_key_ordered_rows
+--------------+------------+------------+-----------------------+---------------------
+ t            | t          | t          | t                     | t
+(1 row)
+
+ date_pk_mismatches
+--------------------
+                  0
+(1 row)
+
+ ts_pk_mismatches
+------------------
+                0
+(1 row)
+
+ tz_pk_mismatches
+------------------
+                0
+(1 row)
+
+ date_key_ordered_mismatches
+-----------------------------
+                           0
+(1 row)
+
+ ts_key_ordered_mismatches
+---------------------------
+                         0
+(1 row)
+
+ date_pk_found
+---------------
+             1
+(1 row)
+
+ date_pk_absent
+----------------
+              0
+(1 row)
+
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+DELETE 1
+DELETE 1
+SET
+DELETE 1
+DELETE 1
+RESET
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ date_pk_rows_after_dml | ts_pk_rows_after_dml | tz_pk_rows_after_dml
+------------------------+----------------------+----------------------
+ t                      | t                    | t
+(1 row)
+
+ deleted_date_gone | deleted_ts_gone | deleted_tz_gone
+-------------------+-----------------+-----------------
+                 0 |               0 |               0
+(1 row)
+
+ reflushed
+-----------
+ t
+ t
+ t
+(3 rows)
+
+ date_pk_rows_after_reflush | ts_pk_rows_after_reflush | tz_pk_rows_after_reflush
+----------------------------+--------------------------+--------------------------
+ t                          | t                        | t
+(1 row)
+
+CREATE TABLE
+INSERT 0 2
+ bool_managed
+--------------
+ t
+(1 row)
+
+ bool_flushed
+--------------
+ t
+(1 row)
+
+ id |  v
+----+-----
+ t  | yes
+(1 row)
+
+ id | v
+----+----
+ f  | no
+(1 row)
+
+ id | v
+----+----
+ f  | no
+(1 row)
+
+ bool_rows
+-----------
+         2
+(1 row)
+

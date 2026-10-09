@@ -8,8 +8,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    StringArray, TimestampMicrosecondArray,
+    Array, ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType, TimeUnit};
 use koldstore_schema::PgType;
@@ -58,7 +58,8 @@ pub const fn arrow_data_type(pg_type: PgType) -> DataType {
         | PgType::Jsonb
         | PgType::TextArray
         | PgType::Bytea => DataType::Utf8,
-        PgType::Timestamptz => DataType::Timestamp(TimeUnit::Microsecond, None),
+        PgType::Timestamptz | PgType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
+        PgType::Date => DataType::Date32,
     }
 }
 
@@ -140,6 +141,18 @@ pub fn arrow_array_from_json(
                 .map(|value| json_timestamp_micros(*value))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        PgType::Timestamp => Arc::new(TimestampMicrosecondArray::from_iter(
+            json_values
+                .iter()
+                .map(|value| json_naive_timestamp_micros(*value))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        PgType::Date => Arc::new(Date32Array::from_iter(
+            json_values
+                .iter()
+                .map(|value| json_date_days(*value))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
     };
     Ok(array)
 }
@@ -195,8 +208,21 @@ pub fn cell_from_arrow_cell(
         PgType::Timestamptz => {
             let unix_micros =
                 array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index);
-            Ok(CellValue::TimestamptzMicros(unix_micros.saturating_sub(
-                koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX,
+            Ok(CellValue::TimestamptzMicros(koldstore_sortkey::unix_micros_to_pg(
+                unix_micros,
+            )))
+        }
+        PgType::Timestamp => {
+            let unix_micros =
+                array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index);
+            Ok(CellValue::TimestampMicros(koldstore_sortkey::unix_micros_to_pg(
+                unix_micros,
+            )))
+        }
+        PgType::Date => {
+            let unix_days = array_for::<Date32Array>(array, column_name)?.value(row_index);
+            Ok(CellValue::DateDays(koldstore_sortkey::unix_days_to_pg(
+                unix_days,
             )))
         }
     }
@@ -260,9 +286,31 @@ pub fn json_from_arrow_cell(
         PgType::Timestamptz => {
             let micros =
                 array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index);
+            // `infinity` is stored as the extreme value (see `koldstore_sortkey::pg_micros_to_unix`).
+            if micros == i64::MAX {
+                return Ok(serde_json::Value::String("infinity".to_string()));
+            }
+            if micros == i64::MIN {
+                return Ok(serde_json::Value::String("-infinity".to_string()));
+            }
             let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(micros)
                 .ok_or_else(|| format!("timestamp value out of range in `{column_name}`"))?;
             Ok(serde_json::Value::String(timestamp.to_rfc3339()))
+        }
+        PgType::Timestamp => {
+            let unix_micros =
+                array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index);
+            crate::temporal::format_timestamp_pg_micros(koldstore_sortkey::unix_micros_to_pg(
+                unix_micros,
+            ))
+            .map(serde_json::Value::String)
+            .map_err(|error| format!("column `{column_name}`: {error}"))
+        }
+        PgType::Date => {
+            let unix_days = array_for::<Date32Array>(array, column_name)?.value(row_index);
+            crate::temporal::format_date_pg_days(koldstore_sortkey::unix_days_to_pg(unix_days))
+                .map(serde_json::Value::String)
+                .map_err(|error| format!("column `{column_name}`: {error}"))
         }
     }
 }
@@ -356,7 +404,28 @@ fn json_timestamp_micros(value: Option<&serde_json::Value>) -> Result<Option<i64
     parse_timestamp_micros(value.as_ref()).map(Some)
 }
 
+fn json_naive_timestamp_micros(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
+    let Some(value) = json_string_borrowed(value)? else {
+        return Ok(None);
+    };
+    crate::temporal::parse_timestamp_pg_micros(value.as_ref())
+        .map(|pg| Some(koldstore_sortkey::pg_micros_to_unix(pg)))
+}
+
+fn json_date_days(value: Option<&serde_json::Value>) -> Result<Option<i32>, String> {
+    let Some(value) = json_string_borrowed(value)? else {
+        return Ok(None);
+    };
+    crate::temporal::parse_date_pg_days(value.as_ref())
+        .map(|pg| Some(koldstore_sortkey::pg_days_to_unix(pg)))
+}
+
 fn parse_timestamp_micros(value: &str) -> Result<i64, String> {
+    match value.trim() {
+        "infinity" => return Ok(i64::MAX),
+        "-infinity" => return Ok(i64::MIN),
+        _ => {}
+    }
     chrono::DateTime::parse_from_rfc3339(value)
         .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z"))
         .map(|timestamp| timestamp.timestamp_micros())

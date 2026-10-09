@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_sortkey::{
-    encode_sort_key, encode_sort_key_pg_text, SortKeyType, SortKeyValue, CODEC_VERSION,
-    PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX,
+    encode_sort_key, encode_sort_key_pg_text, unix_days_to_pg, unix_micros_to_pg, SortKeyType,
+    SortKeyValue, CODEC_VERSION,
 };
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
@@ -357,8 +357,8 @@ fn exact_sort_key_bounds(
             .zip(values.max_opt().copied())
             .map(|(min, max)| {
                 (
-                    SortKeyValue::Date(min.saturating_sub(PG_EPOCH_DAYS_FROM_UNIX)),
-                    SortKeyValue::Date(max.saturating_sub(PG_EPOCH_DAYS_FROM_UNIX)),
+                    SortKeyValue::Date(unix_days_to_pg(min)),
+                    SortKeyValue::Date(unix_days_to_pg(max)),
                 )
             }),
         (SortKeyType::Timestamp, Statistics::Int64(values)) => values
@@ -367,8 +367,8 @@ fn exact_sort_key_bounds(
             .zip(values.max_opt().copied())
             .map(|(min, max)| {
                 (
-                    SortKeyValue::Timestamp(min.saturating_sub(PG_EPOCH_MICROS_FROM_UNIX)),
-                    SortKeyValue::Timestamp(max.saturating_sub(PG_EPOCH_MICROS_FROM_UNIX)),
+                    SortKeyValue::Timestamp(unix_micros_to_pg(min)),
+                    SortKeyValue::Timestamp(unix_micros_to_pg(max)),
                 )
             }),
         (SortKeyType::Timestamptz, Statistics::Int64(values)) => values
@@ -377,8 +377,8 @@ fn exact_sort_key_bounds(
             .zip(values.max_opt().copied())
             .map(|(min, max)| {
                 (
-                    SortKeyValue::Timestamptz(min.saturating_sub(PG_EPOCH_MICROS_FROM_UNIX)),
-                    SortKeyValue::Timestamptz(max.saturating_sub(PG_EPOCH_MICROS_FROM_UNIX)),
+                    SortKeyValue::Timestamptz(unix_micros_to_pg(min)),
+                    SortKeyValue::Timestamptz(unix_micros_to_pg(max)),
                 )
             }),
         (SortKeyType::Uuid, Statistics::ByteArray(values)) => {

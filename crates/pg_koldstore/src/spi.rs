@@ -21,6 +21,8 @@ fn sql_param_pg_oid(param: SqlParamType) -> pgrx::pg_sys::PgOid {
         SqlParamType::BigInt => pgrx::pg_sys::INT8OID,
         SqlParamType::Integer => pgrx::pg_sys::INT4OID,
         SqlParamType::TimestampWithTimeZone => pgrx::pg_sys::TIMESTAMPTZOID,
+        SqlParamType::Timestamp => pgrx::pg_sys::TIMESTAMPOID,
+        SqlParamType::Date => pgrx::pg_sys::DATEOID,
         SqlParamType::Text => pgrx::pg_sys::TEXTOID,
         SqlParamType::Jsonb => pgrx::pg_sys::JSONBOID,
         SqlParamType::Bytea => pgrx::pg_sys::BYTEAOID,

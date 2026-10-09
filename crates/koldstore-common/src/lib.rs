@@ -16,6 +16,7 @@ pub mod domain;
 pub mod error;
 pub mod log;
 pub mod sql;
+pub mod temporal;
 
 // Stable top-level paths used across the workspace.
 pub use config::privileges;

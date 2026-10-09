@@ -74,6 +74,22 @@ returns only the segments that may contain the key.
   Covered by the `uuid_pk_ordered_flush` SQL case (2,500 rows, 50 distinct order keys, three segments, so the
   uuid tiebreak across page boundaries is exercised); verified red without the fix. `uuid` itself is still rejected
   as the *order column* (a separate validation).
-* **Open (limits, not bugs):** `date`, `timestamp`, `boolean` and `numeric` primary keys cannot be managed or
-  flushed in the same configurations (unsupported column type, or "ordered flush keyset does not support
-  primary-key type"). Only `smallint`, `integer`, `bigint`, `text` and `uuid` keys were exercised end to end.
+* **Fixed:** `date` and `timestamp` (without time zone) columns could not be managed at all (they were not in the
+  type matrix), and `timestamptz` keys never worked as primary keys. All three, as ordinary columns and as primary
+  keys (with a separate `migration_order_by` column or with the key itself as the order column), now manage, flush,
+  hydrate and delete correctly; covered by the `temporal_types` SQL case against an unmanaged control copy.
+  Three things had to line up:
+  * **Epochs.** PostgreSQL counts from 2000-01-01, Arrow/Parquet from 1970-01-01. `CellValue` holds PostgreSQL-epoch
+    values; the Parquet codec shifts at the boundary. `infinity` / `-infinity` are the extreme integers and are never
+    shifted.
+  * **Key identity.** A primary key is compared as JSON across the heap, the change-log mirror (`to_jsonb`) and cold
+    rows. Temporal cells therefore render as PostgreSQL's own `to_jsonb` text (`2020-01-05`,
+    `2019-12-25T15:00:00.5`, `... BC`, `infinity`), and `timestamptz` in UTC; the heap and mirror reads that feed
+    the merge run with `TimeZone = UTC` so the session zone cannot change a key. (Numbers would sort correctly but
+    never matched the mirror's tombstones, so deleted cold rows reappeared.)
+  * **Point lookups.** `WHERE id = <date literal>` also feeds Parquet statistics and bloom filters, which hold the
+    Unix-epoch value; the probe is shifted accordingly (it used to return no rows for a cold key).
+  `boolean` keys manage and flush too, but `boolean` is still rejected as the *order column* itself.
+* **Open (limits, not bugs):** `numeric` primary keys cannot be flushed with an order column ("ordered flush keyset
+  does not support primary-key type"). `date`, `timestamp`, `timestamptz` and `boolean` have no value summary, so
+  point lookups on them rely on min/max bounds and Parquet statistics alone.

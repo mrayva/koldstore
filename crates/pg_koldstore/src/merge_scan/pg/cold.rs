@@ -1176,12 +1176,14 @@ fn pk_equality_values(
     let literal = match value {
         koldstore_sortkey::SortKeyValue::Bool(flag) => flag.to_string(),
         koldstore_sortkey::SortKeyValue::Int2(n) => n.to_string(),
-        koldstore_sortkey::SortKeyValue::Int4(n) | koldstore_sortkey::SortKeyValue::Date(n) => {
-            n.to_string()
+        koldstore_sortkey::SortKeyValue::Int4(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Int8(n) => n.to_string(),
+        // The probe is compared with Parquet statistics and bloom filters, which hold the Arrow
+        // (Unix-epoch) physical value, not the PostgreSQL-epoch one the sort key carries.
+        koldstore_sortkey::SortKeyValue::Date(n) => koldstore_sortkey::pg_days_to_unix(*n).to_string(),
+        koldstore_sortkey::SortKeyValue::Timestamp(n) | koldstore_sortkey::SortKeyValue::Timestamptz(n) => {
+            koldstore_sortkey::pg_micros_to_unix(*n).to_string()
         }
-        koldstore_sortkey::SortKeyValue::Int8(n)
-        | koldstore_sortkey::SortKeyValue::Timestamp(n)
-        | koldstore_sortkey::SortKeyValue::Timestamptz(n) => n.to_string(),
         koldstore_sortkey::SortKeyValue::Uuid(uuid) => uuid.to_string(),
     };
     Some((pk.clone(), vec![literal]))

@@ -97,6 +97,8 @@ unsafe fn datum_typed_sql(
         | PgType::TextArray
         | PgType::Bytea
         | PgType::Timestamptz
+        | PgType::Timestamp
+        | PgType::Date
         | PgType::Float4
         | PgType::Float8 => {
             // Use PostgreSQL's real output function: varlena binary formats
@@ -217,6 +219,13 @@ unsafe fn datum_cell_value(
         // TimestampTzADT is microseconds since the PostgreSQL epoch — the same
         // unit Sort Key V1 persists for timestamptz bounds.
         PgType::Timestamptz => Some(CellValue::TimestamptzMicros(datum.value() as i64)),
+        // `Timestamp` and `DateADT` datums are PostgreSQL-epoch microseconds / days, the units the
+        // cold decode and the hot SPI read use, so equality probes compare like with like.
+        PgType::Timestamp => Some(CellValue::TimestampMicros(datum.value() as i64)),
+        PgType::Date => {
+            let narrowed = i32::try_from(datum.value() as i64).ok()?;
+            Some(CellValue::DateDays(narrowed))
+        }
         _ => None,
     }
 }

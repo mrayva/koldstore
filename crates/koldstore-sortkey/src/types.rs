@@ -15,6 +15,52 @@ pub const PG_EPOCH_DAYS_FROM_UNIX: i32 = 10_957;
 /// Microseconds from the Unix epoch to the PostgreSQL epoch.
 pub const PG_EPOCH_MICROS_FROM_UNIX: i64 = 946_684_800_000_000;
 
+/// Converts PostgreSQL-epoch microseconds (`timestamp` / `timestamptz`) to Unix-epoch microseconds,
+/// the unit Arrow and Parquet store.
+///
+/// PostgreSQL encodes `infinity` / `-infinity` as the extreme `i64` values; those pass through
+/// unchanged so a plain epoch shift cannot turn them into ordinary-looking (and wrong) instants.
+/// Finite values saturate, so a (far future) instant that cannot be shifted into `i64` degrades to
+/// `infinity` rather than wrapping.
+#[must_use]
+pub const fn pg_micros_to_unix(pg_micros: i64) -> i64 {
+    if pg_micros == i64::MAX || pg_micros == i64::MIN {
+        pg_micros
+    } else {
+        pg_micros.saturating_add(PG_EPOCH_MICROS_FROM_UNIX)
+    }
+}
+
+/// Inverse of [`pg_micros_to_unix`].
+#[must_use]
+pub const fn unix_micros_to_pg(unix_micros: i64) -> i64 {
+    if unix_micros == i64::MAX || unix_micros == i64::MIN {
+        unix_micros
+    } else {
+        unix_micros.saturating_sub(PG_EPOCH_MICROS_FROM_UNIX)
+    }
+}
+
+/// Converts PostgreSQL-epoch days (`date`) to Unix-epoch days (Arrow `Date32`); `infinity` passes through.
+#[must_use]
+pub const fn pg_days_to_unix(pg_days: i32) -> i32 {
+    if pg_days == i32::MAX || pg_days == i32::MIN {
+        pg_days
+    } else {
+        pg_days.saturating_add(PG_EPOCH_DAYS_FROM_UNIX)
+    }
+}
+
+/// Inverse of [`pg_days_to_unix`].
+#[must_use]
+pub const fn unix_days_to_pg(unix_days: i32) -> i32 {
+    if unix_days == i32::MAX || unix_days == i32::MIN {
+        unix_days
+    } else {
+        unix_days.saturating_sub(PG_EPOCH_DAYS_FROM_UNIX)
+    }
+}
+
 /// Allowlisted PostgreSQL types for Sort Key V1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortKeyType {
@@ -127,6 +173,35 @@ impl SortKeyValue {
             Self::Timestamp(value) => serde_json::Value::Number((*value).into()),
             Self::Timestamptz(value) => serde_json::Value::Number((*value).into()),
             Self::Uuid(value) => serde_json::Value::String(value.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn finite_values_shift_and_round_trip() {
+        for pg in [0_i64, 1, -1, 86_400_000_000, -211_813_488_000_000_000, 700_000_000_000_000] {
+            assert_eq!(unix_micros_to_pg(pg_micros_to_unix(pg)), pg);
+        }
+        assert_eq!(pg_micros_to_unix(0), PG_EPOCH_MICROS_FROM_UNIX);
+        for pg in [0_i32, 1, -1, 7_000, -2_451_545] {
+            assert_eq!(unix_days_to_pg(pg_days_to_unix(pg)), pg);
+        }
+        assert_eq!(pg_days_to_unix(0), PG_EPOCH_DAYS_FROM_UNIX);
+    }
+
+    #[test]
+    fn infinity_passes_through_unshifted() {
+        for pg in [i64::MAX, i64::MIN] {
+            assert_eq!(pg_micros_to_unix(pg), pg);
+            assert_eq!(unix_micros_to_pg(pg), pg);
+        }
+        for pg in [i32::MAX, i32::MIN] {
+            assert_eq!(pg_days_to_unix(pg), pg);
+            assert_eq!(unix_days_to_pg(pg), pg);
         }
     }
 }

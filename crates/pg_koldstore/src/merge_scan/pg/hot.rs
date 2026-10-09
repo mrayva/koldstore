@@ -200,7 +200,7 @@ FROM (
         ));
         let rows =
             crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
-                with_hook_disabled(|| unsafe { execute_hot_rows_query(&sql, &self.pk_columns) })
+                super::mirror::in_utc(|| with_hook_disabled(|| unsafe { execute_hot_rows_query(&sql, &self.pk_columns) }))
             })?;
         let fetched = rows.len();
         if fetched < self.batch_size {

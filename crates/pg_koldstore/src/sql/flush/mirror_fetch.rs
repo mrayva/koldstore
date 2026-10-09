@@ -21,7 +21,10 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
-        PgType::Timestamptz | PgType::Float4 | PgType::Float8 => Err(format!(
+        PgType::Date => Ok(SqlParamType::Date),
+        PgType::Timestamp => Ok(SqlParamType::Timestamp),
+        PgType::Timestamptz => Ok(SqlParamType::TimestampWithTimeZone),
+        PgType::Float4 | PgType::Float8 => Err(format!(
             "ordered flush keyset does not support primary-key type {pg_type:?}"
         )),
     }
@@ -35,6 +38,12 @@ enum OwnedBind {
     Text(String),
     Bytes(Vec<u8>),
     Uuid(pgrx::Uuid),
+    /// `date` as days since the PostgreSQL epoch.
+    Date(i32),
+    /// `timestamp` as microseconds since the PostgreSQL epoch.
+    Timestamp(i64),
+    /// `timestamptz` as microseconds since the PostgreSQL epoch.
+    Timestamptz(i64),
 }
 
 /// Fetches one keyset page of mirror rows selected for flush.
@@ -137,6 +146,20 @@ fn owned_binds_to_datums(binds: &[OwnedBind]) -> Vec<DatumWithOid<'_>> {
             OwnedBind::Text(text) => DatumWithOid::from(text.as_str()),
             OwnedBind::Bytes(bytes) => DatumWithOid::from(bytes.as_slice()),
             OwnedBind::Uuid(uuid) => DatumWithOid::from(*uuid),
+            // `saturating_from_raw` keeps PostgreSQL's `infinity` sentinels as infinities.
+            OwnedBind::Date(days) => DatumWithOid::from(pgrx::datum::Date::saturating_from_raw(*days)),
+            OwnedBind::Timestamp(micros) => {
+                DatumWithOid::from(pgrx::datum::Timestamp::saturating_from_raw(*micros))
+            }
+            OwnedBind::Timestamptz(micros) => DatumWithOid::from(
+                pgrx::datum::TimestampWithTimeZone::try_from(*micros).unwrap_or_else(|_| {
+                    if *micros < 0 {
+                        pgrx::datum::TimestampWithTimeZone::negative_infinity()
+                    } else {
+                        pgrx::datum::TimestampWithTimeZone::positive_infinity()
+                    }
+                }),
+            ),
         })
         .collect()
 }
@@ -146,7 +169,10 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Bool => CellValue::Bool(false),
         PgType::Int2 => CellValue::Int16(0),
         PgType::Int4 => CellValue::Int32(0),
-        PgType::Int8 | PgType::Timestamptz => CellValue::Int64(0),
+        PgType::Int8 => CellValue::Int64(0),
+        PgType::Timestamptz => CellValue::TimestamptzMicros(0),
+        PgType::Timestamp => CellValue::TimestampMicros(0),
+        PgType::Date => CellValue::DateDays(0),
         PgType::Float4 => CellValue::Float32(0.0),
         PgType::Float8 => CellValue::Float64(0.0),
         // The first-page placeholder is bound but never compared (the `$2::boolean OR ...` guard
@@ -190,6 +216,11 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             let uuid = uuid::Uuid::parse_str(text)
                 .map_err(|error| format!("invalid uuid keyset value: {error}"))?;
             Ok(OwnedBind::Uuid(crate::spi::uuid_to_pgrx(uuid)))
+        }
+        (PgType::Date, CellValue::DateDays(days)) => Ok(OwnedBind::Date(*days)),
+        (PgType::Timestamp, CellValue::TimestampMicros(micros)) => Ok(OwnedBind::Timestamp(*micros)),
+        (PgType::Timestamptz, CellValue::TimestamptzMicros(micros)) => {
+            Ok(OwnedBind::Timestamptz(*micros))
         }
         (_, CellValue::Null) => {
             Err("ordered flush keyset primary key must not be null".to_string())
@@ -305,6 +336,15 @@ fn read_column(
             .get::<String>(ordinal)?
             .map(CellValue::Utf8)
             .unwrap_or(CellValue::Null),
+        PgType::Date => match tuple.get::<pgrx::datum::Date>(ordinal)? {
+            // Raw `DateADT` days since 2000-01-01; `infinity` is `i32::MAX` / `i32::MIN`.
+            Some(date) => CellValue::DateDays(pgrx::pg_sys::DateADT::from(date)),
+            None => CellValue::Null,
+        },
+        PgType::Timestamp => match tuple.get::<pgrx::datum::Timestamp>(ordinal)? {
+            Some(timestamp) => CellValue::TimestampMicros(pgrx::pg_sys::Timestamp::from(timestamp)),
+            None => CellValue::Null,
+        },
         PgType::Timestamptz => {
             // Keep CellValue in PostgreSQL-epoch micros (same as Datum / hot).
             // Arrow TimestampMicrosecond is Unix-epoch; convert here only.

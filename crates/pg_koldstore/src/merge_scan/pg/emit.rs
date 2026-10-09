@@ -80,6 +80,16 @@ unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_s
         (PgType::Timestamptz, _) => {
             input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type)
         }
+        // `timestamp` and `date` are by-value `Timestamp` (int64 µs) / `DateADT` (int32 days since
+        // 2000-01-01), the same units the cold decode produces; ISO text (SPI `to_jsonb` Utf8 cells)
+        // goes through the type's input function.
+        (PgType::Timestamp, CellValue::TimestampMicros(micros)) => Ok(pg_sys::Datum::from(*micros)),
+        (PgType::Timestamp, CellValue::Int64(micros)) => Ok(pg_sys::Datum::from(*micros)),
+        (PgType::Date, CellValue::DateDays(days)) => Ok(pg_sys::Datum::from(*days)),
+        (PgType::Date, CellValue::Int32(days)) => Ok(pg_sys::Datum::from(*days)),
+        (PgType::Timestamp | PgType::Date, CellValue::Utf8(_)) => {
+            input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type)
+        }
         _ => Err(format!(
             "cannot convert cell {value:?} to PostgreSQL type {pg_type:?}"
         )),
@@ -107,13 +117,21 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
             CellValue::Utf8(text) => Ok(text.clone()),
             other => Ok(other.to_json().to_string()),
         },
-        PgType::Text | PgType::Uuid | PgType::Numeric | PgType::Timestamptz | PgType::Bytea => {
+        PgType::Text
+        | PgType::Uuid
+        | PgType::Numeric
+        | PgType::Timestamptz
+        | PgType::Timestamp
+        | PgType::Date
+        | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),
                 CellValue::Bool(flag) => Ok(flag.to_string()),
                 CellValue::Int16(n) => Ok(n.to_string()),
-                CellValue::Int32(n) => Ok(n.to_string()),
-                CellValue::Int64(n) | CellValue::TimestamptzMicros(n) => Ok(n.to_string()),
+                CellValue::Int32(n) | CellValue::DateDays(n) => Ok(n.to_string()),
+                CellValue::Int64(n)
+                | CellValue::TimestamptzMicros(n)
+                | CellValue::TimestampMicros(n) => Ok(n.to_string()),
                 CellValue::Float32(n) => Ok(n.to_string()),
                 CellValue::Float64(n) => Ok(n.to_string()),
                 CellValue::Null => Err(format!("expected scalar for {:?}, got null", pg_type)),

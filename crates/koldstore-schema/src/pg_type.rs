@@ -40,6 +40,10 @@ pub enum PgType {
     Bytea = 11,
     /// `timestamptz`
     Timestamptz = 12,
+    /// `date`
+    Date = 13,
+    /// `timestamp` (without time zone)
+    Timestamp = 14,
 }
 
 /// PostgreSQL integer array type OID.
@@ -101,6 +105,8 @@ impl PgType {
             "text[]" => Ok(Self::TextArray),
             "bytea" => Ok(Self::Bytea),
             "timestamptz" => Ok(Self::Timestamptz),
+            "date" => Ok(Self::Date),
+            "timestamp" => Ok(Self::Timestamp),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -128,6 +134,8 @@ impl PgType {
             10 => Some(Self::TextArray),
             11 => Some(Self::Bytea),
             12 => Some(Self::Timestamptz),
+            13 => Some(Self::Date),
+            14 => Some(Self::Timestamp),
             _ => None,
         }
     }
@@ -149,6 +157,8 @@ impl PgType {
             Self::TextArray => "text[]",
             Self::Bytea => "bytea",
             Self::Timestamptz => "timestamptz",
+            Self::Date => "date",
+            Self::Timestamp => "timestamp",
         }
     }
 
@@ -165,7 +175,12 @@ impl PgType {
     pub fn is_orderable(self) -> bool {
         matches!(
             self,
-            Self::Int2 | Self::Int4 | Self::Int8 | Self::Timestamptz
+            Self::Int2
+                | Self::Int4
+                | Self::Int8
+                | Self::Timestamptz
+                | Self::Date
+                | Self::Timestamp
         )
     }
 
@@ -195,6 +210,8 @@ impl PgType {
             Self::TextArray => 1009,
             Self::Bytea => 17,
             Self::Timestamptz => 1184,
+            Self::Date => 1082,
+            Self::Timestamp => 1114,
         }
     }
 

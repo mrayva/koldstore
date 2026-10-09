@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use arrow_array::builder::{
-    BooleanBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder, Int64Builder,
-    StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
+    BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
+    Int64Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
@@ -68,6 +68,8 @@ enum TypedColumnBuilder {
     Float64(Float64Builder),
     Utf8(StringBuilder),
     Timestamptz(TimestampMicrosecondBuilder),
+    Timestamp(TimestampMicrosecondBuilder),
+    Date(Date32Builder),
 }
 
 /// Local adapter so typed append helpers share one null/value/mismatch path.
@@ -97,6 +99,7 @@ impl_append_flush_cell!(Int64Builder, i64);
 impl_append_flush_cell!(Float32Builder, f32);
 impl_append_flush_cell!(Float64Builder, f64);
 impl_append_flush_cell!(TimestampMicrosecondBuilder, i64);
+impl_append_flush_cell!(Date32Builder, i32);
 
 fn append_typed<B, T, F>(
     builder: &mut B,
@@ -211,13 +214,39 @@ fn append_timestamptz(
         builder,
         value,
         |cell| match cell {
-            // Arrow stores Unix-epoch micros; CellValue is PostgreSQL-epoch.
-            CellValue::TimestamptzMicros(v) => {
-                Some(v.saturating_add(koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX))
-            }
+            // Arrow stores Unix-epoch micros; CellValue is PostgreSQL-epoch (`infinity` passes through).
+            CellValue::TimestamptzMicros(v) => Some(koldstore_sortkey::pg_micros_to_unix(*v)),
             _ => None,
         },
         "timestamptz",
+    )
+}
+
+fn append_timestamp(
+    builder: &mut TimestampMicrosecondBuilder,
+    value: Option<&CellValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            CellValue::TimestampMicros(v) => Some(koldstore_sortkey::pg_micros_to_unix(*v)),
+            _ => None,
+        },
+        "timestamp",
+    )
+}
+
+fn append_date(builder: &mut Date32Builder, value: Option<&CellValue>) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            // Arrow `Date32` is days since the Unix epoch; CellValue is days since 2000-01-01.
+            CellValue::DateDays(v) => Some(koldstore_sortkey::pg_days_to_unix(*v)),
+            _ => None,
+        },
+        "date",
     )
 }
 
@@ -237,6 +266,8 @@ impl TypedColumnBuilder {
             | PgType::TextArray
             | PgType::Bytea => Self::Utf8(StringBuilder::new()),
             PgType::Timestamptz => Self::Timestamptz(TimestampMicrosecondBuilder::new()),
+            PgType::Timestamp => Self::Timestamp(TimestampMicrosecondBuilder::new()),
+            PgType::Date => Self::Date(Date32Builder::new()),
         }
     }
 
@@ -250,6 +281,8 @@ impl TypedColumnBuilder {
             Self::Float64(builder) => append_float64(builder, value),
             Self::Utf8(builder) => append_utf8(builder, value),
             Self::Timestamptz(builder) => append_timestamptz(builder, value),
+            Self::Timestamp(builder) => append_timestamp(builder, value),
+            Self::Date(builder) => append_date(builder, value),
         }
     }
 
@@ -263,6 +296,8 @@ impl TypedColumnBuilder {
             Self::Float64(mut builder) => Arc::new(builder.finish()),
             Self::Utf8(mut builder) => Arc::new(builder.finish()),
             Self::Timestamptz(mut builder) => Arc::new(builder.finish()),
+            Self::Timestamp(mut builder) => Arc::new(builder.finish()),
+            Self::Date(mut builder) => Arc::new(builder.finish()),
         }
     }
 }
@@ -455,13 +490,28 @@ fn plan_value_to_flush_cell(
         )),
         PgType::Timestamptz => {
             let text = json_string_cell(Some(value))?.expect("non-null");
+            match text.trim() {
+                "infinity" => return Ok(CellValue::TimestamptzMicros(i64::MAX)),
+                "-infinity" => return Ok(CellValue::TimestamptzMicros(i64::MIN)),
+                _ => {}
+            }
             let unix_micros = chrono::DateTime::parse_from_rfc3339(&text)
                 .or_else(|_| chrono::DateTime::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z"))
                 .map(|timestamp| timestamp.timestamp_micros())
                 .map_err(|error| format!("unsupported timestamp literal `{text}`: {error}"))?;
-            Ok(CellValue::TimestamptzMicros(unix_micros.saturating_sub(
-                koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX,
-            )))
+            Ok(CellValue::TimestamptzMicros(
+                koldstore_sortkey::unix_micros_to_pg(unix_micros),
+            ))
+        }
+        PgType::Timestamp => {
+            let text = json_string_cell(Some(value))?.expect("non-null");
+            Ok(CellValue::TimestampMicros(
+                crate::temporal::parse_timestamp_pg_micros(&text)?,
+            ))
+        }
+        PgType::Date => {
+            let text = json_string_cell(Some(value))?.expect("non-null");
+            Ok(CellValue::DateDays(crate::temporal::parse_date_pg_days(&text)?))
         }
     }
 }

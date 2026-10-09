@@ -61,6 +61,8 @@ impl TypeMatrix {
             "bytea",
             "text[]",
             "timestamptz",
+            "timestamp",
+            "date",
         ];
         Self {
             entries: supported

@@ -15,6 +15,12 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
     if normalized == "timestamp with time zone" {
         return "timestamptz".to_string();
     }
+    // `timestamp [(p)] without time zone` is plain `timestamp` (PostgreSQL reports the long form).
+    if normalized == "timestamp without time zone"
+        || (normalized.starts_with("timestamp(") && normalized.ends_with(" without time zone"))
+    {
+        return "timestamp".to_string();
+    }
     if normalized.starts_with("timestamp(") && normalized.ends_with(" with time zone") {
         return "timestamptz".to_string();
     }
