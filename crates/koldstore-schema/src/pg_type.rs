@@ -175,9 +175,11 @@ impl PgType {
     pub fn is_orderable(self) -> bool {
         matches!(
             self,
-            Self::Int2
+            Self::Bool
+                | Self::Int2
                 | Self::Int4
                 | Self::Int8
+                | Self::Uuid
                 | Self::Timestamptz
                 | Self::Date
                 | Self::Timestamp
@@ -189,7 +191,7 @@ impl PgType {
     pub fn is_orderable_catalog_type(type_name: &str) -> bool {
         matches!(
             canonical_postgres_type_name(type_name).as_str(),
-            "int2" | "int4" | "int8" | "timestamptz" | "timestamp" | "date"
+            "bool" | "int2" | "int4" | "int8" | "uuid" | "timestamptz" | "timestamp" | "date"
         )
     }
 

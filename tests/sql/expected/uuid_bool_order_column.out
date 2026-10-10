@@ -1,0 +1,98 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 2500
+CREATE TABLE
+INSERT 0 2500
+CREATE TABLE
+INSERT 0 2500
+SELECT 2500
+SELECT 2500
+SELECT 2500
+ uo_managed
+------------
+ t
+(1 row)
+
+ bo_managed
+------------
+ t
+(1 row)
+
+ uk_managed
+------------
+ t
+(1 row)
+
+     t     | flushed
+-----------+---------
+ sqlreg.uo | t
+ sqlreg.bo | t
+ sqlreg.uk | t
+(3 rows)
+
+     t     | mostly_cold
+-----------+-------------
+ sqlreg.uo | t
+ sqlreg.bo | t
+ sqlreg.uk | t
+(3 rows)
+
+ uo_rows | bo_rows | uk_rows
+---------+---------+---------
+ t       | t       | t
+(1 row)
+
+ uo_asc | uo_desc | uk_asc | uk_desc
+--------+---------+--------+---------
+ t      | t       | t      | t
+(1 row)
+
+ uo_hit | uo_absent | uo_range | uo_range_ctl
+--------+-----------+----------+--------------
+      1 |         0 |      500 |          500
+(1 row)
+
+ flagged | flagged_ctl | unflagged | by_id | combined | combined_ctl
+---------+-------------+-----------+-------+----------+--------------
+     833 |         833 |      1667 |     1 |      167 |          167
+(1 row)
+
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+UPDATE 1
+UPDATE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ uo_rows_after_dml | bo_rows_after_dml | uk_rows_after_dml
+-------------------+-------------------+-------------------
+ t                 | t                 | t
+(1 row)
+
+ reflushed
+-----------
+ t
+ t
+ t
+(3 rows)
+
+ uo_rows_after_reflush | bo_rows_after_reflush | uk_rows_after_reflush
+-----------------------+-----------------------+-----------------------
+ t                     | t                     | t
+(1 row)
+

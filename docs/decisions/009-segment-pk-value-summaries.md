@@ -72,8 +72,7 @@ returns only the segments that may contain the key.
   cursor; its first-page parameters are placeholders that the `$2::boolean OR ...` guard never compares, but they
   still have to parse as the column type, and the uuid placeholder was an empty string. It is now the nil UUID.
   Covered by the `uuid_pk_ordered_flush` SQL case (2,500 rows, 50 distinct order keys, three segments, so the
-  uuid tiebreak across page boundaries is exercised); verified red without the fix. `uuid` itself is still rejected
-  as the *order column* (a separate validation).
+  uuid tiebreak across page boundaries is exercised); verified red without the fix. `uuid` and `boolean` are accepted as the *order column* too (see below).
 * **Fixed:** `date` and `timestamp` (without time zone) columns could not be managed at all (they were not in the
   type matrix), and `timestamptz` keys never worked as primary keys. All three, as ordinary columns and as primary
   keys (with a separate `migration_order_by` column or with the key itself as the order column), now manage, flush,
@@ -89,7 +88,7 @@ returns only the segments that may contain the key.
     never matched the mirror's tombstones, so deleted cold rows reappeared.)
   * **Point lookups.** `WHERE id = <date literal>` also feeds Parquet statistics and bloom filters, which hold the
     Unix-epoch value; the probe is shifted accordingly (it used to return no rows for a cold key).
-  `boolean` keys manage and flush too, but `boolean` is still rejected as the *order column* itself.
+  `boolean` keys manage and flush too.
 * **Fixed:** `numeric` primary keys (plain and with a modifier such as `numeric(12,2)`, plus `varchar(n)`) could not
   be flushed with an order column. Four separate causes, each found by the `numeric_pk` SQL case against an
   unmanaged copy: the ordered-flush keyset compared `numeric > text` (a `numeric` bind type that casts in SQL, with a
@@ -104,3 +103,9 @@ returns only the segments that may contain the key.
   the row travels as JSON. `date`, `timestamp`, `timestamptz`, `boolean` and `numeric` keys have no value summary, so
   point lookups on them rely on min/max bounds and Parquet statistics alone. `float4`/`float8` keys are still
   rejected for ordered flush.
+* **Fixed:** `uuid` and `boolean` were rejected as the order column (`migration_order_by`) by the migration
+  validation although both have a Sort Key V1 encoding and everything downstream (mirror `order_key`, ordered flush,
+  the cold order index, the ordered merge) already handled them. Both are accepted now: a time-ordered (v7) uuid is a
+  natural order column, and a uuid primary key can be its own order column; a boolean sorts false before true, then by
+  key. Covered by the `uuid_bool_order_column` SQL case (flush, ordering, range predicates, hydrate-on-write DML,
+  re-flush against an unmanaged copy).
