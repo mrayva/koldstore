@@ -248,7 +248,7 @@ unsafe fn hot_row_from_slot(
             }
             pk_pairs.push((
                 pk.clone(),
-                PkValue::new(value.to_json()).map_err(|error| error.to_string())?,
+                PkValue::new(value.to_pk_json(column.pg_type == koldstore_schema::PgType::Numeric)).map_err(|error| error.to_string())?,
             ));
         }
         row_image.insert(column.name.clone(), value);

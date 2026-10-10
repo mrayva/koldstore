@@ -353,6 +353,21 @@ impl fmt::Display for PkColumn {
     }
 }
 
+/// Makes `125`, `125.0` and `125.00` (a `numeric` key as `jsonb` prints it) one identity: a whole
+/// number that parsed as a float becomes an integer, so heap, mirror and cold keys compare equal.
+fn normalize_pk_number(value: Value) -> Value {
+    if let Value::Number(number) = &value {
+        if number.is_f64() {
+            if let Some(float) = number.as_f64() {
+                if float.is_finite() && float.fract() == 0.0 && float.abs() < 9.0e15 {
+                    return Value::Number((float as i64).into());
+                }
+            }
+        }
+    }
+    value
+}
+
 /// A JSON-compatible primary-key value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -370,7 +385,7 @@ impl PkValue {
                 "primary-key value cannot be null".to_string(),
             ));
         }
-        Ok(Self(value))
+        Ok(Self(normalize_pk_number(value)))
     }
 
     /// Returns the underlying JSON value.

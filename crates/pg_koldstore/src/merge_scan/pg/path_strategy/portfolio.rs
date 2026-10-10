@@ -379,7 +379,9 @@ unsafe fn path_leads_with_attnum(
         let var = expr.cast::<pg_sys::Var>();
         let scanrelid = i32::try_from(relid).unwrap_or(i32::MAX);
         if (*var).varno == scanrelid && (*var).varattno == attnum && (*var).varlevelsup == 0 {
-            return true;
+            // The ordered strategy merges hot and cold rows by their Sort Key V1 bytes. A type with
+            // no sort key (numeric, text, ...) cannot be ordered that way, so let PostgreSQL sort.
+            return koldstore_sortkey::SortKeyType::from_type_oid(u32::from((*var).vartype)).is_some();
         }
     }
     false

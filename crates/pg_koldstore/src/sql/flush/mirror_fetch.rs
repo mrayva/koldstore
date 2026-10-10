@@ -17,9 +17,8 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         PgType::Bool => Ok(SqlParamType::Boolean),
         PgType::Int2 | PgType::Int4 => Ok(SqlParamType::Integer),
         PgType::Int8 => Ok(SqlParamType::BigInt),
-        PgType::Text | PgType::Numeric | PgType::Jsonb | PgType::Bytea | PgType::TextArray => {
-            Ok(SqlParamType::Text)
-        }
+        PgType::Numeric => Ok(SqlParamType::Numeric),
+        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::TextArray => Ok(SqlParamType::Text),
         PgType::Uuid => Ok(SqlParamType::Uuid),
         PgType::Date => Ok(SqlParamType::Date),
         PgType::Timestamp => Ok(SqlParamType::Timestamp),
@@ -179,7 +178,9 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         // short-circuits), yet it must still parse as the column's type: an empty string is not a
         // valid uuid, which made every ordered flush of a uuid-keyed table fail on its first page.
         PgType::Uuid => CellValue::Utf8(NIL_UUID_PLACEHOLDER.to_string()),
-        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::Numeric | PgType::TextArray => {
+        // Bound but never compared on the first page, yet it must parse as `numeric`.
+        PgType::Numeric => CellValue::Utf8("0".to_string()),
+        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::TextArray => {
             CellValue::Utf8(String::new())
         }
     }
@@ -332,7 +333,12 @@ fn read_column(
             .get::<Vec<u8>>(ordinal)?
             .map(|bytes| CellValue::Utf8(pg_bytea_hex(&bytes)))
             .unwrap_or(CellValue::Null),
-        PgType::Numeric | PgType::TextArray => tuple
+        // A `numeric` datum is not a text datum: read it as a number and keep its exact text form.
+        PgType::Numeric => tuple
+            .get::<pgrx::AnyNumeric>(ordinal)?
+            .map(|number| CellValue::Utf8(number.to_string()))
+            .unwrap_or(CellValue::Null),
+        PgType::TextArray => tuple
             .get::<String>(ordinal)?
             .map(CellValue::Utf8)
             .unwrap_or(CellValue::Null),

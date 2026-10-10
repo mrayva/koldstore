@@ -1,0 +1,101 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 2500
+INSERT 0 3
+CREATE TABLE
+INSERT 0 2500
+CREATE TABLE
+INSERT 0 2500
+SELECT 2503
+SELECT 2500
+SELECT 2500
+     t      | managed
+------------+---------
+ sqlreg.np  | t
+ sqlreg.np2 | t
+ sqlreg.np3 | t
+(3 rows)
+
+     t      | flushed
+------------+---------
+ sqlreg.np  | t
+ sqlreg.np2 | t
+ sqlreg.np3 | t
+(3 rows)
+
+     t      | mostly_cold
+------------+-------------
+ sqlreg.np  | t
+ sqlreg.np2 | t
+ sqlreg.np3 | t
+(3 rows)
+
+ np_rows | np2_rows | np3_rows
+---------+----------+----------
+ t       | t        | t
+(1 row)
+
+      np_first      |                np_last
+--------------------+---------------------------------------
+ {-7.5,0,1.25,2.50} | {123456789012345.678,3125.00,3123.75}
+(1 row)
+
+ np2_desc_matches
+------------------
+ t
+(1 row)
+
+ hit | hit_other_scale | negative | large | absent | fixed_scale | varchar_key
+-----+-----------------+----------+-------+--------+-------------+-------------
+   1 |               1 |        1 |     1 |      0 |           1 |           1
+(1 row)
+
+ range_rows
+------------
+         80
+(1 row)
+
+ range_rows_ctl
+----------------
+             80
+(1 row)
+
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+UPDATE 1
+UPDATE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ np_differing_rows_after_dml | np2_rows_after_dml
+-----------------------------+--------------------
+                           0 | t
+(1 row)
+
+ reflushed
+-----------
+ t
+ t
+(2 rows)
+
+ np_differing_rows_after_reflush | np2_rows_after_reflush | np_rows | np_distinct_ids
+---------------------------------+------------------------+---------+-----------------
+                               0 | t                      |    2502 |            2502
+(1 row)
+
+ deleted_key_gone
+------------------
+                0
+(1 row)
+

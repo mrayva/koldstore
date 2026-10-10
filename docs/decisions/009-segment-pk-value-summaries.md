@@ -90,6 +90,17 @@ returns only the segments that may contain the key.
   * **Point lookups.** `WHERE id = <date literal>` also feeds Parquet statistics and bloom filters, which hold the
     Unix-epoch value; the probe is shifted accordingly (it used to return no rows for a cold key).
   `boolean` keys manage and flush too, but `boolean` is still rejected as the *order column* itself.
-* **Open (limits, not bugs):** `numeric` primary keys cannot be flushed with an order column ("ordered flush keyset
-  does not support primary-key type"). `date`, `timestamp`, `timestamptz` and `boolean` have no value summary, so
-  point lookups on them rely on min/max bounds and Parquet statistics alone.
+* **Fixed:** `numeric` primary keys (plain and with a modifier such as `numeric(12,2)`, plus `varchar(n)`) could not
+  be flushed with an order column. Four separate causes, each found by the `numeric_pk` SQL case against an
+  unmanaged copy: the ordered-flush keyset compared `numeric > text` (a `numeric` bind type that casts in SQL, with a
+  parseable first-page placeholder); the mirror table DDL quoted `numeric(12,2)` as a type *name*; a `numeric` datum
+  could not be read as text (it is read as a number and kept as its exact text); and the ordered merge was offered
+  for any key type although only types with a Sort Key V1 encoding can be merged in order, so a numeric `ORDER BY`
+  came back unsorted (it now falls back to a normal sort). Key identity for `numeric` is the JSON number `jsonb`
+  prints, with whole numbers normalized (`125`, `125.0` and `125.00` are one key), so a delete's tombstone masks the
+  cold copy.
+* **Open (limits, not bugs):** an unconstrained `numeric` column does not keep its display scale when a cold row is
+  hydrated (`62.50` comes back as `62.5`; the value is equal, and `numeric(p,s)` columns restore the scale) because
+  the row travels as JSON. `date`, `timestamp`, `timestamptz`, `boolean` and `numeric` keys have no value summary, so
+  point lookups on them rely on min/max bounds and Parquet statistics alone. `float4`/`float8` keys are still
+  rejected for ordered flush.

@@ -216,7 +216,11 @@ pub(super) fn clean_rows_from_batch(
             let cell = row_image
                 .get(column)
                 .ok_or_else(|| format!("cold row is missing primary-key field `{column}`"))?;
-            pk_json.insert(column.clone(), cell.to_json());
+            let is_numeric = decode_columns
+                .iter()
+                .any(|decoded| &decoded.name == column && decoded.pg_type == koldstore_schema::PgType::Numeric);
+            let json = cell.to_pk_json(is_numeric);
+            pk_json.insert(column.clone(), json);
         }
         if deleted_value {
             // Delete markers keep PK identity only; drop application payload.

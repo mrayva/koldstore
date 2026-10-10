@@ -121,6 +121,18 @@ impl CellValue {
         }
     }
 
+    /// The JSON used as primary-key identity. A `numeric` cell is carried as text, but heap and mirror
+    /// keys (`to_jsonb`) are JSON numbers, so it becomes a number here (`62.5` and `62.50` are one key).
+    #[must_use]
+    pub fn to_pk_json(&self, is_numeric: bool) -> Value {
+        if let (true, Self::Utf8(text)) = (is_numeric, self) {
+            if let Ok(number @ Value::Number(_)) = serde_json::from_str::<Value>(text) {
+                return number;
+            }
+        }
+        self.to_json()
+    }
+
     /// Builds a cell from JSON produced at a SQL/admin boundary.
     ///
     /// Numbers prefer the narrowest integer that fits; otherwise `float64`.

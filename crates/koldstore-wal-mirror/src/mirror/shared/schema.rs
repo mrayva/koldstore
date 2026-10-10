@@ -246,12 +246,32 @@ fn render_pk_column(column: &PrimaryKeyColumnShape) -> MirrorResult<String> {
     ))
 }
 
+/// Renders `base(args)` names whose modifier is a plain list of numbers; anything else returns `None`.
+fn render_type_with_modifier(type_name: &str) -> Option<String> {
+    let (base, rest) = type_name.split_once('(')?;
+    let args = rest.strip_suffix(')')?;
+    if args.is_empty() || !args.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ' ') {
+        return None;
+    }
+    let base = match base.trim() {
+        "character varying" => "varchar",
+        "bit varying" => "varbit",
+        other if is_safe_identifier(other) || matches!(other, "character") => other,
+        _ => return None,
+    };
+    Some(format!("{base}({args})"))
+}
+
 fn render_type(column: &PrimaryKeyColumnShape) -> String {
     if let Some(domain) = column.domain_identity() {
         return quote_qualified_ident(domain.as_str());
     }
 
     let type_name = column.type_name().as_str();
+    // `format_type` output can already carry its modifier (`numeric(12,2)`, `character varying(20)`).
+    if let Some(rendered) = render_type_with_modifier(type_name) {
+        return rendered;
+    }
     match (type_name, column.typmod().get()) {
         ("character varying" | "varchar", typmod) if typmod >= 4 => {
             format!("varchar({})", typmod - 4)
@@ -272,5 +292,26 @@ fn render_type(column: &PrimaryKeyColumnShape) -> String {
         ("time without time zone", _) => "time".to_string(),
         (plain, _) if is_safe_identifier(plain) => plain.to_string(),
         (qualified, _) => quote_qualified_ident(qualified),
+    }
+}
+
+#[cfg(test)]
+mod modifier_tests {
+    use super::render_type_with_modifier;
+
+    #[test]
+    fn modifiers_already_in_the_type_name_are_kept() {
+        assert_eq!(render_type_with_modifier("numeric(12,2)").as_deref(), Some("numeric(12,2)"));
+        assert_eq!(render_type_with_modifier("numeric(10)").as_deref(), Some("numeric(10)"));
+        assert_eq!(render_type_with_modifier("character varying(20)").as_deref(), Some("varchar(20)"));
+        assert_eq!(render_type_with_modifier("character(3)").as_deref(), Some("character(3)"));
+    }
+
+    #[test]
+    fn anything_else_is_left_to_the_caller() {
+        assert_eq!(render_type_with_modifier("numeric"), None);
+        assert_eq!(render_type_with_modifier("bigint"), None);
+        assert_eq!(render_type_with_modifier("numeric(1);drop table x;--)"), None);
+        assert_eq!(render_type_with_modifier("timestamp(3) without time zone"), None);
     }
 }

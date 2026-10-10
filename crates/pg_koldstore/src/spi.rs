@@ -23,7 +23,8 @@ fn sql_param_pg_oid(param: SqlParamType) -> pgrx::pg_sys::PgOid {
         SqlParamType::TimestampWithTimeZone => pgrx::pg_sys::TIMESTAMPTZOID,
         SqlParamType::Timestamp => pgrx::pg_sys::TIMESTAMPOID,
         SqlParamType::Date => pgrx::pg_sys::DATEOID,
-        SqlParamType::Text => pgrx::pg_sys::TEXTOID,
+        // `numeric` keys travel as text and are cast in SQL (see `sql_param_cast`).
+        SqlParamType::Text | SqlParamType::Numeric => pgrx::pg_sys::TEXTOID,
         SqlParamType::Jsonb => pgrx::pg_sys::JSONBOID,
         SqlParamType::Bytea => pgrx::pg_sys::BYTEAOID,
         SqlParamType::Oid => pgrx::pg_sys::OIDOID,

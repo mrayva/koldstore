@@ -44,6 +44,8 @@ pub enum SqlParamType {
     TimestampWithTimeZone,
     /// PostgreSQL `timestamp` (without time zone).
     Timestamp,
+    /// `numeric`, bound as text and cast in SQL (there is no native numeric bind).
+    Numeric,
     /// PostgreSQL `date`.
     Date,
     Text,
