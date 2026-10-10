@@ -1,0 +1,26 @@
+ clean | missing | unexpected | versions_match
+-------+---------+------------+----------------
+ t     |       0 |          0 | t
+(1 row)
+
+BEGIN
+ALTER TABLE
+ clean_with_renamed_column |                 missing_entry                 |                 unexpected_entry                  | has_hint
+---------------------------+-----------------------------------------------+---------------------------------------------------+----------
+ f                         | column cold_segment_index.value_summary bytea | column cold_segment_index.value_summary_old bytea | t
+(1 row)
+
+ROLLBACK
+BEGIN
+ALTER FUNCTION
+ clean_with_renamed_function | missing | unexpected
+-----------------------------+---------+------------
+ f                           |       1 |          1
+(1 row)
+
+ROLLBACK
+ clean_again
+-------------
+ t
+(1 row)
+

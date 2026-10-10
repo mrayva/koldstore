@@ -129,11 +129,33 @@ rows never brought back into the heap.
 async-mirror information. It is operational telemetry, not a backup manifest.
 
 `koldstore.backup_manifest` and `koldstore.validate_cold_storage` are the backup tools described
-above. Packaged export/import is planned but not shipped.
+above; `koldstore.validate_sql_objects` checks the database's SQL objects against the library (below). Packaged export/import is planned but not shipped.
 
 `koldstore.recover_segments` is a maintenance surface for orphan/pending
 objects; it does not create a coordinated backup or reconstruct arbitrary
 missing cold data.
+
+## SQL object drift
+
+The extension version does not change when a build changes a function signature or adds a catalog
+column, so `ALTER EXTENSION koldstore UPDATE` never runs and a database created earlier keeps the old SQL
+objects while the loaded library expects the new ones. The symptom is a call failing at run time
+(`manage_table` with 17 arguments against a library that reads 18: `unboxing allow_fk_hot_only_ argument
+failed`) or an error on a catalog column the library expects.
+
+- `koldstore.validate_sql_objects()` compares the database's koldstore functions and catalog columns with
+  what the loaded library was built against and returns `{ok, missing[], unexpected[], hint}`. A changed
+  function signature shows up once in each list.
+- `scripts/check-sql-drift.sh DBNAME` does the same against a freshly created database and works on a
+  database too old to have that function (it reports the function itself as missing). Run it after
+  installing a new library, for every database that has koldstore.
+
+To fix drift, per changed function: `ALTER EXTENSION koldstore DROP FUNCTION old(...)`, `DROP FUNCTION
+old(...)`, `CREATE FUNCTION` from the extension script with `AS '$libdir/koldstore', '<symbol>'`, then
+`ALTER EXTENSION koldstore ADD FUNCTION new(...)`; apply listed column changes with `ALTER TABLE`; re-check.
+The expected list is `crates/pg_koldstore/manifest/expected_objects.txt`, regenerated with
+`scripts/check-sql-drift.sh --update-expected` after changing SQL objects (the `sql_drift` SQL case fails
+while it is stale).
 
 Logical replication captures source-heap changes, not a portable snapshot of
 the cold object set. Downstream consumers must not infer that subscribing to

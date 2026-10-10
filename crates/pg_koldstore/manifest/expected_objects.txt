@@ -1,0 +1,163 @@
+column async_mirror_state.applied_lsn pg_lsn not null
+column async_mirror_state.database_oid oid not null
+column async_mirror_state.seq_high_watermark bigint not null
+column async_mirror_state.updated_at timestamp with time zone not null
+column cold_segment_index.codec_version smallint not null
+column cold_segment_index.column_id smallint not null
+column cold_segment_index.max_value bytea
+column cold_segment_index.min_value bytea
+column cold_segment_index.row_group_max_values bytea[] not null
+column cold_segment_index.row_group_min_values bytea[] not null
+column cold_segment_index.row_group_null_counts bigint[] not null
+column cold_segment_index.scope_key text not null
+column cold_segment_index.segment_id uuid not null
+column cold_segment_index.table_oid oid not null
+column cold_segment_index.type_oid oid not null
+column cold_segment_index.value_summary bytea
+column cold_segment_order_index.bounds_exact boolean not null
+column cold_segment_order_index.codec_version smallint not null
+column cold_segment_order_index.max_composite_key bytea
+column cold_segment_order_index.min_composite_key bytea
+column cold_segment_order_index.physically_sorted boolean not null
+column cold_segment_order_index.row_group_max_composite_keys bytea[] not null
+column cold_segment_order_index.row_group_min_composite_keys bytea[] not null
+column cold_segment_order_index.scope_key text not null
+column cold_segment_order_index.segment_id uuid not null
+column cold_segment_order_index.sort_order_id integer not null
+column cold_segment_order_index.table_oid oid not null
+column cold_segments.batch_number integer not null
+column cold_segments.byte_size bigint not null
+column cold_segments.checksum text not null
+column cold_segments.created_at timestamp with time zone not null
+column cold_segments.max_seq bigint not null
+column cold_segments.min_seq bigint not null
+column cold_segments.object_etag text
+column cold_segments.pass_id uuid
+column cold_segments.path text not null
+column cold_segments.row_count bigint not null
+column cold_segments.row_group_count integer not null
+column cold_segments.row_group_max_seqs bigint[] not null
+column cold_segments.row_group_min_seqs bigint[] not null
+column cold_segments.row_group_row_counts bigint[] not null
+column cold_segments.schema_version integer not null
+column cold_segments.scope_key text not null
+column cold_segments.segment_id uuid not null
+column cold_segments.segment_ordinal integer
+column cold_segments.status text not null
+column cold_segments.table_oid oid not null
+column cold_segments.writer_attempt_token uuid
+column cold_segments.writer_job_id uuid
+column deferred_cold_deletes.id bigint not null
+column deferred_cold_deletes.object_key text not null
+column deferred_cold_deletes.staged_at timestamp with time zone not null
+column deferred_cold_deletes.storage_id text not null
+column deferred_cold_deletes.table_oid oid not null
+column jobs.attempt_token uuid
+column jobs.attempts integer not null
+column jobs.available_at timestamp with time zone not null
+column jobs.batches_completed integer not null
+column jobs.cancel_requested_at timestamp with time zone
+column jobs.checkpoint_seq bigint not null
+column jobs.created_at timestamp with time zone not null
+column jobs.error_trace text
+column jobs.finished_at timestamp with time zone
+column jobs.flush_seq_upper_bound bigint
+column jobs.id uuid not null
+column jobs.job_type text not null
+column jobs.payload jsonb not null
+column jobs.phase text not null
+column jobs.progress_current bigint not null
+column jobs.progress_total bigint not null
+column jobs.rows_flushed bigint not null
+column jobs.rows_processed bigint not null
+column jobs.scope_key text not null
+column jobs.started_at timestamp with time zone
+column jobs.status text not null
+column jobs.table_oid oid
+column jobs.updated_at timestamp with time zone not null
+column manifest.cold_row_count bigint not null
+column manifest.etag text
+column manifest.generation bigint not null
+column manifest.hot_row_count bigint not null
+column manifest.last_error text
+column manifest.max_seq bigint not null
+column manifest.mirror_row_count bigint not null
+column manifest.scope_key text not null
+column manifest.segment_count integer not null
+column manifest.sync_state text not null
+column manifest.table_oid oid not null
+column manifest.updated_at timestamp with time zone not null
+column schemas.activation_lsn pg_lsn
+column schemas.active boolean not null
+column schemas.columns jsonb not null
+column schemas.created_at timestamp with time zone not null
+column schemas.id uuid not null
+column schemas.indexed_columns jsonb not null
+column schemas.initialization_state text not null
+column schemas.last_flush_at timestamp with time zone
+column schemas.last_flush_seq bigint not null
+column schemas.mirror_relation regclass
+column schemas.options jsonb not null
+column schemas.primary_key jsonb not null
+column schemas.primary_key_shape jsonb not null
+column schemas.scope_column name
+column schemas.storage_id text
+column schemas.table_oid oid not null
+column schemas.table_type text not null
+column schemas.type_matrix jsonb not null
+column schemas.updated_at timestamp with time zone not null
+column schemas.version integer not null
+column spock_reconciled.detail text
+column spock_reconciled.item_key text not null
+column spock_reconciled.reconciled_at timestamp with time zone not null
+column spock_reconciled.status text not null
+column storage.base_path text not null
+column storage.config jsonb not null
+column storage.created_at timestamp with time zone not null
+column storage.credentials jsonb not null
+column storage.id text not null
+column storage.name text not null
+column storage.regular_path_tmpl text not null
+column storage.scoped_path_tmpl text not null
+column storage.storage_type text not null
+column storage.updated_at timestamp with time zone not null
+column table_cancel_requests.requested_at timestamp with time zone not null
+column table_cancel_requests.table_oid oid not null
+function _cold_insert_guard_check(table_oid oid, "row" jsonb, table_name text) returns void [cold_insert_guard_check_pg_wrapper]
+function alter_storage_credentials(name text, credentials jsonb) returns void security definer [alter_storage_credentials_pg_wrapper]
+function alter_storage_location(name text, base_path text, config jsonb, "check" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]
+function async_mirror_status() returns jsonb [async_mirror_status_wrapper]
+function backup_manifest(table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [backup_manifest_pg_wrapper]
+function cancel_job(job_id uuid) returns boolean security definer [cancel_job_pg_wrapper]
+function cancel_table_jobs(table_name regclass) returns bigint security definer [cancel_table_jobs_pg_wrapper]
+function changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer) returns TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text) security definer [changes_since_pg_wrapper]
+function delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [delete_row_pg_wrapper]
+function disable_async_mirror() returns boolean security definer [disable_async_mirror_wrapper]
+function enqueue_flush_job(table_name regclass, force boolean DEFAULT false) returns uuid security definer [enqueue_flush_job_pg_wrapper]
+function flush_table(table_name regclass, force boolean DEFAULT false) returns jsonb security definer [flush_table_pg_wrapper]
+function hydrate_pk(table_name regclass, pk jsonb) returns jsonb security definer [hydrate_pk_pg_wrapper]
+function internal_attach_insert_guards() returns bigint [internal_attach_insert_guards_wrapper]
+function internal_encode_sort_key(value anyelement) returns bytea [internal_encode_sort_key_wrapper]
+function internal_ensure_async_mirror_worker() returns boolean security definer [request_async_mirror_maintenance_pg_wrapper]
+function internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint) returns void [internal_record_row_count_delta_wrapper]
+function internal_run_flush_scheduler_tick() returns boolean security definer [run_flush_scheduler_tick_pg_wrapper]
+function internal_set_async_mirror_ensure_paused(paused boolean) returns boolean security definer [set_async_mirror_ensure_paused_pg_wrapper]
+function koldstore_user_id() returns text [koldstore_user_id_wrapper]
+function koldstore_version() returns text [koldstore_version_wrapper]
+function list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [list_jobs_pg_wrapper]
+function manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false) returns uuid security definer [manage_table_pg_wrapper]
+function preload_status() returns jsonb [preload_status_pg_wrapper]
+function purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false) returns jsonb security definer [purge_deferred_cold_objects_pg_wrapper]
+function purge_old_jobs(batch_limit integer DEFAULT 100) returns bigint security definer [purge_old_jobs_pg_wrapper]
+function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]
+function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]
+function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]
+function set_table_auto_flush(table_name regclass, enabled boolean) returns boolean security definer [set_table_auto_flush_pg_wrapper]
+function snowflake_id() returns bigint [snowflake_id_wrapper]
+function table_status(table_name regclass) returns jsonb security definer [table_status_pg_wrapper]
+function unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean) returns bigint security definer [unmanage_table_pg_wrapper]
+function update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [update_row_pg_wrapper]
+function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false) returns jsonb security definer [validate_cold_storage_pg_wrapper]
+function validate_sql_objects() returns jsonb [validate_sql_objects_pg_wrapper]
+function verify_table_integrity(table_name regclass) returns jsonb security definer [verify_table_integrity_pg_wrapper]
+function wait_for_async_mirror() returns bigint [wait_for_async_mirror_wrapper]

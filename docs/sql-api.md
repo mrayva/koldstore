@@ -749,6 +749,18 @@ cold reference the catalog holds is intact. Run it after restoring a backup or r
 in time, before cutover. It does not report unreferenced objects; use
 `recover_segments(..., dry_run => true)` for those.
 
+### `koldstore.validate_sql_objects`
+
+```sql
+SELECT koldstore.validate_sql_objects();
+```
+
+Compares this database's koldstore functions and catalog columns with the ones the loaded library was
+built against. **Returns:** `jsonb` `{ok, library_version, extension_version, missing[], unexpected[], hint}`.
+`missing` is what the library expects but the database lacks; `unexpected` is what the database has that
+the library does not know (a changed function signature appears once in each). `ok = true` means no
+difference and matching versions. Read-only. See "SQL object drift" in `backup-and-operations.md`.
+
 ## DML Boundaries
 
 - Normal hot `INSERT`, `UPDATE`, and `DELETE` operate on the heap and mark local

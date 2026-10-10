@@ -9,6 +9,8 @@ pub mod backup;
 #[cfg(feature = "pg")]
 pub mod cold_dml;
 #[cfg(feature = "pg")]
+pub mod drift;
+#[cfg(feature = "pg")]
 pub mod events;
 pub mod flush;
 #[cfg(feature = "pg")]
