@@ -5,81 +5,135 @@
 //! Only the dominant primary-key types are supported; any other type simply gets no summary, which
 //! is always safe (a segment without a summary is never pruned).
 
-use arrow_array::{Array, Int16Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{
+    Array, Date32Array, Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    TimestampMicrosecondArray,
+};
 use koldstore_sortkey::{
     SortKeyType, SortKeyValue, ValueSummaryBuilder, encode_sort_key, encode_sort_key_pg_text,
+    unix_days_to_pg, unix_micros_to_pg,
 };
 
 /// True when summaries can be built for columns of this Sort Key type.
+///
+/// A key made of several columns qualifies when each of them does.
 #[must_use]
 pub const fn supports_value_summary(ty: SortKeyType) -> bool {
     matches!(
         ty,
-        SortKeyType::Int2 | SortKeyType::Int4 | SortKeyType::Int8 | SortKeyType::Uuid
+        SortKeyType::Int2
+            | SortKeyType::Int4
+            | SortKeyType::Int8
+            | SortKeyType::Uuid
+            | SortKeyType::Date
+            | SortKeyType::Timestamp
+            | SortKeyType::Timestamptz
     )
 }
 
-/// Adds every non-null value of `column` in `batch` to `builder`.
+/// The Sort Key V1 bytes of row `index` of `array`, or `None` for a null.
+fn encode_row(
+    array: &dyn Array,
+    ty: SortKeyType,
+    index: usize,
+    column: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if array.is_null(index) {
+        return Ok(None);
+    }
+    let mismatch = || format!("value summary column `{column}` has an unexpected Arrow type for {ty:?}");
+    let encode = |value: SortKeyValue| encode_sort_key(&value).map_err(|error| error.to_string());
+    let bytes = match ty {
+        SortKeyType::Int2 => encode(SortKeyValue::Int2(
+            array.as_any().downcast_ref::<Int16Array>().ok_or_else(mismatch)?.value(index),
+        ))?,
+        SortKeyType::Int4 => encode(SortKeyValue::Int4(
+            array.as_any().downcast_ref::<Int32Array>().ok_or_else(mismatch)?.value(index),
+        ))?,
+        SortKeyType::Int8 => encode(SortKeyValue::Int8(
+            array.as_any().downcast_ref::<Int64Array>().ok_or_else(mismatch)?.value(index),
+        ))?,
+        SortKeyType::Uuid => {
+            let text = array.as_any().downcast_ref::<StringArray>().ok_or_else(mismatch)?.value(index);
+            encode_sort_key_pg_text(SortKeyType::Uuid, text).map_err(|error| error.to_string())?
+        }
+        // Arrow holds Unix-epoch values; the planner's probe is PostgreSQL-epoch (infinity-safe).
+        SortKeyType::Date => encode(SortKeyValue::Date(unix_days_to_pg(
+            array.as_any().downcast_ref::<Date32Array>().ok_or_else(mismatch)?.value(index),
+        )))?,
+        SortKeyType::Timestamp => encode(SortKeyValue::Timestamp(unix_micros_to_pg(
+            array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(mismatch)?
+                .value(index),
+        )))?,
+        SortKeyType::Timestamptz => encode(SortKeyValue::Timestamptz(unix_micros_to_pg(
+            array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(mismatch)?
+                .value(index),
+        )))?,
+        other => return Err(format!("value summaries are not supported for {other:?}")),
+    };
+    Ok(Some(bytes))
+}
+
+/// Adds the key of every row of `batch` to `builder`, where a row's key is the Sort Key V1 bytes of
+/// its `columns`, in order, back to back.
+///
+/// Every supported type encodes to a fixed width, so the concatenation is unambiguous, and for a
+/// single column it is exactly that column's encoding (what summaries of single-column keys have
+/// always hashed). A row with a null in any of the columns contributes nothing; the caller notices
+/// the shortfall and drops the summary.
 ///
 /// # Errors
 ///
-/// Returns an error when the column is missing, has an unexpected Arrow type, or a value cannot be
+/// Returns an error when a column is missing, has an unexpected Arrow type, or a value cannot be
 /// encoded. The caller must then discard the summary for the whole segment: a partially filled
 /// summary would produce false negatives.
+pub fn add_key_columns_to_value_summary(
+    builder: &mut ValueSummaryBuilder,
+    batch: &RecordBatch,
+    columns: &[(&str, SortKeyType)],
+) -> Result<(), String> {
+    if columns.is_empty() {
+        return Err("a value summary needs at least one key column".to_string());
+    }
+    let arrays = columns
+        .iter()
+        .map(|(name, _)| {
+            batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("value summary column `{name}` is missing from the batch"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    'rows: for index in 0..batch.num_rows() {
+        let mut key = Vec::new();
+        for ((name, ty), array) in columns.iter().zip(&arrays) {
+            match encode_row(array.as_ref(), *ty, index, name)? {
+                Some(bytes) => key.extend_from_slice(&bytes),
+                None => continue 'rows,
+            }
+        }
+        builder.insert(&key);
+    }
+    Ok(())
+}
+
+/// Adds every non-null value of `column` in `batch` to `builder` (a single-column key).
+///
+/// # Errors
+///
+/// As [`add_key_columns_to_value_summary`].
 pub fn add_column_to_value_summary(
     builder: &mut ValueSummaryBuilder,
     batch: &RecordBatch,
     column: &str,
     ty: SortKeyType,
 ) -> Result<(), String> {
-    let array = batch
-        .column_by_name(column)
-        .ok_or_else(|| format!("value summary column `{column}` is missing from the batch"))?;
-    let mismatch =
-        || format!("value summary column `{column}` has an unexpected Arrow type for {ty:?}");
-    let encode = |value: SortKeyValue| encode_sort_key(&value).map_err(|error| error.to_string());
-    match ty {
-        SortKeyType::Int2 => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .ok_or_else(mismatch)?;
-            for index in (0..values.len()).filter(|i| values.is_valid(*i)) {
-                builder.insert(&encode(SortKeyValue::Int2(values.value(index)))?);
-            }
-        }
-        SortKeyType::Int4 => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(mismatch)?;
-            for index in (0..values.len()).filter(|i| values.is_valid(*i)) {
-                builder.insert(&encode(SortKeyValue::Int4(values.value(index)))?);
-            }
-        }
-        SortKeyType::Int8 => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(mismatch)?;
-            for index in (0..values.len()).filter(|i| values.is_valid(*i)) {
-                builder.insert(&encode(SortKeyValue::Int8(values.value(index)))?);
-            }
-        }
-        SortKeyType::Uuid => {
-            let values = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(mismatch)?;
-            for index in (0..values.len()).filter(|i| values.is_valid(*i)) {
-                let bytes = encode_sort_key_pg_text(SortKeyType::Uuid, values.value(index))
-                    .map_err(|error| error.to_string())?;
-                builder.insert(&bytes);
-            }
-        }
-        other => return Err(format!("value summaries are not supported for {other:?}")),
-    }
-    Ok(())
+    add_key_columns_to_value_summary(builder, batch, &[(column, ty)])
 }
 
 /// A summary rebuilt from an existing Parquet object.
@@ -91,31 +145,35 @@ pub struct RebuiltSummary {
     pub rows: usize,
 }
 
-/// Rebuilds the value summary of `column` from a whole Parquet object, reading only that column.
+/// Rebuilds the value summary of a key from a whole Parquet object, reading only the key columns.
 ///
 /// This is what the flush writer computes while it writes a segment, recomputed for segments written
 /// before summaries existed. The summary covers every row in the object (delete markers included), so
-/// the result is trusted only when every row contributed a value.
+/// the result is trusted only when every row contributed a key.
 ///
 /// # Errors
 ///
-/// Returns an error when the object cannot be read, the column is missing or has an unexpected Arrow
-/// type, or a row has no value (a partially filled summary would produce false negatives).
+/// Returns an error when the object cannot be read, a column is missing or has an unexpected Arrow
+/// type, or a row has no key (a partially filled summary would produce false negatives).
 pub fn rebuild_value_summary_from_parquet(
     data: impl Into<bytes::Bytes>,
-    column: &str,
-    ty: SortKeyType,
+    columns: &[(&str, SortKeyType)],
 ) -> Result<RebuiltSummary, String> {
     use parquet::arrow::ProjectionMask;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(data.into())
         .map_err(|error| format!("cannot read parquet object: {error}"))?;
-    let root = builder
-        .schema()
-        .index_of(column)
-        .map_err(|_| format!("column `{column}` is not in the object"))?;
-    let mask = ProjectionMask::roots(builder.parquet_schema(), [root]);
+    let roots = columns
+        .iter()
+        .map(|(name, _)| {
+            builder
+                .schema()
+                .index_of(name)
+                .map_err(|_| format!("column `{name}` is not in the object"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mask = ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
         .with_projection(mask)
         .build()
@@ -126,13 +184,13 @@ pub fn rebuild_value_summary_from_parquet(
     for batch in reader {
         let batch = batch.map_err(|error| format!("cannot read parquet object: {error}"))?;
         rows += batch.num_rows();
-        add_column_to_value_summary(&mut summary, &batch, column, ty)?;
+        add_key_columns_to_value_summary(&mut summary, &batch, columns)?;
     }
     // An oversized segment stops collecting (len 0) and gets no summary; otherwise every row must
-    // have contributed a value.
+    // have contributed a key.
     if summary.len() != 0 && summary.len() != rows {
         return Err(format!(
-            "{} of {rows} rows have no value in `{column}`; refusing a partial summary",
+            "{} of {rows} rows have a null key column; refusing a partial summary",
             rows - summary.len()
         ));
     }
@@ -197,8 +255,9 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!supports_value_summary(SortKeyType::Timestamptz));
+        assert!(supports_value_summary(SortKeyType::Timestamptz));
         assert!(supports_value_summary(SortKeyType::Uuid));
+        assert!(!supports_value_summary(SortKeyType::Bool));
     }
 
     #[test]
@@ -216,8 +275,7 @@ mod tests {
 
         let rebuilt = rebuild_value_summary_from_parquet(
             bytes::Bytes::from(buffer.clone()),
-            "id",
-            SortKeyType::Int8,
+            &[("id", SortKeyType::Int8)],
         )
         .unwrap();
         assert_eq!(rebuilt.rows, 500);
@@ -234,8 +292,7 @@ mod tests {
 
         let missing = rebuild_value_summary_from_parquet(
             bytes::Bytes::from(buffer),
-            "nope",
-            SortKeyType::Int8,
+            &[("nope", SortKeyType::Int8)],
         );
         assert!(missing.unwrap_err().contains("not in the object"));
     }
@@ -253,10 +310,83 @@ mod tests {
         }
         let error = rebuild_value_summary_from_parquet(
             bytes::Bytes::from(buffer),
-            "id",
-            SortKeyType::Int8,
+            &[("id", SortKeyType::Int8)],
         )
         .unwrap_err();
         assert!(error.contains("partial summary"), "{error}");
+    }
+
+    #[test]
+    fn a_single_column_key_hashes_exactly_its_own_encoding() {
+        // Existing single-column summaries must stay valid: the key is that column's bytes, nothing more.
+        let batch = batch(&[Some(7)]);
+        let mut builder = ValueSummaryBuilder::new();
+        add_key_columns_to_value_summary(&mut builder, &batch, &[("id", SortKeyType::Int8)]).unwrap();
+        let summary = builder.finish().unwrap();
+        assert!(summary_may_contain(&summary, &encode_sort_key(&SortKeyValue::Int8(7)).unwrap()));
+    }
+
+    #[test]
+    fn a_composite_key_is_its_columns_back_to_back_and_order_matters() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int64, false),
+        ]));
+        let a: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let b: ArrayRef = Arc::new(Int64Array::from(vec![10_i64, 20, 30]));
+        let batch = RecordBatch::try_new(schema, vec![a, b]).unwrap();
+        let mut builder = ValueSummaryBuilder::new();
+        add_key_columns_to_value_summary(
+            &mut builder,
+            &batch,
+            &[("a", SortKeyType::Int4), ("b", SortKeyType::Int8)],
+        )
+        .unwrap();
+        assert_eq!(builder.len(), 3);
+        let summary = builder.finish().unwrap();
+        let key = |a: i32, b: i64| {
+            let mut bytes = encode_sort_key(&SortKeyValue::Int4(a)).unwrap();
+            bytes.extend(encode_sort_key(&SortKeyValue::Int8(b)).unwrap());
+            bytes
+        };
+        for (a, b) in [(1, 10), (2, 20), (3, 30)] {
+            assert!(summary_may_contain(&summary, &key(a, b)), "({a},{b})");
+        }
+        // Pairs that exist only half-way (right first column, wrong second) are not members.
+        let absent = [(1, 20), (2, 30), (3, 10), (9, 9)];
+        assert!(
+            absent.iter().filter(|(a, b)| summary_may_contain(&summary, &key(*a, *b))).count() < absent.len(),
+            "a 64-bit-minimum bitmap over three keys should reject at least one absent pair"
+        );
+    }
+
+    #[test]
+    fn dates_and_timestamps_are_summarised_in_postgres_epoch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date32, false),
+            Field::new("ts", DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None), false),
+        ]));
+        // 2020-01-05 is 18_266 days after 1970-01-01 and 7_309 after 2000-01-01; infinity is the extreme.
+        let d: ArrayRef = Arc::new(Date32Array::from(vec![18_266, i32::MAX]));
+        let ts: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![1_578_182_400_000_000_i64, i64::MAX]));
+        let batch = RecordBatch::try_new(schema, vec![d, ts]).unwrap();
+
+        let mut dates = ValueSummaryBuilder::new();
+        add_key_columns_to_value_summary(&mut dates, &batch, &[("d", SortKeyType::Date)]).unwrap();
+        let dates = dates.finish().unwrap();
+        for value in [7_309, i32::MAX] {
+            assert!(summary_may_contain(&dates, &encode_sort_key(&SortKeyValue::Date(value)).unwrap()), "{value}");
+        }
+
+        let mut stamps = ValueSummaryBuilder::new();
+        add_key_columns_to_value_summary(&mut stamps, &batch, &[("ts", SortKeyType::Timestamptz)]).unwrap();
+        let stamps = stamps.finish().unwrap();
+        // 7_309 days after 2000-01-01, in microseconds.
+        for value in [7_309_i64 * 86_400_000_000, i64::MAX] {
+            assert!(
+                summary_may_contain(&stamps, &encode_sort_key(&SortKeyValue::Timestamptz(value)).unwrap()),
+                "{value}"
+            );
+        }
     }
 }

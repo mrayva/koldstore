@@ -548,6 +548,52 @@ fn cold_prune_column_policy(
     }
 }
 
+/// A point lookup on a composite primary key: every key column has an equality predicate.
+struct CompositeKeyProbe<'a> {
+    /// The first key column, whose index row carries the composite key's summary.
+    first_column: &'a koldstore_migrate::order::CatalogColumn,
+    /// `summary_hash` of the key columns' Sort Key V1 bytes back to back, in key order.
+    hash: i64,
+}
+
+/// Recognises `WHERE a = $1 AND b = $2 ...` covering every column of a composite primary key whose
+/// columns all support value summaries (the same encoding flush hashes), so the lookup can use the
+/// summary stored on the first key column's index row. `None` for anything else, including
+/// single-column keys, which keep their existing path.
+fn composite_key_probe<'a>(
+    catalog: &'a koldstore_migrate::ExistingTableCatalog,
+    predicates: &[SegmentPrunePredicate],
+) -> Option<CompositeKeyProbe<'a>> {
+    let key_columns = &catalog.primary_key.columns;
+    if key_columns.len() < 2 {
+        return None;
+    }
+    let mut key = Vec::new();
+    let mut first_column = None;
+    for key_column in key_columns {
+        let column = catalog.column_by_id(key_column.column_id)?;
+        let ty = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+        if !koldstore_parquet::supports_value_summary(ty) {
+            return None;
+        }
+        let predicate = predicates.iter().find(|predicate| {
+            predicate.column_id == column.column_id.get()
+                && predicate.min.is_some()
+                && predicate.min == predicate.max
+        })?;
+        let value = predicate.min.as_ref()?;
+        if value.sort_key_type() != ty {
+            return None;
+        }
+        key.extend(koldstore_sortkey::encode_sort_key(value).ok()?);
+        first_column.get_or_insert(column);
+    }
+    Some(CompositeKeyProbe {
+        first_column: first_column?,
+        hash: i64::try_from(koldstore_sortkey::summary_hash(&key)).ok()?,
+    })
+}
+
 /// Picks a Sort Key–allowlisted prune column and asks Postgres for candidates.
 ///
 /// Prefers the configured `segment_order_column_id` when it has a range/equality
@@ -579,6 +625,12 @@ fn resolve_segment_index_candidates(
                 })
         })
     });
+    // A full composite-key equality probes the summary on the first key column's index row, whatever
+    // column the range logic would otherwise have picked: the first column's equality bounds still
+    // apply (it is part of the key), and the summary covers the whole key.
+    let composite = composite_key_probe(catalog, predicates);
+    let composite_hash = composite.as_ref().map(|probe| probe.hash);
+    let column = composite.map(|probe| probe.first_column).or(column);
     let Some(column) = column else {
         let order_name = collect_profile.then(|| {
             segment_order_column_id.and_then(|column_id| {
@@ -603,6 +655,7 @@ fn resolve_segment_index_candidates(
         column,
         predicates,
         collect_profile,
+        composite_hash,
     )?;
     Ok(SegmentIndexCandidateResolution {
         candidates: loaded.candidates,
@@ -621,6 +674,7 @@ fn load_segment_index_candidates(
     column: &koldstore_migrate::order::CatalogColumn,
     predicates: &[SegmentPrunePredicate],
     collect_profile: bool,
+    composite_hash: Option<i64>,
 ) -> Result<SegmentIndexCandidateLoad, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -633,13 +687,27 @@ fn load_segment_index_candidates(
     // value summary proves they cannot hold it. Only columns whose summaries can exist take this
     // path; the label stays `bounded_range` and the saving shows up in the existing
     // "Segments Pruned by Catalog Index" counter.
+    // A summary hashes the whole primary key and lives on the first key column's index row. A value
+    // for one column therefore only matches it when that column *is* the whole key; for a composite
+    // key only a lookup that names every key column (`composite_hash`) may use it. Testing a partial
+    // key, or one column of a composite key, against it would drop segments that hold the row.
+    let is_whole_key = catalog.primary_key.columns.len() == 1
+        && catalog
+            .primary_key
+            .columns
+            .first()
+            .is_some_and(|key| key.column_id == column.column_id);
     let point_hash = match (&lower, &upper) {
         (Some(low), Some(high))
             if low == high
                 && koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
                     .is_some_and(koldstore_parquet::supports_value_summary) =>
         {
-            i64::try_from(koldstore_sortkey::summary_hash(low)).ok()
+            composite_hash.or_else(|| {
+                is_whole_key
+                    .then(|| i64::try_from(koldstore_sortkey::summary_hash(low)).ok())
+                    .flatten()
+            })
         }
         _ => None,
     };
@@ -685,6 +753,7 @@ fn load_segment_index_candidates(
         upper
             .as_ref()
             .map(|value| std::sync::Arc::<[u8]>::from(value.as_slice())),
+        composite_hash,
     );
     if let Some(cached) = crate::catalog::cache::cached_segment_index_candidates(&cache_key) {
         return Ok(SegmentIndexCandidateLoad {

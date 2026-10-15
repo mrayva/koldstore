@@ -140,7 +140,8 @@ missing cold data.
 
 Segments flushed before primary-key value summaries existed (ADR-009) carry no summary, so a point lookup
 opens every one of them whose min/max range covers the key; after hydrate-and-reflush churn that is nearly
-all of them. After upgrading, give them summaries once:
+all of them (summaries cover single- and multi-column keys of integer, uuid, date and timestamp types). After
+upgrading, give them summaries once:
 `SELECT koldstore.rebuild_segment_summaries(dry_run => true);` to see how many, then call it without
 `dry_run` (repeatedly, until `remaining` is 0). It reads each object once and never changes cold data; see
 the [SQL reference](sql-api.md#koldstorerebuild_segment_summaries).
@@ -156,6 +157,10 @@ failed`) or an error on a catalog column the library expects.
 - `koldstore.validate_sql_objects()` compares the database's koldstore functions and catalog columns with
   what the loaded library was built against and returns `{ok, missing[], unexpected[], hint}`. A changed
   function signature shows up once in each list.
+- Each database's persistent WAL applier runs the same comparison once when it starts and logs one `WARNING`
+  (`this database's SQL objects do not match the loaded library (missing: ...; unexpected: ...)`) if anything
+  differs, so drift after installing a new library shows up in the server log without anyone asking. It never
+  affects the worker; a database with no managed tables has no worker and so no warning.
 - `scripts/check-sql-drift.sh DBNAME` does the same against a freshly created database and works on a
   database too old to have that function (it reports the function itself as missing). Run it after
   installing a new library, for every database that has koldstore.

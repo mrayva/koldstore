@@ -1,0 +1,199 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 1200
+ cps_managed
+-------------
+ t
+(1 row)
+
+ cps_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+ round1
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round2
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round3
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round4
+--------
+ t
+(1 row)
+
+RESET
+ several_segments
+------------------
+ t
+(1 row)
+
+ summaries | on_first_key_column | segments
+-----------+---------------------+----------
+         5 |                   5 |        5
+(1 row)
+
+ every_full_key_found
+----------------------
+ t
+(1 row)
+
+ every_id_found
+----------------
+ f
+(1 row)
+
+ rows_for_tenant_2
+-------------------
+               401
+(1 row)
+
+ updated_rows_visible | total_updates
+----------------------+---------------
+                   12 |            12
+(1 row)
+
+ many_candidates | absent_key_pruned | half_matching_key_pruned
+-----------------+-------------------+--------------------------
+ t               | t                 | t
+(1 row)
+
+ absent_found
+--------------
+            0
+(1 row)
+
+ partial_key_unpruned
+----------------------
+ t
+(1 row)
+
+ partial_key_rows
+------------------
+               33
+(1 row)
+
+SELECT 5
+UPDATE 5
+ eligible | key_columns | counts_every_segment
+----------+-------------+----------------------
+ t        | tenant, id  | t
+(1 row)
+
+ remaining | failed
+-----------+--------
+         0 |      0
+(1 row)
+
+ bytes_differ_from_flush
+-------------------------
+                       0
+(1 row)
+
+ pruned_again
+--------------
+ t
+(1 row)
+
+ every_full_key_found_after_rebuild
+------------------------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 1100
+INSERT 0 3
+ cps_date_managed
+------------------
+ t
+(1 row)
+
+ cps_date_flushed
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+ date_round1
+-------------
+ t
+(1 row)
+
+UPDATE 3
+ date_round2
+-------------
+ t
+(1 row)
+
+UPDATE 3
+ date_round3
+-------------
+ t
+(1 row)
+
+RESET
+ every_segment_has_date_summary
+--------------------------------
+ t
+(1 row)
+
+ every_date_found
+------------------
+ t
+(1 row)
+
+ infinity_found | neg_infinity_found | pre_epoch_found | absent_found
+----------------+--------------------+-----------------+--------------
+              1 |                  1 |               1 |            0
+(1 row)
+
+ total_updates
+---------------
+             9
+(1 row)
+
+ date_absent_pruned
+--------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 1100
+ cps_ts_managed
+----------------
+ t
+(1 row)
+
+ cps_ts_flushed
+----------------
+ t
+(1 row)
+
+SET
+ every_tenant_ts_found
+-----------------------
+ t
+(1 row)
+
+RESET
+ ts_summaries
+--------------
+            2
+(1 row)
+

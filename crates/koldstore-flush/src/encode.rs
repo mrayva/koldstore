@@ -11,7 +11,7 @@ use koldstore_common::{CellValue, ColumnRef, QualifiedTableName, SqlParamType, S
 use koldstore_parquet::{
     CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
     SegmentSplitPolicy, SortingColumnSpec, StreamingParquetSegmentWriter, WriterOptions,
-    add_column_to_value_summary, extract_packed_segment_metadata, supports_value_summary,
+    add_key_columns_to_value_summary, extract_packed_segment_metadata, supports_value_summary,
 };
 
 use crate::write::FlushWriteChunk;
@@ -112,50 +112,59 @@ pub enum MirrorFlushPageCursor {
 
 /// Accumulates the primary-key membership summary of the segment being written.
 ///
-/// Only single-column primary keys of a supported type get one. `builder` is `None` once anything
-/// went wrong for the current segment: a half-filled summary would cause false negatives, so the
-/// segment then simply has none.
+/// Keys made only of supported types get one: a single column, or several (a composite key). A row's
+/// key is its key columns' Sort Key V1 bytes back to back, and the summary is stored on the index row
+/// of the *first* key column. `builder` is `None` once anything went wrong for the current segment: a
+/// half-filled summary would cause false negatives, so the segment then simply has none.
 struct PkSummaryState {
-    column: String,
+    /// Key columns in primary-key order with their Sort Key types.
+    columns: Vec<(String, koldstore_sortkey::SortKeyType)>,
+    /// Stable id of the first key column, whose index row carries the summary.
     column_id: koldstore_common::ColumnId,
-    sort_key_type: koldstore_sortkey::SortKeyType,
     builder: Option<koldstore_sortkey::ValueSummaryBuilder>,
 }
 
 impl PkSummaryState {
     fn for_input(input: &StreamEncodeInput) -> Option<Self> {
-        let [pk] = input.primary_key_columns.as_slice() else {
-            return None;
-        };
+        let first = input.primary_key_columns.first()?;
         let indexed = input
             .indexed_columns
             .iter()
-            .find(|column| &column.name == pk)?;
-        let column = input
-            .parquet_columns
-            .iter()
-            .find(|column| &column.name == pk)?;
-        let sort_key_type =
-            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
-        supports_value_summary(sort_key_type).then(|| Self {
-            column: pk.clone(),
+            .find(|column| &column.name == first)?;
+        let mut columns = Vec::with_capacity(input.primary_key_columns.len());
+        for key in &input.primary_key_columns {
+            let column = input
+                .parquet_columns
+                .iter()
+                .find(|column| &column.name == key)?;
+            let sort_key_type =
+                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+            if !supports_value_summary(sort_key_type) {
+                return None;
+            }
+            columns.push((key.clone(), sort_key_type));
+        }
+        Some(Self {
+            columns,
             column_id: indexed.column_id,
-            sort_key_type,
             builder: Some(koldstore_sortkey::ValueSummaryBuilder::new()),
         })
     }
 
     fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
         if let Some(builder) = self.builder.as_mut() {
-            if add_column_to_value_summary(builder, batch, &self.column, self.sort_key_type)
-                .is_err()
-            {
+            let columns: Vec<(&str, koldstore_sortkey::SortKeyType)> = self
+                .columns
+                .iter()
+                .map(|(name, ty)| (name.as_str(), *ty))
+                .collect();
+            if add_key_columns_to_value_summary(builder, batch, &columns).is_err() {
                 self.builder = None;
             }
         }
     }
 
-    /// Finishes the segment's summary (only if it covered exactly `row_count` values) and resets
+    /// Finishes the segment's summary (only if it covered exactly `row_count` keys) and resets
     /// the state for the next segment.
     fn finish(&mut self, row_count: usize) -> Option<Vec<u8>> {
         let builder = self.builder.take();
@@ -615,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_primary_keys_get_no_summary() {
+    fn a_composite_key_with_an_unsupported_column_gets_no_summary() {
         let mut encode_input = input(None, 100);
         encode_input.primary_key_columns = vec!["id".to_string(), "body".to_string()];
         encode_input.primary_key_param_types = vec![SqlParamType::BigInt, SqlParamType::Text];
@@ -626,6 +635,71 @@ mod tests {
                 .iter()
                 .all(|index| index.value_summary.is_none())
         );
+    }
+
+    #[test]
+    fn a_composite_key_summary_covers_the_key_columns_in_order_on_the_first_columns_index_row() {
+        let mut encode_input = input(None, 100);
+        encode_input.primary_key_columns = vec!["id".to_string(), "region".to_string()];
+        encode_input.primary_key_param_types = vec![SqlParamType::BigInt, SqlParamType::Integer];
+        encode_input.base_column_names = vec!["id".to_string(), "region".to_string()];
+        encode_input.parquet_columns = vec![
+            PgColumn::new("id", PgType::Int8, false),
+            PgColumn::new("region", PgType::Int4, false),
+        ];
+        encode_input.indexed_columns = vec![
+            ColumnRef::new(ColumnId::from_attnum(1), "id"),
+            ColumnRef::new(ColumnId::from_attnum(2), "region"),
+        ];
+        let mut fetched = false;
+        let mut packed = None;
+        stream_flush_chunks(
+            &encode_input,
+            |_, _, _| {
+                if fetched {
+                    return Ok(Vec::new());
+                }
+                fetched = true;
+                Ok((1..=5)
+                    .map(|seq| FlushMirrorRow {
+                        seq,
+                        op: 1,
+                        values: vec![CellValue::Int64(seq), CellValue::Int32(i32::try_from(seq).unwrap() * 10)],
+                        order_key: None,
+                    })
+                    .collect())
+            },
+            |chunk| {
+                packed = Some(chunk.packed_metadata.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        let packed = packed.unwrap();
+
+        let first = packed
+            .column_indexes
+            .iter()
+            .find(|index| index.column_id == ColumnId::from_attnum(1))
+            .unwrap();
+        let second = packed
+            .column_indexes
+            .iter()
+            .find(|index| index.column_id == ColumnId::from_attnum(2))
+            .unwrap();
+        assert!(second.value_summary.is_none(), "only the first key column's row carries the summary");
+        let summary = first.value_summary.as_ref().expect("composite key of supported types gets a summary");
+        let key = |id: i64, region: i32| {
+            let mut bytes = encode_sort_key(&SortKeyValue::Int8(id)).unwrap();
+            bytes.extend(encode_sort_key(&SortKeyValue::Int4(region)).unwrap());
+            bytes
+        };
+        for seq in 1..=5_i64 {
+            assert!(
+                koldstore_sortkey::summary_may_contain(summary, &key(seq, i32::try_from(seq).unwrap() * 10)),
+                "row {seq}"
+            );
+        }
     }
 
     #[test]

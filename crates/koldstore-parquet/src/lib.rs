@@ -39,7 +39,8 @@ pub use reader::{
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 pub use value_summary::{
-    RebuiltSummary, add_column_to_value_summary, rebuild_value_summary_from_parquet,
+    RebuiltSummary, add_column_to_value_summary, add_key_columns_to_value_summary,
+    rebuild_value_summary_from_parquet,
     supports_value_summary,
 };
 pub use writer::{

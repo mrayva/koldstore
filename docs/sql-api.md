@@ -775,8 +775,8 @@ the key. **Returns:** `jsonb` `{dry_run, max_segments_per_table, rebuilt, tables
 `rebuilt`, `remaining` (segments still without a summary), `too_large_for_a_summary` and `failed[]`. Each
 segment's object is read once and verified against the catalog (checksum and row count) before its summary
 is stored; one that does not verify is reported and left alone. Cold data is never modified. Only tables
-with a single-column `smallint`/`integer`/`bigint`/`uuid` key are eligible (others are reported as
-ineligible). Call it repeatedly until `remaining` is 0 (segments over 32,768 rows are too large to carry a
+whose key columns are all `smallint`/`integer`/`bigint`/`uuid`/`date`/`timestamp`/`timestamptz` (one column or
+several) are eligible (others are reported as ineligible). Call it repeatedly until `remaining` is 0 (segments over 32,768 rows are too large to carry a
 summary and stay unsummarized). Owner or superuser. Sessions that already planned a lookup keep using the
 unpruned candidate list until the next manifest change, which is correct, only slower.
 

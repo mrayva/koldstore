@@ -174,6 +174,20 @@ pub extern "C-unwind" fn koldstore_wal_applier_main(argument: pg_sys::Datum) {
     run_wal_applier(argument.value() as u32);
 }
 
+/// Logs one warning when this database's koldstore SQL objects differ from the loaded library.
+///
+/// The extension version does not change when a build changes a function signature or catalog
+/// column, so an older database silently keeps the old objects and later calls fail (for example a
+/// `manage_table` with the wrong argument list). This runs once each time the persistent worker
+/// starts and never affects the worker: any failure to check is itself only logged.
+fn warn_if_sql_objects_drifted(database_oid: u32) {
+    match super::txn::run_recoverable("sql object drift check", crate::sql::drift::drift_warning) {
+        Ok(Some(text)) => pgrx::warning!("koldstore db={database_oid}: {text}"),
+        Ok(None) => {}
+        Err(error) => pgrx::log!("koldstore db={database_oid}: could not check SQL object drift: {error}"),
+    }
+}
+
 fn run_wal_applier(database_oid: u32) {
     CURRENT_WAL_APPLIER_DATABASE_OID.store(database_oid, Ordering::Release);
     attach_signal_handlers();
@@ -188,6 +202,7 @@ fn run_wal_applier(database_oid: u32) {
         return;
     }
     let _registration = WalApplierRegistration { database_oid };
+    warn_if_sql_objects_drifted(database_oid);
     // Recovery and scheduling share one durable generation. Apply at most once
     // for a given recovery generation; the ephemeral maintenance worker may
     // clear the flag later without making this process spin on an unchanged bit.

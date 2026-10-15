@@ -103,7 +103,7 @@ returns only the segments that may contain the key.
   cold copy.
 * **Open (limits, not bugs):** an unconstrained `numeric` column does not keep its display scale when a cold row is
   hydrated (`62.50` comes back as `62.5`; the value is equal, and `numeric(p,s)` columns restore the scale) because
-  the row travels as JSON. `date`, `timestamp`, `timestamptz`, `boolean` and `numeric` keys have no value summary, so
+  the row travels as JSON. `boolean` and `numeric` keys have no value summary (a boolean has two values; numeric has no sort-key encoding), so
   point lookups on them rely on min/max bounds and Parquet statistics alone. `float4`/`float8` keys are still
   rejected for ordered flush.
 * **Fixed:** `uuid` and `boolean` were rejected as the order column (`migration_order_by`) by the migration
@@ -112,3 +112,18 @@ returns only the segments that may contain the key.
   natural order column, and a uuid primary key can be its own order column; a boolean sorts false before true, then by
   key. Covered by the `uuid_bool_order_column` SQL case (flush, ordering, range predicates, hydrate-on-write DML,
   re-flush against an unmanaged copy).
+* **Extended (2026-10-15): composite keys and temporal keys.** A summary now covers any primary key made of
+  `smallint`/`integer`/`bigint`/`uuid`/`date`/`timestamp`/`timestamptz` columns, one or several. A row's key is its key
+  columns' Sort Key V1 bytes back to back in key order (every supported encoding is fixed-width, so this is
+  unambiguous, and for one column it is exactly the column's own encoding, so existing summaries stay valid). The
+  summary lives on the *first* key column's `cold_segment_index` row. The planner probes it only when every key column
+  has an equality predicate (`composite_key_probe`); for any other shape it must not, because the stored bitmap hashes the
+  whole key. This is a correctness rule, not an optimisation: testing a partial key (`WHERE a = 2` on key `(a, b)`) or one
+  column of a composite key against it dropped segments that held the row, and was caught by the existing
+  `cold_dml_scan_guard` and `merge_order_composite_pk` cases. The single-value path therefore applies only to a column that
+  is the entire key. Covered by the `composite_pk_summary` SQL case (a key declared in non-column order, half-matching and
+  partial lookups, infinity and pre-epoch dates, a `timestamptz` key under a non-UTC session zone, rebuild byte-identical
+  to flush). **Downgrade caution:** a library older than this change treats any summary on a column as that column's
+  own, so running it against segments written after this change loses rows on composite-key lookups. Before reverting
+  to an older build, clear them: `UPDATE koldstore.cold_segment_index SET value_summary = NULL;` (they can be rebuilt with
+  `rebuild_segment_summaries()` afterwards).

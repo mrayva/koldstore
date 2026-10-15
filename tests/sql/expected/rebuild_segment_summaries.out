@@ -133,7 +133,7 @@ INSERT 0 20
 
        tbl       | eligible
 -----------------+----------
- sqlreg.rss_comp | f
+ sqlreg.rss_comp | t
  sqlreg.rss_text | f
 (2 rows)
 

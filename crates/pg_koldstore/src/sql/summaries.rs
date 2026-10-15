@@ -1,8 +1,9 @@
 //! `koldstore.rebuild_segment_summaries`: gives segments written before value summaries existed the
 //! summary flush would have written, so point lookups stop opening every one of them.
 //!
-//! A cold point lookup (`WHERE id = $1`) prunes by the catalog's min/max bounds and, for a single-column
-//! `smallint`/`integer`/`bigint`/`uuid` primary key, by a per-segment membership bitmap (ADR-009).
+//! A cold point lookup (`WHERE id = $1`) prunes by the catalog's min/max bounds and, for a primary key of
+//! `smallint`/`integer`/`bigint`/`uuid`/`date`/`timestamp`/`timestamptz` columns (one or several), by a
+//! per-segment membership bitmap (ADR-009).
 //! Segments flushed before that column existed have a NULL summary, which always means "cannot prune":
 //! correct, but every such segment whose bounds overlap the key is opened. This reads each of them
 //! once, verifies it against the catalog, and stores the bitmap. It never changes cold data, only the
@@ -26,33 +27,41 @@ struct Outcome {
     failed: Vec<Value>,
 }
 
-/// The single-column key of `table_oid` when a summary can exist for it: `(column_id, name, type)`.
+/// The key of `table_oid` when a summary can exist for it: the stable id of its first column (whose
+/// index row carries the summary) and every key column, in key order, with its Sort Key type.
 fn summarizable_key(
     table_oid: pgrx::pg_sys::Oid,
-) -> Result<Option<(i16, String, koldstore_sortkey::SortKeyType)>, String> {
+) -> Result<Option<(i16, Vec<(String, koldstore_sortkey::SortKeyType)>)>, String> {
     let Some(snapshot) =
         crate::catalog::cache::managed_table_snapshot(table_oid).map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
-    let [key] = snapshot.primary_key_columns.as_slice() else {
+    let Some(first) = snapshot.primary_key_columns.first() else {
         return Ok(None);
     };
-    let type_oid = pgrx::Spi::get_one_with_args::<pgrx::pg_sys::Oid>(
-        "SELECT atttypid FROM pg_catalog.pg_attribute \
-         WHERE attrelid = $1 AND attnum = $2::smallint AND NOT attisdropped",
-        &[
-            DatumWithOid::from(table_oid),
-            DatumWithOid::from(key.column_id.get()),
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    let Some(type_oid) = type_oid else {
-        return Ok(None);
-    };
-    Ok(koldstore_sortkey::SortKeyType::from_type_oid(type_oid.to_u32())
-        .filter(|ty| koldstore_parquet::supports_value_summary(*ty))
-        .map(|ty| (key.column_id.get(), key.name.clone(), ty)))
+    let mut columns = Vec::with_capacity(snapshot.primary_key_columns.len());
+    for key in &snapshot.primary_key_columns {
+        let type_oid = pgrx::Spi::get_one_with_args::<pgrx::pg_sys::Oid>(
+            "SELECT atttypid FROM pg_catalog.pg_attribute \
+             WHERE attrelid = $1 AND attnum = $2::smallint AND NOT attisdropped",
+            &[
+                DatumWithOid::from(table_oid),
+                DatumWithOid::from(key.column_id.get()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let Some(type_oid) = type_oid else {
+            return Ok(None);
+        };
+        let Some(ty) = koldstore_sortkey::SortKeyType::from_type_oid(type_oid.to_u32())
+            .filter(|ty| koldstore_parquet::supports_value_summary(*ty))
+        else {
+            return Ok(None);
+        };
+        columns.push((key.name.clone(), ty));
+    }
+    Ok(Some((first.column_id.get(), columns)))
 }
 
 fn missing_summary_segments(
@@ -100,12 +109,18 @@ fn rebuild_table(
 ) -> Result<Value, String> {
     let target = table_target(oid)?;
     let table = format!("{}.{}", target.namespace, target.name);
-    let Some((column_id, column, ty)) = summarizable_key(oid)? else {
+    let Some((column_id, key_columns)) = summarizable_key(oid)? else {
         return Ok(json!({
             "table": table, "eligible": false,
-            "reason": "needs a single-column smallint, integer, bigint or uuid primary key",
+            "reason": "every primary-key column must be smallint, integer, bigint, uuid, date, \
+                       timestamp or timestamptz",
         }));
     };
+    let column = key_columns
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     let missing_before = count_missing(oid, column_id)?;
     if dry_run {
         return Ok(json!({
@@ -153,11 +168,11 @@ fn rebuild_table(
             fail(&mut outcome, format!("checksum: catalog says {expected}, object hashes to {actual}"));
             continue;
         }
-        let rebuilt = match koldstore_parquet::rebuild_value_summary_from_parquet(
-            bytes,
-            &column,
-            ty,
-        ) {
+        let key_refs: Vec<(&str, koldstore_sortkey::SortKeyType)> = key_columns
+            .iter()
+            .map(|(name, ty)| (name.as_str(), *ty))
+            .collect();
+        let rebuilt = match koldstore_parquet::rebuild_value_summary_from_parquet(bytes, &key_refs) {
             Ok(rebuilt) => rebuilt,
             Err(error) => {
                 fail(&mut outcome, error);

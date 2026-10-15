@@ -119,7 +119,7 @@ FROM (SELECT koldstore.rebuild_segment_summaries('sqlreg.rss'::regclass) AS r) s
 SELECT count(*) AS summaries_left_null
 FROM koldstore.cold_segment_index WHERE value_summary IS NULL AND segment_id IN (SELECT segment_id FROM sqlreg.rss_before);
 
--- ------------------------------------------------------------------ keys without a summary are reported, not guessed
+-- ------------------------------------------------------------------ keys that cannot carry a summary are reported, not guessed
 CREATE TABLE sqlreg.rss_text (id text PRIMARY KEY, n int NOT NULL);
 INSERT INTO sqlreg.rss_text (id, n) SELECT 'k' || g, g FROM generate_series(1, 20) g;
 SELECT koldstore.manage_table(

@@ -137,6 +137,9 @@ pub struct SegmentIndexCandidateCacheKey {
     codec_version: i16,
     lower: Option<Arc<[u8]>>,
     upper: Option<Arc<[u8]>>,
+    /// Hash of the whole key for a point lookup: two composite keys can agree on the first column
+    /// (the bounds) and still need different candidate lists.
+    point_hash: Option<i64>,
 }
 
 #[cfg(feature = "pg")]
@@ -151,6 +154,7 @@ impl SegmentIndexCandidateCacheKey {
         codec_version: i16,
         lower: Option<Arc<[u8]>>,
         upper: Option<Arc<[u8]>>,
+        point_hash: Option<i64>,
     ) -> Self {
         Self {
             table_oid,
@@ -160,6 +164,7 @@ impl SegmentIndexCandidateCacheKey {
             codec_version,
             lower,
             upper,
+            point_hash,
         }
     }
 }

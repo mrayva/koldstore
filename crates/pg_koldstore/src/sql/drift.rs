@@ -59,6 +59,71 @@ fn live_objects() -> Result<Vec<String>, String> {
         .map(Option::unwrap_or_default)
 }
 
+/// Entries listed per side in the log line; the rest are counted.
+const WARNING_LIST_LIMIT: usize = 5;
+
+fn render_list(entries: &[String]) -> String {
+    let mut shown = entries
+        .iter()
+        .take(WARNING_LIST_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if entries.len() > WARNING_LIST_LIMIT {
+        shown.push_str(&format!("; ... and {} more", entries.len() - WARNING_LIST_LIMIT));
+    }
+    shown
+}
+
+/// The one-line server-log warning for a database whose SQL objects differ from the library, or
+/// `None` when they match (same version, nothing missing or unexpected).
+#[must_use]
+pub fn drift_warning_text(
+    report: &DriftReport,
+    extension_version: Option<&str>,
+    library_version: &str,
+) -> Option<String> {
+    let version_matches = extension_version == Some(library_version);
+    if report.is_clean() && version_matches {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !version_matches {
+        parts.push(format!(
+            "extension version is {} but the library is {library_version}",
+            extension_version.unwrap_or("not installed")
+        ));
+    }
+    if !report.missing.is_empty() {
+        parts.push(format!("missing: {}", render_list(&report.missing)));
+    }
+    if !report.unexpected.is_empty() {
+        parts.push(format!("unexpected: {}", render_list(&report.unexpected)));
+    }
+    Some(format!(
+        "this database's SQL objects do not match the loaded library ({}); calls that use the \
+         differing objects can fail until they are recreated. Run SELECT koldstore.validate_sql_objects() \
+         or scripts/check-sql-drift.sh and see docs/backup-and-operations.md (SQL object drift)",
+        parts.join(" | ")
+    ))
+}
+
+/// Compares this database with the library and returns the warning to log, if any. `Ok(None)` also
+/// when koldstore is not installed in the database.
+///
+/// # Errors
+///
+/// Returns an error when the catalog queries fail.
+#[cfg(feature = "pg")]
+pub(crate) fn drift_warning() -> Result<Option<String>, String> {
+    let Some(extension_version) = installed_version()? else {
+        return Ok(None);
+    };
+    let live = live_objects()?;
+    let report = compare_objects(EXPECTED_OBJECTS.lines(), live.iter().map(String::as_str));
+    Ok(drift_warning_text(&report, Some(&extension_version), LIBRARY_VERSION))
+}
+
 #[cfg(feature = "pg")]
 fn installed_version() -> Result<Option<String>, String> {
     pgrx::Spi::get_one::<String>("SELECT extversion FROM pg_extension WHERE extname = 'koldstore'")
@@ -126,6 +191,32 @@ mod tests {
         );
         assert_eq!(report.missing, vec!["function f(a integer, b integer) returns uuid [f_wrapper]"]);
         assert_eq!(report.unexpected, vec!["function f(a integer) returns uuid [f_wrapper]"]);
+    }
+
+    #[test]
+    fn a_matching_database_logs_nothing() {
+        let report = compare_objects(["a", "b"], ["b", "a"]);
+        assert_eq!(super::drift_warning_text(&report, Some("1.2.3"), "1.2.3"), None);
+    }
+
+    #[test]
+    fn the_warning_names_what_differs_and_caps_long_lists() {
+        let expected: Vec<String> = (0..8).map(|n| format!("function f{n}()")).collect();
+        let report = compare_objects(expected.iter().map(String::as_str), ["function extra()"]);
+        let text = super::drift_warning_text(&report, Some("1.2.3"), "1.2.3").unwrap();
+        assert!(text.contains("missing: function f0()"), "{text}");
+        assert!(text.contains("... and 3 more"), "{text}");
+        assert!(text.contains("unexpected: function extra()"), "{text}");
+        assert!(!text.contains("function f7()"), "lists are capped: {text}");
+        assert!(text.contains("validate_sql_objects"), "{text}");
+    }
+
+    #[test]
+    fn a_version_mismatch_alone_is_reported() {
+        let report = compare_objects(["a"], ["a"]);
+        let text = super::drift_warning_text(&report, Some("0.1.11"), "0.1.12").unwrap();
+        assert!(text.contains("extension version is 0.1.11 but the library is 0.1.12"), "{text}");
+        assert!(!text.contains("missing:") && !text.contains("unexpected:"), "{text}");
     }
 
     #[test]
