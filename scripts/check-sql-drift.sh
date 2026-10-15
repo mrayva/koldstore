@@ -18,6 +18,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST_SQL="${ROOT_DIR}/crates/pg_koldstore/manifest/object_manifest.sql"
 EXPECTED="${ROOT_DIR}/crates/pg_koldstore/manifest/expected_objects.txt"
+REPAIR="${ROOT_DIR}/crates/pg_koldstore/manifest/repair_objects.json"
+GENERATOR_SQL="${ROOT_DIR}/crates/pg_koldstore/manifest/repair_generator.sql"
 
 usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -34,7 +36,11 @@ psql_admin() { psql -X -q -v ON_ERROR_STOP=1 -d postgres "$@"; }
 cleanup() { psql_admin -c "DROP DATABASE IF EXISTS ${scratch}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-manifest() { psql -X -q -At -v ON_ERROR_STOP=1 -d "$1" -f "$MANIFEST_SQL"; }
+# Only the comparable text (the first column) of the shared catalog query.
+manifest() {
+  psql -X -q -At -v ON_ERROR_STOP=1 -d "$1" \
+    -c "SELECT line FROM ($(sed 's/;[[:space:]]*$//' "$MANIFEST_SQL")) AS m(line, kind, ref_oid, ref_num, drop_sql)"
+}
 
 psql_admin -c "CREATE DATABASE ${scratch}"
 psql -X -q -v ON_ERROR_STOP=1 -d "$scratch" -c "CREATE EXTENSION koldstore" >/dev/null
@@ -44,7 +50,17 @@ manifest "$scratch" | LC_ALL=C sort >"$fresh"
 if [[ "$update" == 1 ]]; then
   cp "$fresh" "$EXPECTED"
   echo "wrote ${EXPECTED} ($(wc -l <"$EXPECTED") objects)"
-  rm -f "$fresh"
+  # The definitions koldstore.sync_sql_objects() recreates a drifted object from, keyed by the same text.
+  generator_sql="$(mktemp)"
+  python3 -I - "$GENERATOR_SQL" "$MANIFEST_SQL" >"$generator_sql" <<'PY'
+import re, sys
+generator = open(sys.argv[1]).read()
+catalog = re.sub(r";\s*$", "", open(sys.argv[2]).read().strip())
+sys.stdout.write(generator.replace("@CATALOG@", catalog))
+PY
+  psql -X -q -At -v ON_ERROR_STOP=1 -d "$scratch" -f "$generator_sql" >"$REPAIR"
+  rm -f "$generator_sql" "$fresh"
+  echo "wrote ${REPAIR} ($(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d["functions"]),"functions,",len(d["columns"]),"columns,",len(d["tables"]),"tables")' "$REPAIR"))"
   exit 0
 fi
 

@@ -48,11 +48,25 @@ pub fn compare_objects<'a>(
     }
 }
 
+/// The shared catalog query without its trailing semicolon, ready to use as a subquery.
+#[cfg(feature = "pg")]
+pub(crate) fn object_manifest_sql() -> &'static str {
+    OBJECT_MANIFEST_SQL.trim().trim_end_matches(';')
+}
+
+/// This database compared with the library right now.
+#[cfg(feature = "pg")]
+pub(crate) fn current_report() -> Result<DriftReport, String> {
+    let live = live_objects()?;
+    Ok(compare_objects(EXPECTED_OBJECTS.lines(), live.iter().map(String::as_str)))
+}
+
 #[cfg(feature = "pg")]
 fn live_objects() -> Result<Vec<String>, String> {
     let sql = format!(
-        "SELECT coalesce(array_agg(line ORDER BY line), '{{}}'::text[]) FROM ({}) AS manifest(line)",
-        OBJECT_MANIFEST_SQL.trim().trim_end_matches(';')
+        "SELECT coalesce(array_agg(line ORDER BY line), '{{}}'::text[]) \
+         FROM ({}) AS manifest(line, kind, ref_oid, ref_num, drop_sql)",
+        object_manifest_sql()
     );
     pgrx::Spi::get_one::<Vec<String>>(&sql)
         .map_err(|error| error.to_string())
@@ -103,7 +117,8 @@ pub fn drift_warning_text(
     Some(format!(
         "this database's SQL objects do not match the loaded library ({}); calls that use the \
          differing objects can fail until they are recreated. Run SELECT koldstore.validate_sql_objects() \
-         or scripts/check-sql-drift.sh and see docs/backup-and-operations.md (SQL object drift)",
+         to see the difference, SELECT koldstore.sync_sql_objects() to see the repair, and \
+         sync_sql_objects(dry_run => false) to apply it (docs/backup-and-operations.md, SQL object drift)",
         parts.join(" | ")
     ))
 }
@@ -150,9 +165,9 @@ fn report_value() -> Result<serde_json::Value, String> {
             serde_json::Value::Null
         } else {
             serde_json::Value::String(
-                "this database's koldstore SQL objects differ from the loaded library: recreate the \
-                 listed functions from the extension script, or apply the listed column changes, then \
-                 re-check (docs/backup-and-operations.md, \"SQL object drift\")"
+                "this database's koldstore SQL objects differ from the loaded library: run \
+                 SELECT koldstore.sync_sql_objects() to see the repair and sync_sql_objects(dry_run => false) \
+                 to apply it (docs/backup-and-operations.md, \"SQL object drift\")"
                     .to_string(),
             )
         },
@@ -208,7 +223,7 @@ mod tests {
         assert!(text.contains("... and 3 more"), "{text}");
         assert!(text.contains("unexpected: function extra()"), "{text}");
         assert!(!text.contains("function f7()"), "lists are capped: {text}");
-        assert!(text.contains("validate_sql_objects"), "{text}");
+        assert!(text.contains("validate_sql_objects") && text.contains("sync_sql_objects"), "{text}");
     }
 
     #[test]

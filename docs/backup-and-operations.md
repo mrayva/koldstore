@@ -165,12 +165,27 @@ failed`) or an error on a catalog column the library expects.
   database too old to have that function (it reports the function itself as missing). Run it after
   installing a new library, for every database that has koldstore.
 
-To fix drift, per changed function: `ALTER EXTENSION koldstore DROP FUNCTION old(...)`, `DROP FUNCTION
-old(...)`, `CREATE FUNCTION` from the extension script with `AS '$libdir/koldstore', '<symbol>'`, then
-`ALTER EXTENSION koldstore ADD FUNCTION new(...)`; apply listed column changes with `ALTER TABLE`; re-check.
-The expected list is `crates/pg_koldstore/manifest/expected_objects.txt`, regenerated with
-`scripts/check-sql-drift.sh --update-expected` after changing SQL objects (the `sql_drift` SQL case fails
-while it is stale).
+To fix drift, let koldstore do it: `SELECT koldstore.sync_sql_objects();` shows the repair (a dry run, with every
+statement it would run) and `SELECT koldstore.sync_sql_objects(dry_run => false);` applies it. It is superuser-only and
+runs in one transaction, so a failure leaves the database as it was, and it re-checks afterwards (`ok_after`). It
+replaces a function whose signature changed (dropping the old overload first, so calls are not ambiguous), creates
+missing functions, adds missing catalog columns, and recreates a missing catalog table with its constraints and
+indexes. It never drops a column or data, and only drops functions that are members of the extension: functions the
+library does not know (for example leftovers of a test build) are kept unless you pass `drop_unexpected => true`. A
+`NOT NULL` column without a default cannot be added to a table that may have rows, so it is reported in `skipped`.
+
+A database that predates `sync_sql_objects` itself does not have it yet; create it once, then use it:
+
+```sql
+CREATE FUNCTION koldstore.sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false)
+RETURNS jsonb LANGUAGE c AS '$libdir/koldstore', 'sync_sql_objects_pg_wrapper';
+ALTER EXTENSION koldstore ADD FUNCTION koldstore.sync_sql_objects(boolean, boolean);
+```
+
+The definitions it repairs from are `crates/pg_koldstore/manifest/repair_objects.json`, generated from a freshly
+created database together with the expected list (`crates/pg_koldstore/manifest/expected_objects.txt`) by
+`scripts/check-sql-drift.sh --update-expected` after changing SQL objects. The `sql_drift` and `sync_sql_objects` SQL
+cases and a unit test fail while they are stale.
 
 Logical replication captures source-heap changes, not a portable snapshot of
 the cold object set. Downstream consumers must not infer that subscribing to

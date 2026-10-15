@@ -1,0 +1,1206 @@
+{
+    "tables": {
+        "jobs": {
+            "create": "CREATE TABLE koldstore.jobs (id uuid NOT NULL, table_oid oid, scope_key text DEFAULT ''::text NOT NULL, job_type text NOT NULL, status text NOT NULL, phase text DEFAULT 'pending'::text NOT NULL, flush_seq_upper_bound bigint, checkpoint_seq bigint DEFAULT 0 NOT NULL, batches_completed integer DEFAULT 0 NOT NULL, rows_processed bigint DEFAULT 0 NOT NULL, rows_flushed bigint DEFAULT 0 NOT NULL, progress_current bigint DEFAULT 0 NOT NULL, progress_total bigint DEFAULT 0 NOT NULL, attempts integer DEFAULT 0 NOT NULL, attempt_token uuid, error_trace text, payload jsonb DEFAULT '{}'::jsonb NOT NULL, cancel_requested_at timestamp with time zone, available_at timestamp with time zone DEFAULT now() NOT NULL, started_at timestamp with time zone, finished_at timestamp with time zone, created_at timestamp with time zone DEFAULT now() NOT NULL, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+                "CREATE INDEX jobs_flush_dispatch_idx ON koldstore.jobs USING btree (available_at, updated_at, id) INCLUDE (table_oid) WHERE ((job_type = 'flush'::text) AND (status = 'pending'::text))",
+                "CREATE UNIQUE INDEX jobs_one_active_flush_per_scope_idx ON koldstore.jobs USING btree (table_oid, scope_key) WHERE ((job_type = 'flush'::text) AND (status = ANY (ARRAY['pending'::text, 'running'::text])))",
+                "CREATE UNIQUE INDEX jobs_one_active_migration_per_table_idx ON koldstore.jobs USING btree (table_oid) WHERE ((job_type = 'migrate_backfill'::text) AND (status = ANY (ARRAY['pending'::text, 'running'::text])))",
+                "CREATE UNIQUE INDEX jobs_one_active_table_work_idx ON koldstore.jobs USING btree (table_oid) WHERE ((job_type = ANY (ARRAY['flush'::text, 'migrate_backfill'::text])) AND (status = ANY (ARRAY['pending'::text, 'running'::text])))",
+                "CREATE INDEX jobs_pending_idx ON koldstore.jobs USING btree (table_oid, scope_key, status, updated_at) WHERE (status = ANY (ARRAY['pending'::text, 'running'::text]))",
+                "CREATE INDEX jobs_terminal_finished_idx ON koldstore.jobs USING btree (finished_at, id) WHERE ((status = ANY (ARRAY['completed'::text, 'cancelled'::text, 'error'::text])) AND (finished_at IS NOT NULL))"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.jobs ADD CONSTRAINT jobs_pkey PRIMARY KEY (id)",
+                "ALTER TABLE koldstore.jobs ADD CONSTRAINT jobs_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'dry_run'::text, 'completed'::text, 'cancelled'::text, 'error'::text])))"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "schemas": {
+            "create": "CREATE TABLE koldstore.schemas (id uuid NOT NULL, table_oid oid NOT NULL, version integer NOT NULL, active boolean DEFAULT true NOT NULL, table_type text NOT NULL, columns jsonb DEFAULT '[]'::jsonb NOT NULL, primary_key jsonb NOT NULL, scope_column name, mirror_relation regclass, primary_key_shape jsonb DEFAULT '[]'::jsonb NOT NULL, initialization_state text DEFAULT 'not_started'::text NOT NULL, activation_lsn pg_lsn, indexed_columns jsonb DEFAULT '[]'::jsonb NOT NULL, type_matrix jsonb DEFAULT '{}'::jsonb NOT NULL, options jsonb DEFAULT '{}'::jsonb NOT NULL, storage_id text, last_flush_seq bigint DEFAULT 0 NOT NULL, last_flush_at timestamp with time zone, created_at timestamp with time zone DEFAULT now() NOT NULL, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+                "CREATE UNIQUE INDEX schemas_one_active_per_table_idx ON koldstore.schemas USING btree (table_oid) WHERE active"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.schemas ADD CONSTRAINT schemas_initialization_state_check CHECK ((initialization_state = ANY (ARRAY['not_started'::text, 'backfilling'::text, 'catching_up'::text, 'complete'::text, 'failed'::text])))",
+                "ALTER TABLE koldstore.schemas ADD CONSTRAINT schemas_pkey PRIMARY KEY (id)",
+                "ALTER TABLE koldstore.schemas ADD CONSTRAINT schemas_table_oid_version_key UNIQUE (table_oid, version)",
+                "ALTER TABLE koldstore.schemas ADD CONSTRAINT schemas_table_type_check CHECK ((table_type = ANY (ARRAY['shared'::text, 'user'::text])))"
+            ],
+            "foreign_keys": [
+                "ALTER TABLE koldstore.schemas ADD CONSTRAINT schemas_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES koldstore.storage(id)"
+            ]
+        },
+        "storage": {
+            "create": "CREATE TABLE koldstore.storage (id text NOT NULL, name text NOT NULL, storage_type text NOT NULL, base_path text NOT NULL, credentials jsonb DEFAULT '{}'::jsonb NOT NULL, config jsonb DEFAULT '{}'::jsonb NOT NULL, regular_path_tmpl text DEFAULT '{namespace}/{tableName}/'::text NOT NULL, scoped_path_tmpl text DEFAULT '{namespace}/{tableName}/{scopeId}/'::text NOT NULL, created_at timestamp with time zone DEFAULT now() NOT NULL, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.storage ADD CONSTRAINT storage_name_key UNIQUE (name)",
+                "ALTER TABLE koldstore.storage ADD CONSTRAINT storage_pkey PRIMARY KEY (id)",
+                "ALTER TABLE koldstore.storage ADD CONSTRAINT storage_storage_type_check CHECK ((storage_type = ANY (ARRAY['filesystem'::text, 's3'::text, 'gcs'::text, 'azure'::text])))"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "manifest": {
+            "create": "CREATE TABLE koldstore.manifest (table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, etag text, generation bigint DEFAULT 0 NOT NULL, sync_state text NOT NULL, segment_count integer DEFAULT 0 NOT NULL, max_seq bigint DEFAULT 0 NOT NULL, hot_row_count bigint DEFAULT 0 NOT NULL, mirror_row_count bigint DEFAULT 0 NOT NULL, cold_row_count bigint DEFAULT 0 NOT NULL, last_error text, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+                "CREATE INDEX manifest_dirty_idx ON koldstore.manifest USING btree (sync_state, updated_at, table_oid, scope_key) WHERE (sync_state = ANY (ARRAY['pending_write'::text, 'stale'::text, 'error'::text]))",
+                "CREATE INDEX manifest_scope_lookup_idx ON koldstore.manifest USING btree (scope_key, table_oid) WHERE (scope_key <> ''::text)"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.manifest ADD CONSTRAINT manifest_pkey PRIMARY KEY (table_oid, scope_key)",
+                "ALTER TABLE koldstore.manifest ADD CONSTRAINT manifest_sync_state_check CHECK ((sync_state = ANY (ARRAY['in_sync'::text, 'pending_write'::text, 'syncing'::text, 'stale'::text, 'error'::text])))"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "cold_segments": {
+            "create": "CREATE TABLE koldstore.cold_segments (segment_id uuid NOT NULL, table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, path text NOT NULL, batch_number integer NOT NULL, min_seq bigint NOT NULL, max_seq bigint NOT NULL, row_count bigint NOT NULL, byte_size bigint NOT NULL, schema_version integer NOT NULL, row_group_count integer NOT NULL, row_group_row_counts bigint[] NOT NULL, row_group_min_seqs bigint[] NOT NULL, row_group_max_seqs bigint[] NOT NULL, status text NOT NULL, checksum text NOT NULL, object_etag text, writer_job_id uuid, writer_attempt_token uuid, pass_id uuid, segment_ordinal integer, created_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+                "CREATE INDEX cold_segments_active_scope_seq_idx ON koldstore.cold_segments USING btree (table_oid, scope_key, min_seq, max_seq) INCLUDE (segment_id, path, row_count, byte_size, schema_version, object_etag, checksum) WHERE (status = 'active'::text)",
+                "CREATE INDEX cold_segments_pending_created_idx ON koldstore.cold_segments USING btree (table_oid, created_at) WHERE (status = 'pending'::text)",
+                "CREATE INDEX cold_segments_writer_job_pending_idx ON koldstore.cold_segments USING btree (writer_job_id, pass_id, status) WHERE ((status = 'pending'::text) AND (writer_job_id IS NOT NULL))",
+                "CREATE UNIQUE INDEX cold_segments_writer_pass_ordinal_uidx ON koldstore.cold_segments USING btree (writer_job_id, pass_id, segment_ordinal) WHERE ((writer_job_id IS NOT NULL) AND (pass_id IS NOT NULL) AND (segment_ordinal IS NOT NULL))"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_byte_size_check CHECK ((byte_size > 0))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_check CHECK (((min_seq > 0) AND (min_seq <= max_seq)))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_check1 CHECK ((cardinality(row_group_row_counts) = row_group_count))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_check2 CHECK ((cardinality(row_group_min_seqs) = row_group_count))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_check3 CHECK ((cardinality(row_group_max_seqs) = row_group_count))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_check4 CHECK ((((writer_job_id IS NULL) AND (writer_attempt_token IS NULL) AND (pass_id IS NULL) AND (segment_ordinal IS NULL)) OR ((writer_job_id IS NOT NULL) AND (writer_attempt_token IS NOT NULL) AND (pass_id IS NOT NULL) AND (segment_ordinal IS NOT NULL) AND (segment_ordinal >= 0))))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_pkey PRIMARY KEY (segment_id)",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_count_check CHECK ((row_count > 0))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_count_check CHECK ((row_group_count > 0))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_max_seqs_check CHECK ((array_position(row_group_max_seqs, NULL::bigint) IS NULL))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_min_seqs_check CHECK ((array_position(row_group_min_seqs, NULL::bigint) IS NULL))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_row_counts_check CHECK ((array_position(row_group_row_counts, NULL::bigint) IS NULL))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_row_counts_check1 CHECK ((0 < ALL (row_group_row_counts)))",
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'active'::text, 'compacted'::text, 'deleted'::text])))"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "spock_reconciled": {
+            "create": "CREATE TABLE koldstore.spock_reconciled (item_key text NOT NULL, status text NOT NULL, detail text, reconciled_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.spock_reconciled ADD CONSTRAINT spock_reconciled_pkey PRIMARY KEY (item_key)",
+                "ALTER TABLE koldstore.spock_reconciled ADD CONSTRAINT spock_reconciled_status_check CHECK ((status = ANY (ARRAY['replayed'::text, 'skipped'::text, 'failed'::text])))"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "async_mirror_state": {
+            "create": "CREATE TABLE koldstore.async_mirror_state (database_oid oid NOT NULL, applied_lsn pg_lsn NOT NULL, seq_high_watermark bigint DEFAULT 0 NOT NULL, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.async_mirror_state ADD CONSTRAINT async_mirror_state_pkey PRIMARY KEY (database_oid)"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "cold_segment_index": {
+            "create": "CREATE TABLE koldstore.cold_segment_index (segment_id uuid NOT NULL, table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, column_id smallint NOT NULL, type_oid oid NOT NULL, codec_version smallint NOT NULL, min_value bytea, max_value bytea, row_group_min_values bytea[] NOT NULL, row_group_max_values bytea[] NOT NULL, row_group_null_counts bigint[] NOT NULL, value_summary bytea)",
+            "indexes": [
+                "CREATE INDEX cold_segment_index_max_idx ON koldstore.cold_segment_index USING btree (table_oid, scope_key, column_id, type_oid, codec_version, max_value) INCLUDE (min_value, segment_id)",
+                "CREATE INDEX cold_segment_index_min_idx ON koldstore.cold_segment_index USING btree (table_oid, scope_key, column_id, type_oid, codec_version, min_value) INCLUDE (max_value, segment_id)"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_check CHECK (((min_value IS NULL) = (max_value IS NULL)))",
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_check1 CHECK (((min_value IS NULL) OR (min_value <= max_value)))",
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_check2 CHECK ((cardinality(row_group_min_values) = cardinality(row_group_max_values)))",
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_check3 CHECK ((cardinality(row_group_min_values) = cardinality(row_group_null_counts)))",
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_pkey PRIMARY KEY (segment_id, column_id)"
+            ],
+            "foreign_keys": [
+                "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_segment_id_fkey FOREIGN KEY (segment_id) REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE"
+            ]
+        },
+        "deferred_cold_deletes": {
+            "create": "CREATE TABLE koldstore.deferred_cold_deletes (id bigint DEFAULT nextval('koldstore.deferred_cold_deletes_id_seq'::regclass) NOT NULL, storage_id text NOT NULL, table_oid oid NOT NULL, object_key text NOT NULL, staged_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+                "CREATE INDEX deferred_cold_deletes_staged_idx ON koldstore.deferred_cold_deletes USING btree (staged_at, id)"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.deferred_cold_deletes ADD CONSTRAINT deferred_cold_deletes_pkey PRIMARY KEY (id)",
+                "ALTER TABLE koldstore.deferred_cold_deletes ADD CONSTRAINT deferred_cold_deletes_storage_id_object_key_key UNIQUE (storage_id, object_key)"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "table_cancel_requests": {
+            "create": "CREATE TABLE koldstore.table_cancel_requests (table_oid oid NOT NULL, requested_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.table_cancel_requests ADD CONSTRAINT table_cancel_requests_pkey PRIMARY KEY (table_oid)"
+            ],
+            "foreign_keys": [
+            ]
+        },
+        "cold_segment_order_index": {
+            "create": "CREATE TABLE koldstore.cold_segment_order_index (segment_id uuid NOT NULL, table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, sort_order_id integer NOT NULL, codec_version smallint NOT NULL, min_composite_key bytea, max_composite_key bytea, row_group_min_composite_keys bytea[] NOT NULL, row_group_max_composite_keys bytea[] NOT NULL, physically_sorted boolean NOT NULL, bounds_exact boolean NOT NULL)",
+            "indexes": [
+                "CREATE INDEX cold_segment_order_index_max_idx ON koldstore.cold_segment_order_index USING btree (table_oid, scope_key, sort_order_id, codec_version, max_composite_key) INCLUDE (min_composite_key, segment_id)",
+                "CREATE INDEX cold_segment_order_index_min_idx ON koldstore.cold_segment_order_index USING btree (table_oid, scope_key, sort_order_id, codec_version, min_composite_key) INCLUDE (max_composite_key, segment_id)"
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.cold_segment_order_index ADD CONSTRAINT cold_segment_order_index_check CHECK (((min_composite_key IS NULL) = (max_composite_key IS NULL)))",
+                "ALTER TABLE koldstore.cold_segment_order_index ADD CONSTRAINT cold_segment_order_index_check1 CHECK (((min_composite_key IS NULL) OR (min_composite_key <= max_composite_key)))",
+                "ALTER TABLE koldstore.cold_segment_order_index ADD CONSTRAINT cold_segment_order_index_check2 CHECK ((cardinality(row_group_min_composite_keys) = cardinality(row_group_max_composite_keys)))",
+                "ALTER TABLE koldstore.cold_segment_order_index ADD CONSTRAINT cold_segment_order_index_pkey PRIMARY KEY (segment_id, sort_order_id)"
+            ],
+            "foreign_keys": [
+                "ALTER TABLE koldstore.cold_segment_order_index ADD CONSTRAINT cold_segment_order_index_segment_id_fkey FOREIGN KEY (segment_id) REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE"
+            ]
+        }
+    },
+    "columns": {
+        "column jobs.table_oid oid": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN table_oid oid",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.etag text": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN etag text",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.error_trace text": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN error_trace text",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.id uuid not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN id uuid",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.attempt_token uuid": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN attempt_token uuid",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.storage_id text": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN storage_id text",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.phase text not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN phase text DEFAULT 'pending'::text NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.last_error text": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN last_error text",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.id uuid not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN id uuid",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column storage.id text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN id text",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.status text not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN status text",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.scope_column name": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN scope_column name",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.pass_id uuid": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN pass_id uuid",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.name text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN name text",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.job_type text not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN job_type text",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.payload jsonb not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN payload jsonb DEFAULT '{}'::jsonb NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.scope_key text not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column spock_reconciled.detail text": {
+            "add": "ALTER TABLE koldstore.spock_reconciled ADD COLUMN detail text",
+            "table": "spock_reconciled",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.activation_lsn pg_lsn": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN activation_lsn pg_lsn",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.config jsonb not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN config jsonb DEFAULT '{}'::jsonb NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.object_etag text": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN object_etag text",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.attempts integer not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN attempts integer DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.columns jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN columns jsonb DEFAULT '[]'::jsonb NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.options jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN options jsonb DEFAULT '{}'::jsonb NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN table_oid oid",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column manifest.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN table_oid oid",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.active boolean not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN active boolean DEFAULT true NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.base_path text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN base_path text",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.path text not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN path text",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.writer_job_id uuid": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN writer_job_id uuid",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.max_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN max_seq bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.scope_key text not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.mirror_relation regclass": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN mirror_relation regclass",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.table_type text not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN table_type text",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.version integer not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN version integer",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.flush_seq_upper_bound bigint": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN flush_seq_upper_bound bigint",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.rows_flushed bigint not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN rows_flushed bigint DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.sync_state text not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN sync_state text",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.max_value bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN max_value bytea",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.min_value bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN min_value bytea",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.status text not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN status text",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.primary_key jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN primary_key jsonb",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.type_matrix jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN type_matrix jsonb DEFAULT '{}'::jsonb NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.credentials jsonb not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN credentials jsonb DEFAULT '{}'::jsonb NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.storage_type text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN storage_type text",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.checkpoint_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN checkpoint_seq bigint DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.progress_total bigint not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN progress_total bigint DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.rows_processed bigint not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN rows_processed bigint DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.generation bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN generation bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.checksum text not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN checksum text",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN table_oid oid",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.max_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN max_seq bigint",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.min_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN min_seq bigint",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.scope_key text not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.segment_ordinal integer": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN segment_ordinal integer",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.progress_current bigint not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN progress_current bigint DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column spock_reconciled.status text not null": {
+            "add": "ALTER TABLE koldstore.spock_reconciled ADD COLUMN status text",
+            "table": "spock_reconciled",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.value_summary bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN value_summary bytea",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.segment_id uuid not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN segment_id uuid",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column manifest.hot_row_count bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN hot_row_count bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.indexed_columns jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN indexed_columns jsonb DEFAULT '[]'::jsonb NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.last_flush_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN last_flush_seq bigint DEFAULT 0 NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.scoped_path_tmpl text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN scoped_path_tmpl text DEFAULT '{namespace}/{tableName}/{scopeId}/'::text NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.byte_size bigint not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN byte_size bigint",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.row_count bigint not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN row_count bigint",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.writer_attempt_token uuid": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN writer_attempt_token uuid",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.batches_completed integer not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN batches_completed integer DEFAULT 0 NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.cold_row_count bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN cold_row_count bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.segment_count integer not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN segment_count integer DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column spock_reconciled.item_key text not null": {
+            "add": "ALTER TABLE koldstore.spock_reconciled ADD COLUMN item_key text",
+            "table": "spock_reconciled",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column storage.regular_path_tmpl text not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN regular_path_tmpl text DEFAULT '{namespace}/{tableName}/'::text NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.type_oid oid not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN type_oid oid",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column deferred_cold_deletes.id bigint not null": {
+            "add": "ALTER TABLE koldstore.deferred_cold_deletes ADD COLUMN id bigint DEFAULT nextval('koldstore.deferred_cold_deletes_id_seq'::regclass) NOT NULL",
+            "table": "deferred_cold_deletes",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.started_at timestamp with time zone": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN started_at timestamp with time zone",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.primary_key_shape jsonb not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN primary_key_shape jsonb DEFAULT '[]'::jsonb NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN table_oid oid",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.finished_at timestamp with time zone": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN finished_at timestamp with time zone",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.mirror_row_count bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN mirror_row_count bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.scope_key text not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.initialization_state text not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN initialization_state text DEFAULT 'not_started'::text NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.segment_id uuid not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN segment_id uuid",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.batch_number integer not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN batch_number integer",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column async_mirror_state.database_oid oid not null": {
+            "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN database_oid oid",
+            "table": "async_mirror_state",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column deferred_cold_deletes.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.deferred_cold_deletes ADD COLUMN table_oid oid",
+            "table": "deferred_cold_deletes",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column table_cancel_requests.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.table_cancel_requests ADD COLUMN table_oid oid",
+            "table": "table_cancel_requests",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.schema_version integer not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN schema_version integer",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column async_mirror_state.applied_lsn pg_lsn not null": {
+            "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN applied_lsn pg_lsn",
+            "table": "async_mirror_state",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.column_id smallint not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN column_id smallint",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.row_group_count integer not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN row_group_count integer",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column deferred_cold_deletes.object_key text not null": {
+            "add": "ALTER TABLE koldstore.deferred_cold_deletes ADD COLUMN object_key text",
+            "table": "deferred_cold_deletes",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column deferred_cold_deletes.storage_id text not null": {
+            "add": "ALTER TABLE koldstore.deferred_cold_deletes ADD COLUMN storage_id text",
+            "table": "deferred_cold_deletes",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.last_flush_at timestamp with time zone": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN last_flush_at timestamp with time zone",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN table_oid oid",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_order_index.max_composite_key bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN max_composite_key bytea",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.min_composite_key bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN min_composite_key bytea",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.scope_key text not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.segment_id uuid not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN segment_id uuid",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.cancel_requested_at timestamp with time zone": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN cancel_requested_at timestamp with time zone",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.created_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN created_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column jobs.updated_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.codec_version smallint not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN codec_version smallint",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.row_group_max_seqs bigint[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN row_group_max_seqs bigint[]",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.row_group_min_seqs bigint[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN row_group_min_seqs bigint[]",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column jobs.available_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.jobs ADD COLUMN available_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "jobs",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segments.row_group_row_counts bigint[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN row_group_row_counts bigint[]",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column schemas.created_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN created_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column schemas.updated_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.schemas ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "schemas",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.created_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN created_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column storage.updated_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.storage ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "storage",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column async_mirror_state.seq_high_watermark bigint not null": {
+            "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN seq_high_watermark bigint DEFAULT 0 NOT NULL",
+            "table": "async_mirror_state",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.updated_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "manifest",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.bounds_exact boolean not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN bounds_exact boolean",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_order_index.sort_order_id integer not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN sort_order_id integer",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.row_group_max_values bytea[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN row_group_max_values bytea[]",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.row_group_min_values bytea[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN row_group_min_values bytea[]",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_order_index.codec_version smallint not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN codec_version smallint",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_index.row_group_null_counts bigint[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN row_group_null_counts bigint[]",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segments.created_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN created_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.physically_sorted boolean not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN physically_sorted boolean",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column async_mirror_state.updated_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "async_mirror_state",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column spock_reconciled.reconciled_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.spock_reconciled ADD COLUMN reconciled_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "spock_reconciled",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column deferred_cold_deletes.staged_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.deferred_cold_deletes ADD COLUMN staged_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "deferred_cold_deletes",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column table_cancel_requests.requested_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.table_cancel_requests ADD COLUMN requested_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "table_cancel_requests",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_order_index.row_group_max_composite_keys bytea[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN row_group_max_composite_keys bytea[]",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column cold_segment_order_index.row_group_min_composite_keys bytea[] not null": {
+            "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN row_group_min_composite_keys bytea[]",
+            "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": true
+        }
+    },
+    "functions": {
+        "function snowflake_id() returns bigint [snowflake_id_wrapper]": {
+            "add": "public.snowflake_id()",
+            "name": "snowflake_id",
+            "create": "CREATE OR REPLACE FUNCTION public.snowflake_id()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$snowflake_id_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function preload_status() returns jsonb [preload_status_pg_wrapper]": {
+            "add": "koldstore.preload_status()",
+            "name": "preload_status",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.preload_status()\n RETURNS jsonb\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$preload_status_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function koldstore_user_id() returns text [koldstore_user_id_wrapper]": {
+            "add": "public.koldstore_user_id()",
+            "name": "koldstore_user_id",
+            "create": "CREATE OR REPLACE FUNCTION public.koldstore_user_id()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$koldstore_user_id_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function koldstore_version() returns text [koldstore_version_wrapper]": {
+            "add": "public.koldstore_version()",
+            "name": "koldstore_version",
+            "create": "CREATE OR REPLACE FUNCTION public.koldstore_version()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$koldstore_version_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function spock_tuple_object(tup jsonb) returns jsonb [sql:32488385049f]": {
+            "add": "koldstore.spock_tuple_object(tup jsonb)",
+            "name": "spock_tuple_object",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.spock_tuple_object(tup jsonb)\n RETURNS jsonb\n LANGUAGE sql\n IMMUTABLE\n SET search_path TO 'pg_catalog'\nAS $function$\n  SELECT CASE WHEN tup IS NULL THEN NULL ELSE\n    (SELECT coalesce(jsonb_object_agg(e ->> 'attname', e -> 'value'), '{}'::jsonb)\n     FROM jsonb_array_elements(tup) e) END\n$function$\n",
+            "revoke_public": false
+        },
+        "function async_mirror_status() returns jsonb [async_mirror_status_wrapper]": {
+            "add": "koldstore.async_mirror_status()",
+            "name": "async_mirror_status",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.async_mirror_status()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$async_mirror_status_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function validate_sql_objects() returns jsonb [validate_sql_objects_pg_wrapper]": {
+            "add": "koldstore.validate_sql_objects()",
+            "name": "validate_sql_objects",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_sql_objects()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$validate_sql_objects_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function wait_for_async_mirror() returns bigint [wait_for_async_mirror_wrapper]": {
+            "add": "koldstore.wait_for_async_mirror()",
+            "name": "wait_for_async_mirror",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.wait_for_async_mirror()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$wait_for_async_mirror_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function spock_pk_object(rel regclass, obj jsonb) returns jsonb [sql:8f43ded2dfa8]": {
+            "add": "koldstore.spock_pk_object(rel regclass, obj jsonb)",
+            "name": "spock_pk_object",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.spock_pk_object(rel regclass, obj jsonb)\n RETURNS jsonb\n LANGUAGE sql\n STABLE\n SET search_path TO 'pg_catalog'\nAS $function$\n  SELECT coalesce(jsonb_object_agg(a.attname, obj -> a.attname::text), '{}'::jsonb)\n  FROM pg_index i\n  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)\n  WHERE i.indrelid = rel AND i.indisprimary\n$function$\n",
+            "revoke_public": false
+        },
+        "function cancel_job(job_id uuid) returns boolean security definer [cancel_job_pg_wrapper]": {
+            "add": "koldstore.cancel_job(job_id uuid)",
+            "name": "cancel_job",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_job(job_id uuid)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$cancel_job_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function disable_async_mirror() returns boolean security definer [disable_async_mirror_wrapper]": {
+            "add": "koldstore.disable_async_mirror()",
+            "name": "disable_async_mirror",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.disable_async_mirror()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$disable_async_mirror_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_attach_insert_guards() returns bigint [internal_attach_insert_guards_wrapper]": {
+            "add": "koldstore.internal_attach_insert_guards()",
+            "name": "internal_attach_insert_guards",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_attach_insert_guards()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_attach_insert_guards_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function table_status(table_name regclass) returns jsonb security definer [table_status_pg_wrapper]": {
+            "add": "koldstore.table_status(table_name regclass)",
+            "name": "table_status",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.table_status(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$table_status_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_encode_sort_key(value anyelement) returns bytea [internal_encode_sort_key_wrapper]": {
+            "add": "koldstore.internal_encode_sort_key(value anyelement)",
+            "name": "internal_encode_sort_key",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_encode_sort_key(value anyelement)\n RETURNS bytea\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_encode_sort_key_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_ensure_manifest_row(p_table_oid oid) returns void security definer [sql:456fd88ef614]": {
+            "add": "koldstore.internal_ensure_manifest_row(p_table_oid oid)",
+            "name": "internal_ensure_manifest_row",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_ensure_manifest_row(p_table_oid oid)\n RETURNS void\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'koldstore'\nAS $function$\n  INSERT INTO koldstore.manifest (\n    table_oid,\n    scope_key,\n    sync_state\n  )\n  VALUES (p_table_oid, '', 'pending_write')\n  ON CONFLICT (table_oid, scope_key) DO NOTHING;\n$function$\n",
+            "revoke_public": false
+        },
+        "function hydrate_pk(table_name regclass, pk jsonb) returns jsonb security definer [hydrate_pk_pg_wrapper]": {
+            "add": "koldstore.hydrate_pk(table_name regclass, pk jsonb)",
+            "name": "hydrate_pk",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.hydrate_pk(table_name regclass, pk jsonb)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$hydrate_pk_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function cancel_table_jobs(table_name regclass) returns bigint security definer [cancel_table_jobs_pg_wrapper]": {
+            "add": "koldstore.cancel_table_jobs(table_name regclass)",
+            "name": "cancel_table_jobs",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_table_jobs(table_name regclass)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$cancel_table_jobs_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_run_flush_scheduler_tick() returns boolean security definer [run_flush_scheduler_tick_pg_wrapper]": {
+            "add": "koldstore.internal_run_flush_scheduler_tick()",
+            "name": "internal_run_flush_scheduler_tick",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_run_flush_scheduler_tick()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$run_flush_scheduler_tick_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function purge_old_jobs(batch_limit integer DEFAULT 100) returns bigint security definer [purge_old_jobs_pg_wrapper]": {
+            "add": "koldstore.purge_old_jobs(batch_limit integer)",
+            "name": "purge_old_jobs",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_old_jobs(batch_limit integer DEFAULT 100)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$purge_old_jobs_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]": {
+            "add": "koldstore.reconcile_spock_conflicts(max_items integer)",
+            "name": "reconcile_spock_conflicts",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.reconcile_spock_conflicts(max_items integer DEFAULT 200)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'koldstore'\n SET session_replication_role TO 'replica'\nAS $function$\nDECLARE\n  t record;\n  o record;\n  r record;\n  rel regclass;\n  origin_name constant text := 'koldstore_reconcile';\n  txns int := 0; deletes int := 0; failed int := 0; skipped int := 0; applied int := 0;\n  outcome text;\nBEGIN\n  IF to_regclass('spock.exception_log') IS NULL OR to_regclass('spock.resolutions') IS NULL THEN\n    RAISE EXCEPTION 'koldstore.reconcile_spock_conflicts: Spock is not installed in this database';\n  END IF;\n  IF current_setting('koldstore.capture_replicated_changes', true) IS DISTINCT FROM 'on' THEN\n    RAISE EXCEPTION 'koldstore.reconcile_spock_conflicts needs koldstore.capture_replicated_changes = on (restart), otherwise the mirror would not see the replayed changes';\n  END IF;\n  IF NOT pg_try_advisory_lock(hashtext('koldstore.reconcile_spock_conflicts')) THEN\n    RETURN jsonb_build_object('busy', true);\n  END IF;\n  BEGIN\n    IF NOT EXISTS (SELECT 1 FROM pg_replication_origin WHERE roname = origin_name) THEN\n      PERFORM pg_replication_origin_create(origin_name);\n    END IF;\n    PERFORM pg_replication_origin_session_setup(origin_name);\n\n    -- 1. discarded transactions: replay every logged operation of each, in order\n    FOR t IN\n      SELECT e.remote_origin, e.remote_xid, min(e.remote_commit_ts) AS ts\n      FROM spock.exception_log e\n      WHERE e.error_message LIKE 'logical replication did not find row to be %'\n        AND EXISTS (SELECT 1 FROM koldstore.schemas s\n                    WHERE s.table_oid = to_regclass(format('%I.%I', e.table_schema, e.table_name))::oid AND s.active)\n        AND NOT EXISTS (SELECT 1 FROM koldstore.spock_reconciled x\n                        WHERE x.item_key = 'txn:' || e.remote_origin || ':' || e.remote_xid)\n      GROUP BY e.remote_origin, e.remote_xid\n      ORDER BY min(e.remote_commit_ts)\n      LIMIT max_items\n    LOOP\n      BEGIN\n        FOR o IN\n          SELECT DISTINCT ON (command_counter) *\n          FROM spock.exception_log\n          WHERE remote_origin = t.remote_origin AND remote_xid = t.remote_xid\n            AND operation IN ('INSERT', 'UPDATE', 'DELETE')\n          ORDER BY command_counter, retry_errored_at DESC\n        LOOP\n          rel := to_regclass(format('%I.%I', o.table_schema, o.table_name));\n          IF rel IS NULL THEN\n            RAISE EXCEPTION 'table %.% does not exist on this node', o.table_schema, o.table_name;\n          END IF;\n          outcome := koldstore.spock_replay_operation(rel, o.operation,\n            koldstore.spock_tuple_object(o.remote_new_tup), koldstore.spock_tuple_object(o.remote_old_tup));\n          IF outcome = 'applied' THEN applied := applied + 1; ELSE skipped := skipped + 1; END IF;\n        END LOOP;\n        INSERT INTO koldstore.spock_reconciled (item_key, status)\n          VALUES ('txn:' || t.remote_origin || ':' || t.remote_xid, 'replayed');\n        txns := txns + 1;\n      EXCEPTION WHEN OTHERS THEN\n        INSERT INTO koldstore.spock_reconciled (item_key, status, detail)\n          VALUES ('txn:' || t.remote_origin || ':' || t.remote_xid, 'failed', SQLERRM)\n          ON CONFLICT (item_key) DO NOTHING;\n        failed := failed + 1;\n      END;\n    END LOOP;\n\n    -- 2. skipped deletes of rows that are cold here\n    FOR r IN\n      SELECT c.id, c.node_name, c.relname, c.remote_tuple\n      FROM spock.resolutions c\n      WHERE c.conflict_type = 'delete_missing'\n        AND EXISTS (SELECT 1 FROM koldstore.schemas s WHERE s.table_oid = to_regclass(c.relname)::oid AND s.active)\n        AND NOT EXISTS (SELECT 1 FROM koldstore.spock_reconciled x WHERE x.item_key = 'res:' || c.node_name || ':' || c.id)\n      ORDER BY c.log_time\n      LIMIT max_items\n    LOOP\n      BEGIN\n        outcome := koldstore.spock_replay_operation(to_regclass(r.relname), 'DELETE', NULL, r.remote_tuple::jsonb);\n        INSERT INTO koldstore.spock_reconciled (item_key, status)\n          VALUES ('res:' || r.node_name || ':' || r.id, CASE WHEN outcome = 'applied' THEN 'replayed' ELSE 'skipped' END);\n        deletes := deletes + 1;\n      EXCEPTION WHEN OTHERS THEN\n        INSERT INTO koldstore.spock_reconciled (item_key, status, detail)\n          VALUES ('res:' || r.node_name || ':' || r.id, 'failed', SQLERRM)\n          ON CONFLICT (item_key) DO NOTHING;\n        failed := failed + 1;\n      END;\n    END LOOP;\n\n    PERFORM pg_replication_origin_session_reset();\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM pg_replication_origin_session_reset();\n    PERFORM pg_advisory_unlock(hashtext('koldstore.reconcile_spock_conflicts'));\n    RAISE;\n  END;\n  PERFORM pg_advisory_unlock(hashtext('koldstore.reconcile_spock_conflicts'));\n  RETURN jsonb_build_object('transactions', txns, 'deletes', deletes, 'operations_applied', applied,\n                            'operations_skipped', skipped, 'failed', failed);\nEND\n$function$\n",
+            "revoke_public": true
+        },
+        "function verify_table_integrity(table_name regclass) returns jsonb security definer [verify_table_integrity_pg_wrapper]": {
+            "add": "koldstore.verify_table_integrity(table_name regclass)",
+            "name": "verify_table_integrity",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.verify_table_integrity(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$verify_table_integrity_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function spock_replay_operation(rel regclass, op text, new_obj jsonb, old_obj jsonb) returns text [plpgsql:95bd3d1aadad]": {
+            "add": "koldstore.spock_replay_operation(rel regclass, op text, new_obj jsonb, old_obj jsonb)",
+            "name": "spock_replay_operation",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.spock_replay_operation(rel regclass, op text, new_obj jsonb, old_obj jsonb)\n RETURNS text\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog', 'koldstore'\nAS $function$\nDECLARE\n  managed boolean := EXISTS (SELECT 1 FROM koldstore.schemas s WHERE s.table_oid = rel::oid AND s.active);\n  key_obj jsonb := koldstore.spock_pk_object(rel, coalesce(old_obj, new_obj));\n  patch jsonb;\n  n bigint;\n  outcome jsonb;\nBEGIN\n  IF op = 'INSERT' THEN\n    EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(NULL::%s, $1) ON CONFLICT DO NOTHING', rel, rel)\n      USING new_obj;\n    GET DIAGNOSTICS n = ROW_COUNT;\n    RETURN CASE WHEN n > 0 THEN 'applied' ELSE 'skipped' END;\n  ELSIF op = 'UPDATE' THEN\n    patch := new_obj - ARRAY(SELECT jsonb_object_keys(koldstore.spock_pk_object(rel, new_obj)));\n    IF patch = '{}'::jsonb THEN RETURN 'skipped'; END IF;\n    IF managed THEN\n      outcome := koldstore.update_row(rel, key_obj, patch);\n      RETURN CASE WHEN (outcome ->> 'updated')::boolean THEN 'applied' ELSE 'skipped' END;\n    END IF;\n    EXECUTE format('UPDATE %s t SET %s FROM jsonb_populate_record(NULL::%s, $1) r WHERE %s', rel,\n      (SELECT string_agg(format('%I = r.%I', k, k), ', ') FROM jsonb_object_keys(patch) k), rel,\n      (SELECT string_agg(format('t.%I = r.%I', k, k), ' AND ') FROM jsonb_object_keys(key_obj) k))\n      USING new_obj;\n    GET DIAGNOSTICS n = ROW_COUNT;\n    RETURN CASE WHEN n > 0 THEN 'applied' ELSE 'skipped' END;\n  ELSIF op = 'DELETE' THEN\n    IF managed THEN\n      outcome := koldstore.delete_row(rel, key_obj);\n      RETURN CASE WHEN (outcome ->> 'deleted')::boolean THEN 'applied' ELSE 'skipped' END;\n    END IF;\n    EXECUTE format('DELETE FROM %s t USING jsonb_populate_record(NULL::%s, $1) r WHERE %s', rel, rel,\n      (SELECT string_agg(format('t.%I = r.%I', k, k), ' AND ') FROM jsonb_object_keys(key_obj) k))\n      USING key_obj;\n    GET DIAGNOSTICS n = ROW_COUNT;\n    RETURN CASE WHEN n > 0 THEN 'applied' ELSE 'skipped' END;\n  END IF;\n  RETURN 'skipped';\nEND\n$function$\n",
+            "revoke_public": false
+        },
+        "function internal_ensure_async_mirror_worker() returns boolean security definer [request_async_mirror_maintenance_pg_wrapper]": {
+            "add": "koldstore.internal_ensure_async_mirror_worker()",
+            "name": "internal_ensure_async_mirror_worker",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_ensure_async_mirror_worker()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$request_async_mirror_maintenance_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function flush_table(table_name regclass, force boolean DEFAULT false) returns jsonb security definer [flush_table_pg_wrapper]": {
+            "add": "koldstore.flush_table(table_name regclass, force boolean)",
+            "name": "flush_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.flush_table(table_name regclass, force boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$flush_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function _cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text) returns void [cold_insert_guard_check_pg_wrapper]": {
+            "add": "koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)",
+            "name": "_cold_insert_guard_check",
+            "create": "CREATE OR REPLACE FUNCTION koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$cold_insert_guard_check_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function backup_manifest(table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [backup_manifest_pg_wrapper]": {
+            "add": "koldstore.backup_manifest(table_name regclass)",
+            "name": "backup_manifest",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.backup_manifest(table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$backup_manifest_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function alter_storage_credentials(name text, credentials jsonb) returns void security definer [alter_storage_credentials_pg_wrapper]": {
+            "add": "koldstore.alter_storage_credentials(name text, credentials jsonb)",
+            "name": "alter_storage_credentials",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_credentials(name text, credentials jsonb)\n RETURNS void\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$alter_storage_credentials_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function set_table_auto_flush(table_name regclass, enabled boolean) returns boolean security definer [set_table_auto_flush_pg_wrapper]": {
+            "add": "koldstore.set_table_auto_flush(table_name regclass, enabled boolean)",
+            "name": "set_table_auto_flush",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.set_table_auto_flush(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_table_auto_flush_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function enqueue_flush_job(table_name regclass, force boolean DEFAULT false) returns uuid security definer [enqueue_flush_job_pg_wrapper]": {
+            "add": "koldstore.enqueue_flush_job(table_name regclass, force boolean)",
+            "name": "enqueue_flush_job",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.enqueue_flush_job(table_name regclass, force boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$enqueue_flush_job_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false) returns jsonb [sync_sql_objects_pg_wrapper]": {
+            "add": "koldstore.sync_sql_objects(dry_run boolean, drop_unexpected boolean)",
+            "name": "sync_sql_objects",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$sync_sql_objects_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [delete_row_pg_wrapper]": {
+            "add": "koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean)",
+            "name": "delete_row",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$delete_row_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]": {
+            "add": "koldstore.recover_segments(table_name regclass, dry_run boolean)",
+            "name": "recover_segments",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.recover_segments(table_name regclass, dry_run boolean DEFAULT false)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$recover_segments_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_set_async_mirror_ensure_paused(paused boolean) returns boolean security definer [set_async_mirror_ensure_paused_pg_wrapper]": {
+            "add": "koldstore.internal_set_async_mirror_ensure_paused(paused boolean)",
+            "name": "internal_set_async_mirror_ensure_paused",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_set_async_mirror_ensure_paused(paused boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_async_mirror_ensure_paused_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_bump_row_counts(p_table_oid oid, p_hot_delta bigint, p_mirror_delta bigint) returns void security definer [plpgsql:24e0158cd40e]": {
+            "add": "koldstore.internal_bump_row_counts(p_table_oid oid, p_hot_delta bigint, p_mirror_delta bigint)",
+            "name": "internal_bump_row_counts",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_bump_row_counts(p_table_oid oid, p_hot_delta bigint, p_mirror_delta bigint)\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'koldstore'\nAS $function$\nBEGIN\n  -- Used by commit-time counter flush and maintenance paths. DML capture triggers should call\n  -- koldstore.internal_record_row_count_delta instead (in-memory, no per-row manifest IO).\n  -- After a successful flush (`in_sync`), subsequent DML dirties the catalog sync_state to\n  -- `pending_write` so operators and flush eligibility see hot changes.\n  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);\n  UPDATE koldstore.manifest\n  SET\n    hot_row_count = GREATEST(0, hot_row_count + p_hot_delta),\n    mirror_row_count = GREATEST(0, mirror_row_count + p_mirror_delta),\n    sync_state = CASE\n      WHEN sync_state = 'in_sync' THEN 'pending_write'\n      ELSE sync_state\n    END,\n    updated_at = now()\n  WHERE table_oid = p_table_oid\n    AND scope_key = '';\nEND;\n$function$\n",
+            "revoke_public": false
+        },
+        "function internal_refresh_row_counts(p_table_oid oid, p_hot_rows bigint, p_mirror_rows bigint) returns void security definer [plpgsql:2a7409791ece]": {
+            "add": "koldstore.internal_refresh_row_counts(p_table_oid oid, p_hot_rows bigint, p_mirror_rows bigint)",
+            "name": "internal_refresh_row_counts",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_refresh_row_counts(p_table_oid oid, p_hot_rows bigint, p_mirror_rows bigint)\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'koldstore'\nAS $function$\nBEGIN\n  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);\n  UPDATE koldstore.manifest\n  SET\n    hot_row_count = GREATEST(0, p_hot_rows),\n    mirror_row_count = GREATEST(0, p_mirror_rows),\n    updated_at = now()\n  WHERE table_oid = p_table_oid\n    AND scope_key = '';\nEND;\n$function$\n",
+            "revoke_public": false
+        },
+        "function internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint) returns void [internal_record_row_count_delta_wrapper]": {
+            "add": "koldstore.internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint)",
+            "name": "internal_record_row_count_delta",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_record_row_count_delta_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [update_row_pg_wrapper]": {
+            "add": "koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean)",
+            "name": "update_row",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$update_row_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]": {
+            "add": "koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean)",
+            "name": "alter_storage_location",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$alter_storage_location_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false) returns jsonb security definer [validate_cold_storage_pg_wrapper]": {
+            "add": "koldstore.validate_cold_storage(table_name regclass, deep boolean)",
+            "name": "validate_cold_storage",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$validate_cold_storage_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function internal_apply_flush_row_counts(p_table_oid oid, p_mirror_pruned bigint, p_hot_pruned bigint, p_cold_rows_added bigint) returns void security definer [plpgsql:1f5183cbcf0b]": {
+            "add": "koldstore.internal_apply_flush_row_counts(p_table_oid oid, p_mirror_pruned bigint, p_hot_pruned bigint, p_cold_rows_added bigint)",
+            "name": "internal_apply_flush_row_counts",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_apply_flush_row_counts(p_table_oid oid, p_mirror_pruned bigint, p_hot_pruned bigint, p_cold_rows_added bigint)\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'koldstore'\nAS $function$\nBEGIN\n  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);\n  UPDATE koldstore.manifest\n  SET\n    mirror_row_count = GREATEST(0, mirror_row_count - p_mirror_pruned),\n    hot_row_count = GREATEST(0, hot_row_count - p_hot_pruned),\n    cold_row_count = GREATEST(0, cold_row_count + p_cold_rows_added),\n    updated_at = now()\n  WHERE table_oid = p_table_oid\n    AND scope_key = '';\nEND;\n$function$\n",
+            "revoke_public": false
+        },
+        "function unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean) returns bigint security definer [unmanage_table_pg_wrapper]": {
+            "add": "koldstore.unmanage_table(table_name regclass, rehydrate boolean, drop_cold boolean)",
+            "name": "unmanage_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean)\n RETURNS bigint\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$unmanage_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [list_jobs_pg_wrapper]": {
+            "add": "koldstore.list_jobs(statuses jsonb, job_types jsonb, table_name regclass)",
+            "name": "list_jobs",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$list_jobs_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]": {
+            "add": "koldstore.rebuild_segment_summaries(table_name regclass, dry_run boolean, max_segments integer)",
+            "name": "rebuild_segment_summaries",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$rebuild_segment_summaries_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]": {
+            "add": "koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean)",
+            "name": "register_storage",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$register_storage_pg_with_default_templates_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false) returns jsonb security definer [purge_deferred_cold_objects_pg_wrapper]": {
+            "add": "koldstore.purge_deferred_cold_objects(batch_limit integer, older_than_seconds integer, dry_run boolean)",
+            "name": "purge_deferred_cold_objects",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$purge_deferred_cold_objects_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]": {
+            "add": "koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean)",
+            "name": "register_storage",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$register_storage_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer) returns TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text) security definer [changes_since_pg_wrapper]": {
+            "add": "koldstore.changes_since(table_name regclass, since_seq bigint, limit_rows integer, last_rows integer)",
+            "name": "changes_since",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer)\n RETURNS TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text)\n LANGUAGE c\n STABLE PARALLEL SAFE SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$changes_since_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false) returns uuid security definer [manage_table_pg_wrapper]": {
+            "add": "koldstore.manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint, max_rows_per_file bigint, table_type text, scope_column text, migration_order_by text, compression text, target_file_size_mb bigint, auto_flush boolean, segment_order_column text, pruning_columns text[], bloom_filter_columns text[], parquet_row_group_size bigint, parquet_data_page_row_count_limit bigint, parquet_bloom_filter_fpp double precision, allow_fk_hot_only boolean)",
+            "name": "manage_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$manage_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        }
+    }
+}

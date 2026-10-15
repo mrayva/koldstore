@@ -1,0 +1,125 @@
+ clean_before | steps | skipped | dry_run
+--------------+-------+---------+---------
+ t            |     0 |       0 | t
+(1 row)
+
+BEGIN
+ALTER EXTENSION
+DROP FUNCTION
+CREATE FUNCTION
+ALTER EXTENSION
+ drifted_is_detected
+---------------------
+ f
+(1 row)
+
+ dry_run |             actions
+---------+---------------------------------
+ t       | {drop_function,create_function}
+(1 row)
+
+ manage_table_overloads_after_dry_run
+--------------------------------------
+                                    1
+(1 row)
+
+ repaired | applied
+----------+---------
+ t        |       2
+(1 row)
+
+ manage_table_overloads | arguments
+------------------------+-----------
+                      1 |        18
+(1 row)
+
+ ok_after
+----------
+ t
+(1 row)
+
+ROLLBACK
+BEGIN
+ALTER TABLE
+   action   |                                statement
+------------+-------------------------------------------------------------------------
+ add_column | ALTER TABLE koldstore.cold_segment_index ADD COLUMN value_summary bytea
+(1 row)
+
+ repaired
+----------
+ t
+(1 row)
+
+ value_summary_columns
+-----------------------
+                     1
+(1 row)
+
+ROLLBACK
+BEGIN
+ALTER EXTENSION
+DROP TABLE
+             actions
+---------------------------------
+ {create_table,add_foreign_keys}
+(1 row)
+
+ repaired
+----------
+ t
+(1 row)
+
+ primary_keys | foreign_keys | checks | indexes | extension_member
+--------------+--------------+--------+---------+------------------
+            1 |            1 |      4 |       3 |                1
+(1 row)
+
+ROLLBACK
+BEGIN
+CREATE FUNCTION
+ALTER EXTENSION
+ steps |                             reason
+-------+----------------------------------------------------------------
+     0 | unexpected function; pass drop_unexpected => true to remove it
+(1 row)
+
+ applied | still_ok
+---------+----------
+       0 | f
+(1 row)
+
+ leftover_kept
+---------------
+             1
+(1 row)
+
+ applied | repaired
+---------+----------
+       1 | t
+(1 row)
+
+ leftover_after_drop
+---------------------
+                   0
+(1 row)
+
+ROLLBACK
+BEGIN
+CREATE FUNCTION
+ not_listed_so_clean
+---------------------
+ t
+(1 row)
+
+ROLLBACK
+CREATE ROLE
+SET
+psql:<PATH>: ERROR:  must be superuser to repair koldstore SQL objects
+RESET
+DROP ROLE
+ clean_at_the_end
+------------------
+ t
+(1 row)
+

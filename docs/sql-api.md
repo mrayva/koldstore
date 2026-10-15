@@ -780,6 +780,20 @@ several) are eligible (others are reported as ineligible). Call it repeatedly un
 summary and stay unsummarized). Owner or superuser. Sessions that already planned a lookup keep using the
 unpruned candidate list until the next manifest change, which is correct, only slower.
 
+### `koldstore.sync_sql_objects`
+
+```sql
+SELECT koldstore.sync_sql_objects();                                -- the repair plan, nothing changed
+SELECT koldstore.sync_sql_objects(dry_run => false);                -- apply it
+SELECT koldstore.sync_sql_objects(false, drop_unexpected => true);  -- also remove functions the library does not know
+```
+
+Repairs a database whose koldstore SQL objects differ from the loaded library (see `validate_sql_objects`).
+**Returns:** `jsonb` `{dry_run, ok_before, steps[], applied, skipped[], ok_after, still_missing[], still_unexpected[]}`;
+each step names its action (`drop_function`, `create_table`, `add_foreign_keys`, `add_column`, `create_function`) and
+the statements it runs. A real run executes the plan in one transaction and re-checks. Columns and data are never
+dropped. Superuser only. See "SQL object drift" in [Backup and Operations](backup-and-operations.md).
+
 ## DML Boundaries
 
 - Normal hot `INSERT`, `UPDATE`, and `DELETE` operate on the heap and mark local

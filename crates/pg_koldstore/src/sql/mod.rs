@@ -24,3 +24,5 @@ pub mod session;
 pub mod summaries;
 pub mod sort_key;
 pub mod storage;
+#[cfg(feature = "pg")]
+pub mod sync;
