@@ -53,7 +53,10 @@ returns only the segments that may contain the key.
 * The ADR-007 stress with a looping inline flusher, which had lost 35-50% of hydrator throughput to this effect,
   now loses ~0% at a flush every 0.5 s (39.2 tps, equal to no flusher) and ~19% at a flush every 50 ms
   (31.7 tps against 16.5), even with more flushes completing.
-* Existing segments keep `NULL` until rewritten; a future `rebuild`/compaction pass can fill them.
+* Existing segments keep `NULL` until rewritten; `koldstore.rebuild_segment_summaries()` fills them without
+  rewriting anything: it reads each object once, verifies its checksum and row count against the catalog, and
+  stores the bitmap flush would have written (byte-identical, covered by the `rebuild_segment_summaries` SQL
+  case). Segments over `SUMMARY_MAX_ROWS` stay unsummarized by design.
 * Range and `IN`-list predicates are unchanged (they use min/max only); `IN` lists and the join/probe shapes are a
   natural extension (probe each element) but are not done here.
 * Storage grows by up to 8 KiB per segment per summarized column, against segment files that are far larger.

@@ -22,7 +22,7 @@ use pgrx::datum::DatumWithOid;
 use serde_json::{Value, json};
 
 /// Active managed table OIDs, or just `only` when given (which must be managed).
-fn managed_table_oids(only: Option<pgrx::pg_sys::Oid>) -> Result<Vec<pgrx::pg_sys::Oid>, String> {
+pub(super) fn managed_table_oids(only: Option<pgrx::pg_sys::Oid>) -> Result<Vec<pgrx::pg_sys::Oid>, String> {
     let all: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
         client
             .select(
@@ -45,7 +45,7 @@ fn managed_table_oids(only: Option<pgrx::pg_sys::Oid>) -> Result<Vec<pgrx::pg_sy
     }
 }
 
-fn authorize(table: Option<pgrx::pg_sys::Oid>, what: &str) {
+pub(super) fn authorize(table: Option<pgrx::pg_sys::Oid>, what: &str) {
     match table {
         Some(oid) => crate::security::require_relation_owner_or_superuser(oid, what),
         None => crate::security::require_superuser(what),
@@ -53,7 +53,7 @@ fn authorize(table: Option<pgrx::pg_sys::Oid>, what: &str) {
 }
 
 /// One query returning a single `jsonb` value rendered as text, bound with `args`.
-fn json_query(sql: &str, args: &[DatumWithOid<'_>]) -> Result<Value, String> {
+pub(super) fn json_query(sql: &str, args: &[DatumWithOid<'_>]) -> Result<Value, String> {
     let text = pgrx::Spi::get_one_with_args::<String>(sql, args)
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| "null".to_string());
@@ -74,14 +74,14 @@ fn active_segments(table_oid: pgrx::pg_sys::Oid) -> Result<Vec<Value>, String> {
     Ok(value.as_array().cloned().unwrap_or_default())
 }
 
-struct TableTarget {
-    namespace: String,
-    name: String,
-    storage: koldstore_catalog::decode::FlushStorageContext,
-    prefix: String,
+pub(super) struct TableTarget {
+    pub(super) namespace: String,
+    pub(super) name: String,
+    pub(super) storage: koldstore_catalog::decode::FlushStorageContext,
+    pub(super) prefix: String,
 }
 
-fn table_target(table_oid: pgrx::pg_sys::Oid) -> Result<TableTarget, String> {
+pub(super) fn table_target(table_oid: pgrx::pg_sys::Oid) -> Result<TableTarget, String> {
     use koldstore_storage::{PathTemplate, render_regular_table_prefix};
 
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
@@ -411,6 +411,41 @@ fn purge_deferred_value(
         "errors": errors,
         "remaining": remaining,
     }))
+}
+
+/// Objects handled per maintenance tick; a larger backlog drains over successive ticks.
+const AUTO_PURGE_BATCH: i64 = 500;
+
+/// One automatic purge pass for the maintenance worker.
+///
+/// `Ok(None)` when there is nothing to do: retention is off (`koldstore.cold_object_retention_seconds`
+/// is 0), `koldstore.cold_object_auto_purge` is off, the retention queue does not exist in this
+/// database yet, or nothing has been queued longer than the window. Otherwise it purges one bounded
+/// batch exactly as `koldstore.purge_deferred_cold_objects()` would (same live-prefix protection).
+pub(crate) fn auto_purge_tick() -> Result<Option<Value>, String> {
+    let window = i64::from(crate::guc::cold_object_retention_seconds());
+    if window <= 0 || !crate::guc::cold_object_auto_purge() {
+        return Ok(None);
+    }
+    let has_queue = pgrx::Spi::get_one::<bool>(
+        "SELECT to_regclass('koldstore.deferred_cold_deletes') IS NOT NULL",
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !has_queue {
+        return Ok(None);
+    }
+    let due = pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM koldstore.deferred_cold_deletes \
+         WHERE staged_at <= now() - make_interval(secs => $1::double precision))",
+        &[DatumWithOid::from(window)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !due {
+        return Ok(None);
+    }
+    purge_deferred_value(AUTO_PURGE_BATCH, None, false).map(Some)
 }
 
 /// Deletes cold objects whose retention window has passed.

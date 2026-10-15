@@ -38,7 +38,10 @@ pub use reader::{
     ParquetReadProfile, ParquetReadRequest,
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
-pub use value_summary::{add_column_to_value_summary, supports_value_summary};
+pub use value_summary::{
+    RebuiltSummary, add_column_to_value_summary, rebuild_value_summary_from_parquet,
+    supports_value_summary,
+};
 pub use writer::{
     encode_parquet_segment_bytes, plan_clean_cold_record, record_batch_from_clean_cold_records,
     validate_finalized_parquet_segment, validate_parquet_bytes, CleanColdRecordPlan,

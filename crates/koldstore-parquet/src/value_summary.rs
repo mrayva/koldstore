@@ -82,6 +82,66 @@ pub fn add_column_to_value_summary(
     Ok(())
 }
 
+/// A summary rebuilt from an existing Parquet object.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RebuiltSummary {
+    /// The bitmap, or `None` when the segment is too large to carry one (see `SUMMARY_MAX_ROWS`).
+    pub summary: Option<Vec<u8>>,
+    /// Rows the object holds (the Parquet footer's row count).
+    pub rows: usize,
+}
+
+/// Rebuilds the value summary of `column` from a whole Parquet object, reading only that column.
+///
+/// This is what the flush writer computes while it writes a segment, recomputed for segments written
+/// before summaries existed. The summary covers every row in the object (delete markers included), so
+/// the result is trusted only when every row contributed a value.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be read, the column is missing or has an unexpected Arrow
+/// type, or a row has no value (a partially filled summary would produce false negatives).
+pub fn rebuild_value_summary_from_parquet(
+    data: impl Into<bytes::Bytes>,
+    column: &str,
+    ty: SortKeyType,
+) -> Result<RebuiltSummary, String> {
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data.into())
+        .map_err(|error| format!("cannot read parquet object: {error}"))?;
+    let root = builder
+        .schema()
+        .index_of(column)
+        .map_err(|_| format!("column `{column}` is not in the object"))?;
+    let mask = ProjectionMask::roots(builder.parquet_schema(), [root]);
+    let reader = builder
+        .with_projection(mask)
+        .build()
+        .map_err(|error| format!("cannot read parquet object: {error}"))?;
+
+    let mut summary = ValueSummaryBuilder::new();
+    let mut rows = 0_usize;
+    for batch in reader {
+        let batch = batch.map_err(|error| format!("cannot read parquet object: {error}"))?;
+        rows += batch.num_rows();
+        add_column_to_value_summary(&mut summary, &batch, column, ty)?;
+    }
+    // An oversized segment stops collecting (len 0) and gets no summary; otherwise every row must
+    // have contributed a value.
+    if summary.len() != 0 && summary.len() != rows {
+        return Err(format!(
+            "{} of {rows} rows have no value in `{column}`; refusing a partial summary",
+            rows - summary.len()
+        ));
+    }
+    Ok(RebuiltSummary {
+        summary: summary.finish(),
+        rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -139,5 +199,64 @@ mod tests {
         );
         assert!(!supports_value_summary(SortKeyType::Timestamptz));
         assert!(supports_value_summary(SortKeyType::Uuid));
+    }
+
+    #[test]
+    fn a_parquet_object_rebuilds_the_same_summary_the_writer_would() {
+        use parquet::arrow::ArrowWriter;
+
+        let ids: Vec<Option<i64>> = (0..500).map(|n| Some(n * 31)).collect();
+        let batch = batch(&ids);
+        let mut buffer = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        let rebuilt = rebuild_value_summary_from_parquet(
+            bytes::Bytes::from(buffer.clone()),
+            "id",
+            SortKeyType::Int8,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.rows, 500);
+        let summary = rebuilt.summary.expect("fits under the cap");
+        for id in ids.iter().flatten() {
+            let probe = encode_sort_key(&SortKeyValue::Int8(*id)).unwrap();
+            assert!(summary_may_contain(&summary, &probe), "id {id}");
+        }
+
+        // Identical to feeding the same batch to the builder directly (what flush does).
+        let mut direct = ValueSummaryBuilder::new();
+        add_column_to_value_summary(&mut direct, &batch, "id", SortKeyType::Int8).unwrap();
+        assert_eq!(Some(summary), direct.finish());
+
+        let missing = rebuild_value_summary_from_parquet(
+            bytes::Bytes::from(buffer),
+            "nope",
+            SortKeyType::Int8,
+        );
+        assert!(missing.unwrap_err().contains("not in the object"));
+    }
+
+    #[test]
+    fn a_null_key_makes_the_rebuild_refuse_rather_than_guess() {
+        use parquet::arrow::ArrowWriter;
+
+        let batch = batch(&[Some(1), None, Some(3)]);
+        let mut buffer = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+        let error = rebuild_value_summary_from_parquet(
+            bytes::Bytes::from(buffer),
+            "id",
+            SortKeyType::Int8,
+        )
+        .unwrap_err();
+        assert!(error.contains("partial summary"), "{error}");
     }
 }

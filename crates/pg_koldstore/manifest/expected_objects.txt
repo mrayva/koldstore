@@ -149,6 +149,7 @@ function manage_table(table_name regclass, storage text, hot_row_limit bigint, m
 function preload_status() returns jsonb [preload_status_pg_wrapper]
 function purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false) returns jsonb security definer [purge_deferred_cold_objects_pg_wrapper]
 function purge_old_jobs(batch_limit integer DEFAULT 100) returns bigint security definer [purge_old_jobs_pg_wrapper]
+function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]
 function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]

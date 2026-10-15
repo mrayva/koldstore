@@ -1,0 +1,145 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 1200
+ rss_managed
+-------------
+ t
+(1 row)
+
+ rss_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+ round1
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round2
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round3
+--------
+ t
+(1 row)
+
+UPDATE 3
+ round4
+--------
+ t
+(1 row)
+
+RESET
+ several_segments
+------------------
+ t
+(1 row)
+
+SELECT 5
+ flush_wrote_every_summary
+---------------------------
+ t
+(1 row)
+
+ pruned_with_summaries
+-----------------------
+ t
+(1 row)
+
+UPDATE 5
+ pruned_without_summaries
+--------------------------
+                        1
+(1 row)
+
+ eligible | counts_every_segment | dry_run | rebuilt
+----------+----------------------+---------+---------
+ t        | t                    | t       |       0
+(1 row)
+
+ still_without_summary
+-----------------------
+                     5
+(1 row)
+
+ rebuilt_first_batch | two_fewer_remaining | failed
+---------------------+---------------------+--------
+                   2 | t                   |      0
+(1 row)
+
+ rebuilt_the_rest | remaining | failed
+------------------+-----------+--------
+ t                |         0 |      0
+(1 row)
+
+ bytes_differ_from_flush
+-------------------------
+                       0
+(1 row)
+
+ pruned_again
+--------------
+ t
+(1 row)
+
+ every_key_found
+-----------------
+ t
+(1 row)
+
+ updated_rows_visible | total_updates
+----------------------+---------------
+                   12 |            12
+(1 row)
+
+ rebuilt_again
+---------------
+             0
+(1 row)
+
+UPDATE 1
+UPDATE 1
+ rebuilt_with_bad_checksum | reported_failed | says_checksum | remaining
+---------------------------+-----------------+---------------+-----------
+                         0 |               1 | t             |         1
+(1 row)
+
+ summaries_left_null
+---------------------
+                   1
+(1 row)
+
+CREATE TABLE
+INSERT 0 20
+ rss_text_managed
+------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 20
+ rss_comp_managed
+------------------
+ t
+(1 row)
+
+       tbl       | eligible
+-----------------+----------
+ sqlreg.rss_comp | f
+ sqlreg.rss_text | f
+(2 rows)
+
+CREATE ROLE
+SET
+psql:<PATH>: ERROR:  permission denied for schema sqlreg at character 44
+psql:<PATH>: ERROR:  must be superuser to rebuild segment summaries
+RESET
+DROP ROLE

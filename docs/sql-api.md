@@ -95,6 +95,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.flush_execution` | string | `queue` | `queue`: `flush_table` enqueues a durable job and returns its UUID; a one-shot executor runs the work. `inline`: enqueue then run in the calling backend (SPI / `#[pg_test]` only). |
 | `koldstore.job_retention_days` | int | `30` | Days to retain terminal jobs before purge; `0` disables. Jobs still referenced by pending cold segments are never deleted. |
 | `koldstore.cold_object_retention_seconds` | int | `0` | Seconds to keep the cold objects of a dropped table (or `unmanage_table(drop_cold)`) before `purge_deferred_cold_objects()` may delete them; `0` deletes at commit. Superuser-only, so a table owner cannot disable it. See [Backup and Operations](backup-and-operations.md). |
+| `koldstore.cold_object_auto_purge` | bool | `on` | While `koldstore.cold_object_retention_seconds > 0`, each database's maintenance worker deletes retained cold objects whose window has passed (bounded batches, same live-prefix protection as `purge_deferred_cold_objects()`), so `koldstore.deferred_cold_deletes` does not grow without limit. `off` leaves purging to your own calls. No effect while retention is `0`. Superuser-only. |
 | `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Idle wake interval for the persistent WAL applier (clamped `1000..=300000`). Managed commits `SetLatch` it immediately regardless; this interval only matters while it is otherwise idle. Two roles: a missed-wake safety net, and bounding how far this database's slot can fall behind *unrelated* WAL other databases on the same PostgreSQL instance write while idle (every idle wake also runs a normal, cheap-when-caught-up drain pass). `SET`/`ALTER SYSTEM` + reload; the worker picks up changes on SIGHUP. |
 | `koldstore.hydrate_slot_lock_poll_ms` | int | `0` | Hydrate-on-write only. `0` (default): queue on the async-mirror slot lock, so the deadlock detector resolves lock cycles, but many concurrent hydrating transactions can starve the WAL applier and flush. A positive value polls instead (about 1.5-3x the throughput at 8 clients), but fails the statement with a retryable `serialization_failure` if still busy at the deadline. |
 | `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). Cap this on small machines (for example `8192`) via `ALTER DATABASE` so background workers see it. |
@@ -760,6 +761,24 @@ built against. **Returns:** `jsonb` `{ok, library_version, extension_version, mi
 `missing` is what the library expects but the database lacks; `unexpected` is what the database has that
 the library does not know (a changed function signature appears once in each). `ok = true` means no
 difference and matching versions. Read-only. See "SQL object drift" in `backup-and-operations.md`.
+
+### `koldstore.rebuild_segment_summaries`
+
+```sql
+SELECT koldstore.rebuild_segment_summaries(dry_run => true);                    -- count only
+SELECT koldstore.rebuild_segment_summaries('chat.messages', max_segments => 50); -- one table, bounded
+```
+
+Gives segments written before primary-key value summaries existed (ADR-009) the summary flush would have
+written, so a point lookup (`WHERE id = $1`) stops opening every such segment whose min/max range covers
+the key. **Returns:** `jsonb` `{dry_run, max_segments_per_table, rebuilt, tables[]}`; each table reports
+`rebuilt`, `remaining` (segments still without a summary), `too_large_for_a_summary` and `failed[]`. Each
+segment's object is read once and verified against the catalog (checksum and row count) before its summary
+is stored; one that does not verify is reported and left alone. Cold data is never modified. Only tables
+with a single-column `smallint`/`integer`/`bigint`/`uuid` key are eligible (others are reported as
+ineligible). Call it repeatedly until `remaining` is 0 (segments over 32,768 rows are too large to carry a
+summary and stay unsummarized). Owner or superuser. Sessions that already planned a lookup keep using the
+unpruned candidate list until the next manifest change, which is correct, only slower.
 
 ## DML Boundaries
 

@@ -106,6 +106,7 @@ fn run_maintenance_worker(database_oid: u32) {
                         database_oid,
                         target_maintenance_generation,
                     );
+                    run_auto_purge(database_oid);
                 }
                 Err(error) => {
                     pgrx::warning!(
@@ -166,6 +167,31 @@ fn run_maintenance_worker(database_oid: u32) {
         if !maintenance_due(database_oid) {
             return;
         }
+    }
+}
+
+/// Removes retained cold objects whose window has passed (see `sql::backup::auto_purge_tick`).
+///
+/// Runs in its own recoverable transaction after scheduling, so a storage outage here is logged and
+/// retried on the next tick but can never disturb flush scheduling.
+fn run_auto_purge(database_oid: u32) {
+    match super::txn::run_recoverable("cold object auto-purge", crate::sql::backup::auto_purge_tick) {
+        Ok(Some(report)) => {
+            let count = |key: &str| report.get(key).and_then(serde_json::Value::as_i64).unwrap_or(0);
+            if count("deleted") > 0 || count("failed") > 0 || count("skipped_live_prefix") > 0 {
+                pgrx::log!(
+                    "koldstore maintenance worker db={database_oid}: auto-purge deleted={} skipped_live_prefix={} failed={} remaining={}",
+                    count("deleted"),
+                    count("skipped_live_prefix"),
+                    count("failed"),
+                    count("remaining")
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => pgrx::warning!(
+            "koldstore maintenance worker db={database_oid}: auto-purge deferred: {error}"
+        ),
     }
 }
 

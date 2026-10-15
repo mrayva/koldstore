@@ -20,5 +20,7 @@ pub mod job_lock;
 pub mod migrate;
 pub mod ops;
 pub mod session;
+#[cfg(feature = "pg")]
+pub mod summaries;
 pub mod sort_key;
 pub mod storage;

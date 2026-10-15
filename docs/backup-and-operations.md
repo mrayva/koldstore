@@ -25,8 +25,9 @@ guarantee that:
   backup retention (superuser-only; in `postgresql.conf` so every session inherits it). `DROP TABLE` and
   `unmanage_table(drop_cold)` then record the objects in `koldstore.deferred_cold_deletes`
   (inside the same transaction, so an aborted DROP records nothing) and leave them in place. Schedule
-  `koldstore.purge_deferred_cold_objects()` (for example from pg_cron) to remove them once the window has
-  passed. If the keys cannot be recorded the DDL fails rather than deleting. A table dropped and recreated
+  `koldstore.purge_deferred_cold_objects()` to remove them once the window has passed, or leave
+  `koldstore.cold_object_auto_purge` on (the default) and each database's maintenance worker removes them
+  automatically, in bounded batches, as their window passes. If the keys cannot be recorded the DDL fails rather than deleting. A table dropped and recreated
   under the same name owns the same prefix again, so the purge never deletes a key under a live table's
   prefix. The default is `0`, the historical delete-at-commit behavior.
 - Or retain the object prefix yourself (object-store versioning or a lifecycle rule) and avoid the
@@ -134,6 +135,15 @@ above; `koldstore.validate_sql_objects` checks the database's SQL objects agains
 `koldstore.recover_segments` is a maintenance surface for orphan/pending
 objects; it does not create a coordinated backup or reconstruct arbitrary
 missing cold data.
+
+## Older segments and lookup speed
+
+Segments flushed before primary-key value summaries existed (ADR-009) carry no summary, so a point lookup
+opens every one of them whose min/max range covers the key; after hydrate-and-reflush churn that is nearly
+all of them. After upgrading, give them summaries once:
+`SELECT koldstore.rebuild_segment_summaries(dry_run => true);` to see how many, then call it without
+`dry_run` (repeatedly, until `remaining` is 0). It reads each object once and never changes cold data; see
+the [SQL reference](sql-api.md#koldstorerebuild_segment_summaries).
 
 ## SQL object drift
 

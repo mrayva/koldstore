@@ -30,6 +30,8 @@ static ALLOW_SAME_TXN_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(fal
 #[cfg(feature = "pg")]
 static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
+static COLD_OBJECT_AUTO_PURGE: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
 static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static HYDRATING: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -372,6 +374,14 @@ pub fn define_gucs() {
         GucContext::Suset,
         flags,
     );
+    GucRegistry::define_bool_guc(
+        c"koldstore.cold_object_auto_purge",
+        c"Deletes retained cold objects automatically once their retention window has passed.",
+        c"Only has an effect while koldstore.cold_object_retention_seconds > 0. On (default), each database's maintenance worker removes the cold objects of dropped tables whose window has passed, in bounded batches, so koldstore.deferred_cold_deletes does not grow without limit. Turn off to purge only by calling koldstore.purge_deferred_cold_objects() yourself. Superuser-only.",
+        &COLD_OBJECT_AUTO_PURGE,
+        GucContext::Suset,
+        flags,
+    );
     GucRegistry::define_string_guc(
         c"koldstore.flush_execution",
         c"How flush_table runs after enqueueing a durable job.",
@@ -610,6 +620,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::COLD_OBJECT_RETENTION_SECONDS_GUC,
             internal: false,
             default_value: "0",
+        },
+        GucDefinition {
+            name: settings::COLD_OBJECT_AUTO_PURGE_GUC,
+            internal: false,
+            default_value: "on",
         },
         GucDefinition {
             name: settings::FLUSH_EXECUTION_GUC,
@@ -1066,6 +1081,20 @@ pub fn flush_job_max_runtime_seconds() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    }
+}
+
+/// Whether the maintenance worker purges retained cold objects whose window has passed.
+#[must_use]
+pub fn cold_object_auto_purge() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        COLD_OBJECT_AUTO_PURGE.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
     }
 }
 
