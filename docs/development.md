@@ -157,6 +157,8 @@ The matrix runner executes non-E2E workspace tests once, then loops over Postgre
 
 For a single version, use `scripts/run-pg-e2e.sh 18`; use `scripts/run-pgrx-matrix.sh --pg-versions 18` for the version matrix. After the E2E runner prepares the worker-database pool and installs the extension, it executes the E2E crate with `KOLDSTORE_E2E_DB_POOL=1`. Override parallelism with `KOLDSTORE_E2E_THREADS=8`. Set `KOLDSTORE_E2E_SOAK=1` (optional `KOLDSTORE_E2E_SOAK_SECONDS`, default 45) to run the longer mixed-load soak; without it the soak fixture still runs for a few seconds.
 
+The runner executes in two phases. Phase 1 runs everything except the sub-second SLO tests at `KOLDSTORE_E2E_THREADS` parallelism. Phase 2 (`LATENCY_FILTER` in the script: `changes_since_latency`, worker-wake, persistent WAL applier, parallel-flush and queue-flush footprint tests) runs serially with `--retries 1`, because those assertions measure wall-clock latency and flake when they share a server with other parallel tests or a loaded machine. A retried pass prints a NOTE. Knobs: `KOLDSTORE_E2E_STRICT=1` (no retries), `KOLDSTORE_E2E_SINGLE_PHASE=1` (old single parallel run), `KOLDSTORE_E2E_PHASE=main|latency|all`.
+
 Every E2E test now calls a shared pgrx gate before running. The gate connects to the configured PostgreSQL port, verifies the server major version and listening port, and ensures `koldstore` is installed in the E2E database. If pgrx PostgreSQL is stopped or unreachable, the suite fails fast instead of letting contract-only tests pass.
 
 ## MinIO / S3-backed E2E

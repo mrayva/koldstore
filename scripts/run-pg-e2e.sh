@@ -352,4 +352,47 @@ if [[ "${KOLDSTORE_E2E_VERBOSE:-}" == "1" || "${KOLDSTORE_E2E_VERBOSE:-}" == "tr
   NEXT_ARGS+=(--no-capture)
 fi
 
-cargo nextest run "${NEXT_ARGS[@]}"
+# Timing-sensitive product-SLO and parallel-flush tests ("visible within one second", "worker wakes
+# without poll delay", the WAL applier under a write flood, several tables flushing at once). Run in
+# parallel with the rest of the suite they also measure the suite's own contention on the one shared
+# PostgreSQL server, and they flaked 1-3 per run on a busy machine while passing every time alone. So
+# they get their own serial phase after everything else, and one retry (a load blip does not fail the
+# run; a real regression fails both attempts). Retried passes are reported as FLAKY and counted below;
+# KOLDSTORE_E2E_STRICT=1 disables the retry, KOLDSTORE_E2E_SINGLE_PHASE=1 restores one parallel run,
+# KOLDSTORE_E2E_PHASE=main|latency runs just one phase.
+LATENCY_FILTER='test(dml::changes_since_latency::) | test(dml::aaa_changes_since_latency_diagnostics::) | test(managed_commit_wakes_sleeping_worker_without_poll_delay) | test(dml::persistent_wal_applier::) | test(flush_multiple_tables_in_parallel_with_light_dml) | test(queue_flush_does_not_stall_concurrent_hot_pk_work) | test(queue_flush_executor_startup_and_rss_stay_within_budget)'
+if [[ "${KOLDSTORE_E2E_SINGLE_PHASE:-}" == "1" || "${KOLDSTORE_E2E_SINGLE_PHASE:-}" == "true" ]]; then
+  cargo nextest run "${NEXT_ARGS[@]}"
+  exit $?
+fi
+
+PHASE="${KOLDSTORE_E2E_PHASE:-all}"
+RETRIES=1
+if [[ "${KOLDSTORE_E2E_STRICT:-}" == "1" || "${KOLDSTORE_E2E_STRICT:-}" == "true" ]]; then
+  RETRIES=0
+fi
+status=0
+
+if [[ "$PHASE" == "all" || "$PHASE" == "main" ]]; then
+  echo "== e2e phase 1/2: everything except the timing-sensitive group (threads=${THREADS})"
+  cargo nextest run "${NEXT_ARGS[@]}" -E "not (${LATENCY_FILTER})" || status=1
+fi
+
+if [[ "$PHASE" == "all" || "$PHASE" == "latency" ]]; then
+  echo "== e2e phase 2/2: timing-sensitive group, one test at a time (retries=${RETRIES})"
+  latency_log="$(mktemp)"
+  LATENCY_ARGS=(-p e2e --test-threads 1 --retries "$RETRIES" -E "$LATENCY_FILTER")
+  if [[ -n "${KOLDSTORE_E2E_NEXTEST_PROFILE:-}" ]]; then
+    LATENCY_ARGS+=(--profile "${KOLDSTORE_E2E_NEXTEST_PROFILE}")
+  fi
+  if [[ "${KOLDSTORE_E2E_NO_FAIL_FAST:-}" == "1" || "${KOLDSTORE_E2E_NO_FAIL_FAST:-}" == "true" ]]; then
+    LATENCY_ARGS+=(--no-fail-fast)
+  fi
+  cargo nextest run "${LATENCY_ARGS[@]}" 2>&1 | tee "$latency_log" || status=1
+  retried="$(grep -cE 'TRY 2 (PASS|FAIL)|FLAKY' "$latency_log" 2>/dev/null || true)"
+  if [[ "${retried:-0}" -gt 0 ]]; then
+    echo "NOTE: ${retried} timing-sensitive test attempt(s) needed a retry (see FLAKY / TRY 2 above); the machine was loaded or latency regressed -- rerun with KOLDSTORE_E2E_STRICT=1 on a quiet machine to tell which"
+  fi
+  rm -f "$latency_log"
+fi
+exit "$status"
