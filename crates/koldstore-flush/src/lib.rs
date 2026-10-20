@@ -15,6 +15,7 @@ pub use koldstore_parquet as parquet;
 pub use koldstore_storage as storage;
 
 pub mod cleanup;
+pub mod compaction;
 pub mod encode;
 pub mod failpoints;
 pub mod jobs_sql;
@@ -55,7 +56,8 @@ pub use scheduler::{
     AutoFlushPlanError, OlderThanEvaluation, AUTO_FLUSH_TABLE_PREDICATE,
 };
 pub use segment_catalog::{
-    plan_activate_flush_segments, plan_flush_segments_batch_insert, SegmentCatalogError,
+    plan_activate_compaction, plan_activate_flush_segments, plan_flush_segments_batch_insert,
+    SegmentCatalogError,
 };
 pub use segment_write::{
     flush_segment_relative_path, write_flush_segment_with_client, WrittenFlushSegment,

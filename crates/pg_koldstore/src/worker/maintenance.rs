@@ -193,6 +193,22 @@ fn run_auto_purge(database_oid: u32) {
             "koldstore maintenance worker db={database_oid}: auto-purge deferred: {error}"
         ),
     }
+    // Compacted segments are retired objects of live tables (see `sql::flush::compact`); they are
+    // reaped on the same cadence, independently of the retention setting above.
+    match super::txn::run_recoverable("compacted segment reap", crate::sql::flush::compact::reap_tick) {
+        Ok(Some(report)) => {
+            let reaped = report.get("reaped_segments").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            if reaped > 0 {
+                pgrx::log!(
+                    "koldstore maintenance worker db={database_oid}: reaped {reaped} compacted segments"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => pgrx::warning!(
+            "koldstore maintenance worker db={database_oid}: compacted segment reap deferred: {error}"
+        ),
+    }
 }
 
 fn maintenance_due(database_oid: u32) -> bool {

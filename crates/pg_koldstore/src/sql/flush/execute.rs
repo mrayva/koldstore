@@ -57,20 +57,20 @@ impl FlushCommitStyle {
 }
 
 pub(super) struct FlushPreparedContext {
-    job_id: uuid::Uuid,
-    attempt_token: uuid::Uuid,
-    force: bool,
-    relation: RelationContext,
-    storage: FlushStorageContext,
-    snapshot: Arc<ManagedTableSnapshot>,
-    catalog: Arc<koldstore_migrate::ExistingTableCatalog>,
-    indexed_columns: Vec<ColumnRef>,
-    bloom_filter_columns: Vec<String>,
-    max_rows_per_file: usize,
-    target_file_size_bytes: Option<u64>,
-    parquet_row_group_size: usize,
-    parquet_data_page_row_count_limit: Option<usize>,
-    parquet_bloom_filter_false_positive_rate: Option<f64>,
+    pub(super) job_id: uuid::Uuid,
+    pub(super) attempt_token: uuid::Uuid,
+    pub(super) force: bool,
+    pub(super) relation: RelationContext,
+    pub(super) storage: FlushStorageContext,
+    pub(super) snapshot: Arc<ManagedTableSnapshot>,
+    pub(super) catalog: Arc<koldstore_migrate::ExistingTableCatalog>,
+    pub(super) indexed_columns: Vec<ColumnRef>,
+    pub(super) bloom_filter_columns: Vec<String>,
+    pub(super) max_rows_per_file: usize,
+    pub(super) target_file_size_bytes: Option<u64>,
+    pub(super) parquet_row_group_size: usize,
+    pub(super) parquet_data_page_row_count_limit: Option<usize>,
+    pub(super) parquet_bloom_filter_false_positive_rate: Option<f64>,
 }
 
 /// Acquires the session table-job lock without waiting.
@@ -101,7 +101,7 @@ fn claim_flush_job(
     Ok((job_id, attempt_token, force, progress_total, target_seq))
 }
 
-fn load_flush_prepared_context(
+pub(super) fn load_flush_prepared_context(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
     job_id: uuid::Uuid,
@@ -239,9 +239,9 @@ fn load_flush_prepared_context(
 /// Avoids holding full [`koldstore_flush::WrittenFlushSegment`] (packed metadata
 /// + catalog row) across the rest of the pass.
 #[derive(Debug, Clone, Copy)]
-struct PendingFlushSegmentRef {
-    segment_id: uuid::Uuid,
-    byte_size: i64,
+pub(super) struct PendingFlushSegmentRef {
+    pub(super) segment_id: uuid::Uuid,
+    pub(super) byte_size: i64,
 }
 
 /// Pass upload/persist outcome before manifest build + finalize.
@@ -255,29 +255,14 @@ struct StreamedFlushPass {
     manifest_path: String,
 }
 
-fn stream_write_flush_batches(
-    table_oid: pgrx::pg_sys::Oid,
+/// Builds the encoder input shared by flush and compaction, plus the primary-key column names.
+pub(super) fn build_stream_encode_input(
     ctx: &FlushPreparedContext,
-    selection: &ResolvedFlushSelection,
-    client: &koldstore_storage::ObjectStoreClient,
-    commit_style: FlushCommitStyle,
-    started: std::time::Instant,
-) -> Result<StreamedFlushPass, String> {
-    let stats = &selection.stats;
-    let table_prefix = render_regular_table_prefix(
-        &PathTemplate::new(&ctx.storage.regular_path_tmpl),
-        &ctx.relation.namespace,
-        &ctx.relation.name,
-    )?;
-    let manifest_path = manifest_object_key(&table_prefix);
+    max_seq: i64,
+    mirror_ops: Option<Vec<i16>>,
+) -> Result<(StreamEncodeInput, Vec<String>), String> {
     let schema_version =
         u32::try_from(ctx.storage.schema_version).map_err(|error| error.to_string())?;
-    let mut batch_number = commit_style.run_spi(|| next_flush_batch_number(table_oid))?;
-    let pass_id = uuid::Uuid::new_v4();
-    let mut total_rows_flushed = 0_i64;
-    let mut last_max_seq = 0_i64;
-    let mut pending_segments: Vec<PendingFlushSegmentRef> = Vec::new();
-
     // Use the already-loaded relation context — do not SPI here. Short mode is
     // between catalog commits (no open txn); `qualified_relation_name` would
     // Assert(IsTransactionState) in the flush executor.
@@ -338,7 +323,7 @@ fn stream_write_flush_batches(
         indexed_columns: ctx.indexed_columns.clone(),
         bloom_filter_columns: ctx.bloom_filter_columns.clone(),
         schema_version,
-        max_seq: stats.max_seq,
+        max_seq,
         max_rows_per_file: ctx.max_rows_per_file,
         fetch_batch_size: flush_mirror_fetch_limit(ctx.max_rows_per_file),
         target_file_size_bytes: ctx.target_file_size_bytes,
@@ -346,7 +331,7 @@ fn stream_write_flush_batches(
         row_group_size: ctx.parquet_row_group_size,
         data_page_row_count_limit: ctx.parquet_data_page_row_count_limit,
         bloom_filter_false_positive_rate: ctx.parquet_bloom_filter_false_positive_rate,
-        mirror_ops: selection.mirror_ops.clone(),
+        mirror_ops,
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
         order_key_column: ctx.snapshot.segment_order_column_id.and_then(|column_id| {
             ctx.catalog
@@ -356,6 +341,32 @@ fn stream_write_flush_batches(
                 .map(|column| column.name.clone())
         }),
     };
+    Ok((encode_input, primary_key_columns))
+}
+
+fn stream_write_flush_batches(
+    table_oid: pgrx::pg_sys::Oid,
+    ctx: &FlushPreparedContext,
+    selection: &ResolvedFlushSelection,
+    client: &koldstore_storage::ObjectStoreClient,
+    commit_style: FlushCommitStyle,
+    started: std::time::Instant,
+) -> Result<StreamedFlushPass, String> {
+    let stats = &selection.stats;
+    let table_prefix = render_regular_table_prefix(
+        &PathTemplate::new(&ctx.storage.regular_path_tmpl),
+        &ctx.relation.namespace,
+        &ctx.relation.name,
+    )?;
+    let manifest_path = manifest_object_key(&table_prefix);
+    let mut batch_number = commit_style.run_spi(|| next_flush_batch_number(table_oid))?;
+    let pass_id = uuid::Uuid::new_v4();
+    let mut total_rows_flushed = 0_i64;
+    let mut last_max_seq = 0_i64;
+    let mut pending_segments: Vec<PendingFlushSegmentRef> = Vec::new();
+
+    let (encode_input, primary_key_columns) =
+        build_stream_encode_input(ctx, stats.max_seq, selection.mirror_ops.clone())?;
     let catalog_columns = &ctx.catalog.columns;
     let fetch_batch_size = encode_input.fetch_batch_size;
     // Failpoint after pending catalog inserts lives in write_streamed_chunk.
@@ -471,7 +482,7 @@ fn build_manifest_and_finalize(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_streamed_chunk(
+pub(super) fn write_streamed_chunk(
     client: &koldstore_storage::ObjectStoreClient,
     ctx: &FlushPreparedContext,
     pass_id: uuid::Uuid,
@@ -552,7 +563,7 @@ fn write_streamed_chunk(
     Ok(())
 }
 
-fn apply_flush_row_count_deltas(
+pub(super) fn apply_flush_row_count_deltas(
     table_oid: pgrx::pg_sys::Oid,
     mirror_pruned: i64,
     hot_pruned: i64,

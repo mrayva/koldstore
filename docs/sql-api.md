@@ -141,6 +141,8 @@ Every SQL-callable function the extension installs today:
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
 | `koldstore.validate_cold_storage(...)` | `jsonb` | Catalog vs object store: `{ok, problems[]}` |
 | `koldstore.purge_deferred_cold_objects(...)` | `jsonb` | Deletes retained cold objects whose window has passed |
+| `koldstore.compact_table(...)` | `jsonb` | Rewrites overlapping / small cold segments; report of what changed |
+| `koldstore.reap_compacted_segments(...)` | `bigint` | Deletes replaced segments' objects past their grace period |
 
 ## Storage and Migration
 
@@ -754,6 +756,48 @@ This deletes the ones staged at least `older_than_seconds` ago (default: the set
 skipped_live_prefix, failed, errors[], remaining}`. A key under a prefix a currently managed table uses
 (a table dropped and recreated under the same name) is removed from the queue without deleting the
 object. Safe to repeat; run it periodically, for example from pg_cron. Superuser only.
+
+### `koldstore.compact_table`
+
+```sql
+SELECT koldstore.compact_table('app.events');                                   -- up to 500000 rows per call
+SELECT koldstore.compact_table('app.events', max_rows => 2000000, grace_seconds => 3600);
+SELECT koldstore.reap_compacted_segments('app.events', 3600);
+```
+
+Flushes only append. An update or re-insert of an already flushed key leaves its older version in an older
+segment, a delete leaves a marker, and many small flushes leave many small objects. `compact_table` rewrites
+the affected segments:
+
+- segments whose primary-key ranges overlap (they may hold several versions of a key) are merged: the newest
+  version of every key wins (keeping its original `seq`), delete markers are dropped, rows are sorted like a
+  flush sorts them and split at `max_rows_per_file`;
+- runs of adjacent, already disjoint segments that are at most half full are packed into fuller ones;
+- when the table is ordered by its primary key (or has no order column) the rewritten segments are
+  key-disjoint, which lets scans skip retaining cold keys (`koldstore.max_merge_seen_keys` no longer limits a
+  full scan). A table ordered by another column is deduplicated and packed, but its segments stay ordered by
+  that column, so a unit is only rewritten when it removes rows or merges segments.
+
+Each unit is published atomically: one catalog statement activates the new segments and retires the old ones
+under the manifest-generation CAS (the same one flush uses), so a reader sees either layout, never a mix.
+`max_rows` bounds the rows one call reads (and so its memory); a unit that does not fit is left for the next
+call, and one larger than `max_rows` alone is reported in `units_over_max_rows`. The call holds the table's
+flush lock, so it fails fast when a flush is running and flushes skip the table meanwhile. It returns a report
+(`compacted`, `units`, `segments_replaced`, `segments_written`, `rows_read`, `rows_written`,
+`versions_and_markers_dropped`, `bytes_replaced`, `bytes_written`, `reaped_segments`, ...).
+
+Replaced segments are marked `compacted` and keep their objects for `grace_seconds` (default 600) so queries
+planned on the previous layout finish; the next `compact_table` call, `koldstore.reap_compacted_segments`, or
+the maintenance worker deletes them afterwards. The grace is never shorter than
+`koldstore.cold_object_retention_seconds`: a physical backup taken before a compaction still references the
+replaced objects, so with a retention window set they stay as long as the window. Without one, a backup older
+than the grace can no longer restore the cold tier of a compacted table.
+
+Not handled yet: user-scoped tables and composite primary keys (refused with an error). Compaction collapses
+the cold history of a key to its newest version, so `changes_since` no longer reports overwritten cold versions.
+Segments without primary-key bounds (written by a very old release) make the call decline until
+`koldstore.rebuild_segment_summaries` has run, since delete markers can only be dropped when every segment's
+key range is known. Owner or superuser.
 
 ### `koldstore.validate_cold_storage`
 

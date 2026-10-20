@@ -8,7 +8,7 @@ until after that baseline is stable.
 
 1. **Scoped storage** — place each `scope_column` value in its own cold folder
 2. **Change API** — done: `changes_since` / change-cursor SQL for real-time catch-up
-3. **Compaction** — combine small cold segments to reduce object count and scan cost
+3. **Compaction** — done: `compact_table` merges overlapping and small cold segments (see below)
 4. **Backup / export** — KoldStore-aware dump, restore, and table/scope archives
 5. **FILE datatype** — KalamDB-style files stored in cold storage (heap holds a reference)
 
@@ -86,13 +86,17 @@ Frequent flushes can leave many small Parquet segments. Compaction merges those
 into fewer, larger files under the same table (and scope) prefix so cold scans
 open less objects and object-store LIST/GET overhead drops.
 
-Planned shape:
+Done: `koldstore.compact_table` (on demand; reaping of replaced objects also runs in the maintenance
+worker). It keeps the newest version of each key, drops delete markers, restores key-disjoint segments for
+tables ordered by their primary key, packs runs of small segments, and publishes through the manifest-generation
+CAS shared with flush finalize (see [ADR-004](decisions/004-segment-publication-protocol.md)).
 
-- Background or on-demand compact jobs that rewrite small segments
-- Manifest/CAS publication shared with flush finalize (see
-  [ADR-004](decisions/004-segment-publication-protocol.md))
-- Preserve correctness for concurrent scans and `changes_since` cursors
-- Prefer compacting within a single scope folder once scoped storage lands
+Still open:
+
+- an automatic compaction trigger (today it is called by an operator or a scheduler such as pg_cron)
+- user-scoped tables and composite primary keys
+- streaming merges for units larger than `max_rows` (a unit is read into memory)
+- keeping `changes_since` history of overwritten cold versions
 
 Size-aware writing via `target_file_size_mb` reduces how often compaction is
 needed; compaction remains the safety net for already-written small files.

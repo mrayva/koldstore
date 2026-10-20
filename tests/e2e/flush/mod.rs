@@ -2,6 +2,7 @@
 
 mod flush_async_prune_race;
 mod flush_autonomous;
+mod flush_compaction;
 mod flush_cancel_and_drop;
 mod flush_complex_and_multi;
 mod flush_concurrent_barrier;

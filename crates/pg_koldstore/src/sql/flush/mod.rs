@@ -1,6 +1,8 @@
 //! PostgreSQL flush SQL entrypoints and SPI adapters.
 
 #[cfg(feature = "pg")]
+pub(crate) mod compact;
+#[cfg(feature = "pg")]
 pub(crate) mod counters;
 #[cfg(feature = "pg")]
 pub(crate) mod execute;
@@ -306,4 +308,47 @@ pub fn purge_old_jobs_pg(batch_limit: pgrx::default!(i32, 100)) -> i64 {
     let retention_days = crate::guc::job_retention_days();
     jobs::purge_old_jobs(retention_days, batch_limit)
         .unwrap_or_else(|error| pgrx::error!("purge old jobs failed: {error}"))
+}
+
+/// Rewrites a table's cold segments so each key has one version in one segment.
+///
+/// SQL contract: `koldstore.compact_table(table_name regclass, max_rows bigint default 500000,
+/// grace_seconds integer default 600) → jsonb`.
+///
+/// Overlapping segments (left behind by updates and re-inserts of flushed keys) are merged keeping
+/// the newest version of each key, delete markers are dropped, and runs of small adjacent segments
+/// are packed into fuller ones. `max_rows` bounds the rows one call reads (and so its memory); work
+/// that does not fit is left for the next call. Replaced segments stay in the object store for
+/// `grace_seconds` so running queries finish, and are deleted by a later call (this one or
+/// `koldstore.reap_compacted_segments`). Returns a report of what was done.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "compact_table", schema = "koldstore", security_definer)]
+pub fn compact_table_pg(
+    table_name: pgrx::PgRelation,
+    max_rows: pgrx::default!(i64, 500000),
+    grace_seconds: pgrx::default!(i32, 600),
+) -> pgrx::JsonB {
+    crate::security::require_relation_owner_or_superuser(table_name.oid(), "compact this table");
+    compact::compact_table_value(table_name.oid(), max_rows, grace_seconds)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("compact_table failed: {error}"))
+}
+
+/// Deletes the objects of compacted segments past their grace period.
+///
+/// SQL contract: `koldstore.reap_compacted_segments(table_name regclass, grace_seconds integer
+/// default 600) → bigint` (the number of segments reaped). `compact_table` does this first on every
+/// call; run this when compaction is not called often.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "reap_compacted_segments", schema = "koldstore", security_definer)]
+pub fn reap_compacted_segments_pg(
+    table_name: pgrx::PgRelation,
+    grace_seconds: pgrx::default!(i32, 600),
+) -> i64 {
+    crate::security::require_relation_owner_or_superuser(
+        table_name.oid(),
+        "reap this table's compacted segments",
+    );
+    compact::reap_table(table_name.oid(), grace_seconds)
+        .unwrap_or_else(|error| pgrx::error!("reap_compacted_segments failed: {error}"))
 }

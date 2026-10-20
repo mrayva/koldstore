@@ -29,7 +29,9 @@ belongs in PostgreSQL; object-store `manifest.json` is a derived export.
 2. **Statuses (reuse existing CHECK):**
    - `pending` — uploaded and cataloged, not yet activated (invisible to merge scan)
    - `active` — readable
-   - `compacted` / `deleted` — reserved; not used by this change (compaction deferred)
+   - `compacted` — a segment replaced by `compact_table` (activation of the rewrite and retirement of
+     the sources share one CAS statement; `created_at` is reset to the retirement time, and the object is
+     reaped after a grace period); `deleted` — reserved
 3. **Publish order:**
    1. Encode Parquet; publish immutable object (temp → create → byte verify)
    2. Hash payload once (sha256 over the encode buffer); persist `checksum` +

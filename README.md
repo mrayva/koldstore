@@ -123,7 +123,7 @@ KoldStore is organized around concrete research questions rather than only a fea
 | PostgreSQL 15–18 build and experimental runtime matrix | 🧪 Tested |
 | Standard DML against cold-only rows | ❌ Not supported yet |
 | Global hot+cold `UNIQUE` and foreign keys | ❌ Not supported |
-| Compaction | 🚧 In development |
+| Compaction (`compact_table`) | 🧪 Working baseline |
 | Coordinated backup, restore, and PITR | 🚧 In development |
 | Broad schema evolution | 🚧 In development |
 | Tenant-scoped object paths | 🚧 Planned |
@@ -445,7 +445,7 @@ Near-term implementation research:
 1. Preserve native PostgreSQL performance for hot-dominant queries.
 2. Finish progressive, bounded Arrow and Parquet reads.
 3. Improve cold point lookups with statistics, Bloom filters, and page indexes.
-4. Add compaction for obsolete versions, tombstones, and small files.
+4. Automate compaction (today `compact_table` runs on demand) and extend it to scoped tables.
 5. Complete direct cold-row DML semantics.
 6. Deliver coordinated backup, restore, export, and recovery tooling.
 7. Expand schema-evolution support.

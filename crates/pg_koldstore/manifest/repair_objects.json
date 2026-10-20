@@ -1182,10 +1182,22 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$update_row_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function reap_compacted_segments(table_name regclass, grace_seconds integer DEFAULT 600) returns bigint security definer [reap_compacted_segments_pg_wrapper]": {
+            "add": "koldstore.reap_compacted_segments(table_name regclass, grace_seconds integer)",
+            "name": "reap_compacted_segments",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.reap_compacted_segments(table_name regclass, grace_seconds integer DEFAULT 600)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$reap_compacted_segments_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]": {
             "add": "koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean)",
             "name": "alter_storage_location",
             "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$alter_storage_location_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function compact_table(table_name regclass, max_rows bigint DEFAULT 500000, grace_seconds integer DEFAULT 600) returns jsonb security definer [compact_table_pg_wrapper]": {
+            "add": "koldstore.compact_table(table_name regclass, max_rows bigint, grace_seconds integer)",
+            "name": "compact_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.compact_table(table_name regclass, max_rows bigint DEFAULT 500000, grace_seconds integer DEFAULT 600)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$compact_table_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false) returns jsonb security definer [validate_cold_storage_pg_wrapper]": {

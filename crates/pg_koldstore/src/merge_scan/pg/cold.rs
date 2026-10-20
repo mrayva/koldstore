@@ -1465,6 +1465,51 @@ fn pk_equality_values(
 fn cold_rows_from_segments(
     request: ColdSegmentReadRequest<'_>,
 ) -> Result<(Vec<ColdRow>, Vec<SegmentReadProfile>), String> {
+    read_cold_segments_with(request, |row, pk_names| {
+        clean_cold_row_to_common(row, pk_names)
+    })
+}
+
+/// Reads every row of the requested segments as [`koldstore_parquet::CleanColdRow`]s with logical
+/// column names and the mirror operation code (which [`ColdRow`] drops). Compaction rewrites
+/// segments from these, so an update stays an update and its history metadata is preserved.
+pub(crate) fn read_clean_rows_of_segments(
+    client: &koldstore_storage::ObjectStoreClient,
+    segment_hints: &[SegmentStatsHint],
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    current_schema_version: i32,
+) -> Result<Vec<koldstore_parquet::CleanColdRow>, String> {
+    let projected_columns = catalog
+        .columns
+        .iter()
+        .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
+        .collect::<Vec<_>>();
+    let primary_key_columns = catalog
+        .columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
+        .collect::<Vec<_>>();
+    let (rows, _) = read_cold_segments_with(
+        ColdSegmentReadRequest {
+            client,
+            segment_hints,
+            projected_columns: &projected_columns,
+            catalog_columns: &catalog.columns,
+            primary_key_columns: &primary_key_columns,
+            current_schema_version,
+            pk_probe: None,
+            profile_mode: ProfileCollectionMode::Disabled,
+        },
+        |row, _| Ok(row),
+    )?;
+    Ok(rows)
+}
+
+fn read_cold_segments_with<T>(
+    request: ColdSegmentReadRequest<'_>,
+    mut convert: impl FnMut(koldstore_parquet::CleanColdRow, &[String]) -> Result<T, String>,
+) -> Result<(Vec<T>, Vec<SegmentReadProfile>), String> {
     let ColdSegmentReadRequest {
         client,
         segment_hints,
@@ -1591,7 +1636,7 @@ fn cold_rows_from_segments(
             remap_json_to_logical_names(&mut row.pk_json, &physical_names);
             remap_row_to_logical_names(&mut row.row_image, &physical_names);
             fill_missing_logical_nulls(&mut row.row_image, &missing_logical_names);
-            rows.push(clean_cold_row_to_common(row, &logical_pk_names)?);
+            rows.push(convert(row, &logical_pk_names)?);
         }
     }
     Ok((rows, segments))

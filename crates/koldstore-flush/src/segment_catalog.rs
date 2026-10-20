@@ -343,6 +343,72 @@ SELECT generation FROM cas
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
 }
 
+/// Compaction publish: activates the rewritten segments and retires the segments they replace in
+/// one statement under the same manifest-generation CAS as a flush.
+///
+/// Parameters: table OID, expected generation, new generation, segment count after the swap,
+/// `max_seq`, new (pending) segment ids, replaced (active) segment ids. Returns the new
+/// generation, or no row when the CAS lost. A replaced segment that is no longer active (a
+/// concurrent change) makes the caller abort, because the rewrite no longer matches the catalog.
+///
+/// Replaced rows become `compacted` and keep their object until the grace period passes
+/// (`created_at` is reset to the retirement time, which is what the reaper compares), so a reader
+/// planned on the previous generation can still finish.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_activate_compaction() -> Result<SqlStatement, SegmentCatalogError> {
+    let in_sync = SyncState::InSync.as_str();
+    SqlStatement::write(
+        "compaction activate rewritten segments and retire replaced segments",
+        &format!(
+            r#"
+WITH cas AS (
+    UPDATE koldstore.manifest
+    SET generation = $3::bigint,
+        sync_state = '{in_sync}',
+        segment_count = $4::integer,
+        max_seq = GREATEST(max_seq, $5::bigint),
+        last_error = NULL,
+        updated_at = now()
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND generation = $2::bigint
+    RETURNING generation
+),
+retired AS (
+    UPDATE koldstore.cold_segments
+    SET status = 'compacted',
+        created_at = now()
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND status = 'active'
+      AND segment_id = ANY($7::uuid[])
+      AND EXISTS (SELECT 1 FROM cas)
+    RETURNING segment_id
+),
+activated AS (
+    UPDATE koldstore.cold_segments
+    SET status = 'active'
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND status = 'pending'
+      AND segment_id = ANY($6::uuid[])
+      AND EXISTS (SELECT 1 FROM cas)
+    RETURNING segment_id
+)
+SELECT CASE
+         WHEN (SELECT count(*) FROM retired) = cardinality($7::uuid[])
+          AND (SELECT count(*) FROM activated) = cardinality($6::uuid[])
+         THEN (SELECT generation FROM cas)
+       END
+"#
+        ),
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{plan_activate_flush_segments, plan_flush_segments_batch_insert};

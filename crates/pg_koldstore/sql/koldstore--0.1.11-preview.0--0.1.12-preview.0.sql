@@ -379,3 +379,21 @@ CREATE FUNCTION koldstore."set_partition_auto_manage"(
 STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'set_partition_auto_manage_pg_wrapper';
+
+-- Segment compaction: rewrite overlapping / small cold segments, reap retired objects later.
+CREATE FUNCTION koldstore."compact_table"(
+	"table_name" regclass,
+	"max_rows" bigint DEFAULT 500000,
+	"grace_seconds" INT DEFAULT 600
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'compact_table_pg_wrapper';
+
+CREATE FUNCTION koldstore."reap_compacted_segments"(
+	"table_name" regclass,
+	"grace_seconds" INT DEFAULT 600
+) RETURNS bigint
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'reap_compacted_segments_pg_wrapper';

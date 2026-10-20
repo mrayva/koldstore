@@ -929,6 +929,116 @@ pub fn plan_publishable_cold_segment_count() -> SqlResult<SqlStatement> {
     )
 }
 
+/// Lists every active shared-scope segment with what compaction needs to group and read it: the
+/// full object key, size, schema version, sequence range, physical column names, row count and the
+/// whole-segment Sort Key V1 bounds of one key column.
+///
+/// Parameters are table OID, stable key-column ID, type OID and codec version. `min_value` /
+/// `max_value` are NULL when the segment has no index row for the column (compaction then refuses to
+/// drop delete markers, since that segment may hold an older version of any key). The last column
+/// counts active segments of other scopes, which compaction does not handle.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_compaction_segment_listing() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list active cold segments for compaction",
+        &format!(
+            r#"
+WITH table_prefix AS (
+    SELECT {SQL_TABLE_PREFIX} AS prefix
+    FROM koldstore.schemas s
+    JOIN koldstore.storage st ON st.id = s.storage_id
+    JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE s.table_oid = $1::oid
+      AND s.active
+      AND s.initialization_state = 'complete'
+    ORDER BY s.version DESC
+    LIMIT 1
+),
+versions AS (
+    SELECT cs.schema_version, {SQL_PHYSICAL_NAMES_ALL} AS physical_names
+    FROM (
+        SELECT DISTINCT table_oid, schema_version
+        FROM koldstore.cold_segments
+        WHERE table_oid = $1::oid AND scope_key = '' AND status = 'active'
+    ) cs
+)
+SELECT
+    CASE WHEN COALESCE(pref.prefix, '') = '' THEN cs.path ELSE pref.prefix || cs.path END,
+    cs.byte_size,
+    cs.schema_version,
+    cs.min_seq,
+    cs.max_seq,
+    v.physical_names::text,
+    cs.segment_id,
+    cs.row_count,
+    csi.min_value,
+    csi.max_value,
+    (SELECT count(*) FROM koldstore.cold_segments o
+      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint
+FROM koldstore.cold_segments cs
+LEFT JOIN koldstore.cold_segment_index csi
+  ON csi.segment_id = cs.segment_id
+ AND csi.column_id = $2::smallint
+ AND csi.type_oid = $3::oid
+ AND csi.codec_version = $4::smallint
+LEFT JOIN versions v ON v.schema_version = cs.schema_version
+LEFT JOIN table_prefix pref ON true
+WHERE cs.table_oid = $1::oid
+  AND cs.scope_key = ''
+  AND cs.status = 'active'
+ORDER BY csi.min_value NULLS LAST, cs.batch_number, cs.segment_id
+"#
+        ),
+        [
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+        ],
+    )
+}
+
+/// Lists compacted segments of one table whose retirement is older than a grace period, with the
+/// full object key each one lives at. Parameters are table OID and the grace in seconds.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_compacted_segments_past_grace() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list compacted cold segments past the grace period",
+        &format!(
+            r#"
+WITH table_prefix AS (
+    SELECT {SQL_TABLE_PREFIX} AS prefix
+    FROM koldstore.schemas s
+    JOIN koldstore.storage st ON st.id = s.storage_id
+    JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE s.table_oid = $1::oid
+      AND s.active
+      AND s.initialization_state = 'complete'
+    ORDER BY s.version DESC
+    LIMIT 1
+)
+SELECT cs.segment_id,
+       CASE WHEN COALESCE(pref.prefix, '') = '' THEN cs.path ELSE pref.prefix || cs.path END
+FROM koldstore.cold_segments cs
+LEFT JOIN table_prefix pref ON true
+WHERE cs.table_oid = $1::oid
+  AND cs.status = 'compacted'
+  AND cs.created_at <= now() - make_interval(secs => $2::double precision)
+ORDER BY cs.created_at, cs.segment_id
+"#
+        ),
+        [SqlParamType::Oid, SqlParamType::Float8],
+    )
+}
+
 /// Builds pending+active cold-segment rows for derived `manifest.json` before activate.
 ///
 /// # Errors

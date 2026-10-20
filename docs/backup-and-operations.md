@@ -10,10 +10,12 @@ A physical base backup (`pg_basebackup`) plus a WAL archive restores the hot hea
 catalog (`koldstore.*` tables), the async mirror and the replication slot together, as of any
 recovery target, exactly like any other PostgreSQL data. The cold tier then needs only one thing:
 **every cold object the restored catalog references must still exist, unchanged.** Cold objects are
-immutable (no compaction rewrites them), so this holds as long as nothing deleted them. The only
+immutable (they are never modified in place), so this holds as long as nothing deleted them. The only
 operations that delete referenced cold objects are:
 
 - `DROP TABLE` / `DROP SCHEMA` of a managed table,
+- `compact_table` / the maintenance worker, once a replaced segment's grace period has passed (never
+  shorter than `koldstore.cold_object_retention_seconds`; see `koldstore.compact_table` in the SQL API),
 - `unmanage_table(..., drop_cold => true)`,
 - `recover_segments(...)` on objects the *current* catalog no longer references (orphans relative to
   now, but possibly referenced by an older backup).

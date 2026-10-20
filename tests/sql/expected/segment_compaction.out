@@ -1,0 +1,303 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ cp_managed
+------------
+ t
+(1 row)
+
+ cp_caught_up
+--------------
+ t
+(1 row)
+
+ cp_flushed
+------------
+ t
+(1 row)
+
+ cp_noop_first
+---------------
+ f
+(1 row)
+
+SET
+UPDATE 4
+UPDATE 4
+DELETE 5
+DELETE 5
+INSERT 0 1
+INSERT 0 1
+RESET
+ cp_fenced
+-----------
+ t
+(1 row)
+
+ cp_reflushed
+--------------
+ t
+(1 row)
+
+ cp_fenced_2
+-------------
+ t
+(1 row)
+
+ cp_content_before
+-------------------
+ t
+(1 row)
+
+SELECT 1
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=50, limit=50). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+RESET
+SELECT 1
+ cp_compacted | cp_has_units | cp_dropped_old_versions | cp_fewer_segments
+--------------+--------------+-------------------------+-------------------
+ t            | t            | t                       | t
+(1 row)
+
+ cp_content_after
+------------------
+ t
+(1 row)
+
+ cp_rows_shrank
+----------------
+ t
+(1 row)
+
+ cp_retired_rows_kept
+----------------------
+ t
+(1 row)
+
+SET
+ cp_count_after_under_cap
+--------------------------
+                      396
+(1 row)
+
+RESET
+ cp_edited_value
+-----------------
+ edited
+(1 row)
+
+ cp_deleted_rows_still_gone
+----------------------------
+                          0
+(1 row)
+
+ cp_validate_inside_grace
+--------------------------
+ true
+(1 row)
+
+ cp_noop_second
+----------------
+ f
+(1 row)
+
+ cp_reaped_inside_grace
+------------------------
+                      0
+(1 row)
+
+ cp_still_retired
+------------------
+ t
+(1 row)
+
+ cp_reaped
+-----------
+ t
+(1 row)
+
+ cp_retired_left
+-----------------
+               0
+(1 row)
+
+ cp_orphans
+------------
+          0
+(1 row)
+
+ cp_validate_after_reap
+------------------------
+ true
+(1 row)
+
+ cp_content_after_reap
+-----------------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+INSERT 0 1
+INSERT 0 1
+RESET
+ cp_fenced_3
+-------------
+ t
+(1 row)
+
+ cp_reflushed_2
+----------------
+ t
+(1 row)
+
+ cp_fenced_4
+-------------
+ t
+(1 row)
+
+ cp_content_final
+------------------
+ t
+(1 row)
+
+ cp_compacted_again
+--------------------
+ t
+(1 row)
+
+ cp_content_after_second_compaction
+------------------------------------
+ t
+(1 row)
+
+CREATE TABLE
+ comp_managed
+--------------
+ t
+(1 row)
+
+psql:<PATH>: ERROR:  compact_table failed: compaction supports single-column primary keys only
+psql:<PATH>: ERROR:  compact_table failed: max_rows must be at least 1
+CREATE TABLE
+INSERT 0 120
+SELECT 120
+ ord_managed
+-------------
+ t
+(1 row)
+
+ ord_caught_up
+---------------
+ t
+(1 row)
+
+ ord_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+DELETE 2
+DELETE 2
+RESET
+ ord_fenced
+------------
+ t
+(1 row)
+
+ ord_reflushed
+---------------
+ t
+(1 row)
+
+ ord_fenced_2
+--------------
+ t
+(1 row)
+
+ ord_compacted
+---------------
+ t
+(1 row)
+
+ ord_content_after
+-------------------
+ t
+(1 row)
+
+ ord_second_noop
+-----------------
+ f
+(1 row)
+
+ id
+-----
+ 120
+ 119
+ 118
+(3 rows)
+
+ ord_orphans
+-------------
+           0
+(1 row)
+
+CREATE TABLE
+INSERT 0 200
+SELECT 200
+ txt_managed
+-------------
+ t
+(1 row)
+
+ txt_caught_up
+---------------
+ t
+(1 row)
+
+ txt_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+RESET
+ txt_fenced
+------------
+ t
+(1 row)
+
+ txt_reflushed
+---------------
+ t
+(1 row)
+
+ txt_fenced_2
+--------------
+ t
+(1 row)
+
+ txt_compacted
+---------------
+ t
+(1 row)
+
+ txt_content_after
+-------------------
+ t
+(1 row)
+
+SET
+ txt_count_under_cap
+---------------------
+                 200
+(1 row)
+
+RESET

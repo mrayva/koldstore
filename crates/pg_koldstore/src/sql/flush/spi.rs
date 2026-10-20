@@ -227,6 +227,24 @@ pub(super) fn manifest_from_publishable_cold_segments(
     snapshot: &ManagedTableSnapshot,
     schema_version: i32,
 ) -> Result<koldstore_manifest::Manifest, String> {
+    manifest_from_publishable_cold_segments_excluding(
+        table_oid,
+        relation,
+        snapshot,
+        schema_version,
+        &[],
+    )
+}
+
+/// Like [`manifest_from_publishable_cold_segments`], leaving out `excluded` segments: compaction
+/// publishes the manifest of the state its activation will produce, before running it.
+pub(super) fn manifest_from_publishable_cold_segments_excluding(
+    table_oid: pgrx::pg_sys::Oid,
+    relation: &RelationContext,
+    snapshot: &ManagedTableSnapshot,
+    schema_version: i32,
+    excluded: &[uuid::Uuid],
+) -> Result<koldstore_manifest::Manifest, String> {
     use pgrx::datum::DatumWithOid;
 
     let statement = koldstore_catalog::queries::plan_publishable_cold_segments_for_manifest_json()
@@ -234,8 +252,13 @@ pub(super) fn manifest_from_publishable_cold_segments(
     let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| "[]".to_string());
-    let rows: Vec<CatalogManifestSegmentRow> =
+    let mut rows: Vec<CatalogManifestSegmentRow> =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    if !excluded.is_empty() {
+        let excluded: std::collections::HashSet<String> =
+            excluded.iter().map(ToString::to_string).collect();
+        rows.retain(|row| !excluded.contains(&row.segment_id));
+    }
     manifest_from_catalog_rows(
         &relation.namespace,
         &relation.name,

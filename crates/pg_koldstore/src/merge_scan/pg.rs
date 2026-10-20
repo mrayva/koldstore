@@ -18,6 +18,7 @@ use koldstore_merge::scan::CUSTOM_PATH_NAME;
 use pgrx::pg_sys;
 
 mod cold;
+pub(crate) use cold::read_clean_rows_of_segments;
 mod cold_frontier;
 mod emit;
 mod execute;
