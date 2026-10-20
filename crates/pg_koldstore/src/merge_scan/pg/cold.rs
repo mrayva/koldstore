@@ -791,6 +791,10 @@ fn cold_pk_ranges_disjoint(
     computed
 }
 
+/// Upper bound on first-column-overlapping segment pairs the disjointness check examines; past it the
+/// layout is treated as possibly overlapping (the exact retaining path is always correct).
+const MAX_DISJOINT_PAIR_CHECKS: usize = 2_000_000;
+
 fn compute_cold_pk_ranges_disjoint(
     table_oid: pg_sys::Oid,
     catalog: &koldstore_migrate::ExistingTableCatalog,
@@ -798,57 +802,64 @@ fn compute_cold_pk_ranges_disjoint(
 ) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
-    if catalog.primary_key.columns.len() != 1 {
+    let key_columns = &catalog.primary_key.columns;
+    if key_columns.is_empty() {
         return Ok(false);
     }
-    let Some(column) = catalog.column_by_id(catalog.primary_key.columns[0].column_id) else {
-        return Ok(false);
-    };
-    if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid()).is_none() {
-        return Ok(false);
+    // Every key column needs a bounds encoding, or its interval cannot be compared.
+    for key in key_columns {
+        let Some(column) = catalog.column_by_id(key.column_id) else {
+            return Ok(false);
+        };
+        if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid()).is_none() {
+            return Ok(false);
+        }
     }
-    let sql = "SELECT csi.min_value, csi.max_value, \
-                      (SELECT count(*) FROM koldstore.cold_segments x \
-                        WHERE x.table_oid = $1::oid AND x.status = 'active' AND x.scope_key <> '') \
-               FROM koldstore.cold_segment_index csi \
-               JOIN koldstore.cold_segments cs ON cs.segment_id = csi.segment_id \
-               WHERE cs.table_oid = $1::oid AND cs.status = 'active' AND cs.scope_key = '' \
-                 AND csi.column_id = $2::smallint AND csi.type_oid = $3::oid AND csi.codec_version = $4::smallint \
-               ORDER BY csi.min_value, csi.max_value";
+    let statement = koldstore_catalog::queries::plan_active_segment_key_boxes().map_err(|error| error.to_string())?;
     let args = [
         DatumWithOid::from(table_oid),
-        DatumWithOid::from(column.column_id.get()),
-        DatumWithOid::from(pg_sys::Oid::from(column.pg_type.type_oid())),
-        DatumWithOid::from(i16::from(koldstore_sortkey::CODEC_VERSION)),
+        DatumWithOid::from(key_columns.iter().map(|key| key.column_id.get()).collect::<Vec<i16>>()),
+        DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
     ];
-    let bounds: Vec<(Option<Vec<u8>>, Option<Vec<u8>>, i64)> = crate::catalog::owner::with_extension_owner(|| {
-        pgrx::Spi::connect(|client| -> Result<Vec<_>, pgrx::spi::Error> {
+    type Boxed = (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>, i64);
+    let rows: Vec<Boxed> = crate::catalog::owner::with_extension_owner(|| {
+        crate::spi::execute_prepared(&statement, &args, |tuples| {
+            let to_vec = |array: Option<pgrx::Array<&[u8]>>| -> Vec<Option<Vec<u8>>> {
+                array
+                    .map(|array| array.iter().map(|value| value.map(<[u8]>::to_vec)).collect())
+                    .unwrap_or_default()
+            };
             let mut out = Vec::new();
-            for row in client.select(sql, None, &args)? {
+            for tuple in tuples {
                 out.push((
-                    row.get::<Vec<u8>>(1)?,
-                    row.get::<Vec<u8>>(2)?,
-                    row.get::<i64>(3)?.unwrap_or(0),
+                    to_vec(tuple.get::<pgrx::Array<&[u8]>>(1)?),
+                    to_vec(tuple.get::<pgrx::Array<&[u8]>>(2)?),
+                    tuple.get::<i64>(3)?.unwrap_or(0),
                 ));
             }
             Ok(out)
         })
         .map_err(|error| error.to_string())
     })??;
-    if bounds.len() != active_segments || bounds.iter().any(|(_, _, scoped)| *scoped != 0) {
-        return Ok(false); // a segment has no index row for the key, or the table is scoped
+    if rows.len() != active_segments || rows.iter().any(|(_, _, scoped)| *scoped != 0) {
+        return Ok(false); // a segment is missing from the listing, or the table is scoped
     }
-    let mut previous_max: Option<&Vec<u8>> = None;
-    for (min, max, _) in &bounds {
-        let (Some(min), Some(max)) = (min, max) else {
+    let mut boxes = Vec::with_capacity(rows.len());
+    for (mins, maxs, _) in rows {
+        // A segment lacking an index row (or bounds) for any key column may hold any key there.
+        if mins.len() != key_columns.len() || maxs.len() != key_columns.len() {
             return Ok(false);
-        };
-        if previous_max.is_some_and(|previous| previous >= min) {
-            return Ok(false); // ranges touch or overlap: the same key may be in both
         }
-        previous_max = Some(max);
+        let mut bounds = Vec::with_capacity(mins.len());
+        for (min, max) in mins.into_iter().zip(maxs) {
+            let (Some(min), Some(max)) = (min, max) else {
+                return Ok(false);
+            };
+            bounds.push((min, max));
+        }
+        boxes.push(koldstore_flush::compaction::SegmentRange { row_count: 0, bounds });
     }
-    Ok(true)
+    Ok(koldstore_flush::compaction::keys_disjoint(&boxes, MAX_DISJOINT_PAIR_CHECKS).unwrap_or(false))
 }
 
 /// A value list longer than this is pruned by its `[min, max]` range instead of one catalog lookup

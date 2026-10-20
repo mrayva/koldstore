@@ -1,0 +1,108 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ ck_managed
+------------
+ t
+(1 row)
+
+ ck_caught_up
+--------------
+ t
+(1 row)
+
+ ck_flushed
+------------
+ t
+(1 row)
+
+ ck_many_segments
+------------------
+ t
+(1 row)
+
+SET
+ ck_count_under_cap
+--------------------
+                400
+(1 row)
+
+ ck_filtered_count_under_cap
+-----------------------------
+                         100
+(1 row)
+
+ ck_distinct_under_cap
+-----------------------
+                   400
+(1 row)
+
+RESET
+ ck_content_equal
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+DELETE 5
+DELETE 5
+RESET
+ ck_fenced
+-----------
+ t
+(1 row)
+
+SET
+ ck_count_after_dml_under_cap
+------------------------------
+                          395
+(1 row)
+
+RESET
+ ck_content_equal_after_dml
+----------------------------
+ t
+(1 row)
+
+ ck_reflushed
+--------------
+ t
+(1 row)
+
+ ck_fenced_2
+-------------
+ t
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=50, limit=50). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+SET
+ ck_count_exact | ck_distinct_exact
+----------------+-------------------
+            395 |               395
+(1 row)
+
+ ck_edited_value
+-----------------
+ edited
+(1 row)
+
+RESET
+ ck_content_equal_after_reflush
+--------------------------------
+ t
+(1 row)
+
+ ck_tenant2_rows
+-----------------
+              99
+(1 row)
+
+ ck_ctl_tenant2_rows
+---------------------
+                  99
+(1 row)
+

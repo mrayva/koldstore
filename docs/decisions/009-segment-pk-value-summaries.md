@@ -168,5 +168,19 @@ Three existing bugs surfaced and were fixed along the way:
 * a narrow projection (`SELECT id ...`) through the hot-only / delegated path returned a tuple of the wrong width
   (`unexpected field count in "D" message`, `unsupported format code`): the check that a native child's layout matches
   the scan compared descriptor pointers and, for a scan child without a result slot, read a null slot;
-* not fixed, only noted: hydrate-on-write aliases the table as `t` in `to_jsonb(t)`, which resolves to a *column* named
-  `t` instead of the whole row, so a managed table with a column called `t` cannot hydrate.
+* hydrate-on-write aliased the table as `t` in `to_jsonb(t)`, which resolves to a *column* named `t` instead of the
+  whole row, so a managed table with a column called `t` could not hydrate (fixed afterwards with `to_jsonb(t.*)`).
+
+## Composite keys (2026-10-20, slice 1)
+
+The disjoint-segment bypass above now covers composite primary keys. Per-column bounds say nothing about which tuples a
+segment holds, so two segments *may share a key* only if their `[min, max]` intervals intersect on **every** key column
+(a box test, `koldstore_flush::compaction::SegmentRange::may_share_keys`); a single column reduces to the interval
+overlap used before. `keys_disjoint` sweeps the segments by their first column's minimum and tests only pairs whose
+first-column intervals intersect, giving up (treating the layout as overlapping) past two million pairs. A leading column
+that splits segments well keeps it near-linear; segments that all span the leading column (a tenant) are still separated by
+another column (an ascending id) and so count as disjoint. Every key column needs a bounds encoding and an index row in
+every segment, otherwise the answer is "not disjoint". Covered by the `composite_key_disjoint_scan` SQL case.
+
+Compaction (`koldstore.compact_table`) still refuses composite keys; its planner already groups segments by the same box
+overlap, so the remaining work is ordering and deduplicating on the full key (slice 3). Slice 2 is pruning by a key prefix.

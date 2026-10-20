@@ -159,11 +159,10 @@ fn compact_locked(
     let ranges: Vec<SegmentRange> = segments
         .iter()
         .filter_map(|segment| {
-            segment.bounds.as_ref().map(|(min, max)| SegmentRange {
-                row_count: segment.row_count,
-                min: min.clone(),
-                max: max.clone(),
-            })
+            segment
+                .bounds
+                .as_ref()
+                .map(|(min, max)| SegmentRange::single(segment.row_count, min.clone(), max.clone()))
         })
         .collect();
     let mut plan = plan_compaction_units(

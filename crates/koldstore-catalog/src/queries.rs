@@ -1002,6 +1002,44 @@ ORDER BY csi.min_value NULLS LAST, cs.batch_number, cs.segment_id
     )
 }
 
+/// One row per active shared-scope segment with its key box: the whole-segment Sort Key V1
+/// `min_value` / `max_value` of each key column, as parallel arrays in key order (`NULL` elements, or
+/// arrays shorter than the key, mean a column has no usable bounds), ordered by the first column's
+/// minimum. The last column counts active segments of other scopes.
+///
+/// Parameters are table OID, the key columns' stable IDs (`smallint[]`, in key order) and the codec
+/// version.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_active_segment_key_boxes() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list active cold segment key boxes",
+        r#"
+SELECT
+    (SELECT array_agg(csi.min_value ORDER BY k.ord)
+       FROM unnest($2::smallint[]) WITH ORDINALITY AS k(cid, ord)
+       JOIN koldstore.cold_segment_index csi
+         ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
+        AND csi.codec_version = $3::smallint) AS mins,
+    (SELECT array_agg(csi.max_value ORDER BY k.ord)
+       FROM unnest($2::smallint[]) WITH ORDINALITY AS k(cid, ord)
+       JOIN koldstore.cold_segment_index csi
+         ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
+        AND csi.codec_version = $3::smallint) AS maxs,
+    (SELECT count(*) FROM koldstore.cold_segments o
+      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint
+FROM koldstore.cold_segments cs
+WHERE cs.table_oid = $1::oid AND cs.status = 'active' AND cs.scope_key = ''
+ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
+           WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+             AND csi.codec_version = $3::smallint) NULLS LAST, cs.segment_id
+"#,
+        [SqlParamType::Oid, SqlParamType::SmallIntArray, SqlParamType::Integer],
+    )
+}
+
 /// Lists compacted segments of one table whose retirement is older than a grace period, with the
 /// full object key each one lives at. Parameters are table OID and the grace in seconds.
 ///

@@ -1,7 +1,13 @@
 //! Compaction planning: which active segments are rewritten together.
 //!
-//! Pure bookkeeping over each segment's row count and whole-segment key bounds (Sort Key V1 bytes of
-//! the single primary-key column); the executor in `pg_koldstore` does the reading and rewriting.
+//! Pure bookkeeping over each segment's row count and whole-segment key bounds (Sort Key V1 bytes, one
+//! `[min, max]` interval per primary-key column); the executor in `pg_koldstore` does the reading and
+//! rewriting.
+//!
+//! Two segments can share a key only if their intervals intersect on *every* key column (a "box"
+//! test): per-column bounds say nothing about which tuples exist, so intersecting boxes are treated
+//! as possibly sharing a key, and boxes that miss on any one column cannot. For a single-column key
+//! this is plain interval overlap.
 //!
 //! Two kinds of unit are produced. An *overlap component* is a maximal set of segments whose key
 //! ranges chain together (touching counts, since one key may sit in both): rewriting it keeps the
@@ -10,15 +16,118 @@
 //! merged into fewer, fuller ones, so many tiny flushes do not leave the table with hundreds of
 //! objects.
 
-/// One active segment's size and key range.
+/// One active segment's size and key box.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentRange {
     /// Rows stored in the segment, including superseded versions and delete markers.
     pub row_count: i64,
-    /// Smallest key (Sort Key V1 bytes).
-    pub min: Vec<u8>,
-    /// Largest key (Sort Key V1 bytes).
-    pub max: Vec<u8>,
+    /// `(min, max)` Sort Key V1 bytes of each primary-key column, in key order.
+    pub bounds: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl SegmentRange {
+    /// A single-column range.
+    #[must_use]
+    pub fn single(row_count: i64, min: Vec<u8>, max: Vec<u8>) -> Self {
+        Self {
+            row_count,
+            bounds: vec![(min, max)],
+        }
+    }
+
+    /// True when the segments' key boxes intersect on every key column, so one key may be in both.
+    #[must_use]
+    pub fn may_share_keys(&self, other: &Self) -> bool {
+        self.bounds.len() == other.bounds.len()
+            && self
+                .bounds
+                .iter()
+                .zip(&other.bounds)
+                .all(|((min_a, max_a), (min_b, max_b))| min_a <= max_b && min_b <= max_a)
+    }
+}
+
+/// Indexes of `segments` grouped into overlap components (segments chained by
+/// [`SegmentRange::may_share_keys`]), each component in input order, components ordered by their
+/// first member. The input must be sorted by the first key column's minimum.
+///
+/// Cost is the number of segment pairs whose first-column intervals intersect, so key columns that
+/// split segments well (a leading tenant or time column) make this near-linear.
+#[must_use]
+pub fn overlap_components(segments: &[SegmentRange]) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..segments.len()).collect();
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    let mut active: Vec<usize> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let Some((lead_min, _)) = segment.bounds.first() else {
+            continue;
+        };
+        active.retain(|other| {
+            segments[*other]
+                .bounds
+                .first()
+                .is_some_and(|(_, other_max)| other_max >= lead_min)
+        });
+        for other in &active {
+            if segment.may_share_keys(&segments[*other]) {
+                let (a, b) = (find(&mut parent, index), find(&mut parent, *other));
+                if a != b {
+                    parent[a.max(b)] = a.min(b);
+                }
+            }
+        }
+        active.push(index);
+    }
+    let mut order: Vec<usize> = Vec::new();
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for index in 0..segments.len() {
+        let root = find(&mut parent, index);
+        let group = groups.entry(root).or_default();
+        if group.is_empty() {
+            order.push(root);
+        }
+        group.push(index);
+    }
+    order
+        .into_iter()
+        .filter_map(|root| groups.remove(&root))
+        .collect()
+}
+
+/// True when no two segments can share a key (no pair of key boxes intersects), so a key has at
+/// most one cold version. `None` when `max_pairs` first-column-overlapping pairs would have to be
+/// examined: the caller then treats the layout as possibly overlapping. Input sorted as for
+/// [`overlap_components`].
+#[must_use]
+pub fn keys_disjoint(segments: &[SegmentRange], max_pairs: usize) -> Option<bool> {
+    let mut active: Vec<usize> = Vec::new();
+    let mut examined = 0_usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let (lead_min, _) = segment.bounds.first()?;
+        active.retain(|other| {
+            segments[*other]
+                .bounds
+                .first()
+                .is_some_and(|(_, other_max)| other_max >= lead_min)
+        });
+        for other in &active {
+            examined += 1;
+            if examined > max_pairs {
+                return None;
+            }
+            if segment.may_share_keys(&segments[*other]) {
+                return Some(false);
+            }
+        }
+        active.push(index);
+    }
+    Some(true)
 }
 
 /// Segments to rewrite together, as indexes into the planner's input.
@@ -54,29 +163,7 @@ pub fn plan_compaction_units(
     max_unit_rows: i64,
 ) -> CompactionPlan {
     let mut plan = CompactionPlan::default();
-    let mut components: Vec<Vec<usize>> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    let mut current_max: Option<&[u8]> = None;
-    for (index, segment) in segments.iter().enumerate() {
-        match current_max {
-            Some(max) if segment.min.as_slice() <= max => {
-                current.push(index);
-                if segment.max.as_slice() > max {
-                    current_max = Some(segment.max.as_slice());
-                }
-            }
-            _ => {
-                if !current.is_empty() {
-                    components.push(std::mem::take(&mut current));
-                }
-                current.push(index);
-                current_max = Some(segment.max.as_slice());
-            }
-        }
-    }
-    if !current.is_empty() {
-        components.push(current);
-    }
+    let components = overlap_components(segments);
 
     let target = max_rows_per_file.max(1);
     let cap = max_unit_rows.max(1);
@@ -130,10 +217,13 @@ mod tests {
     use super::*;
 
     fn seg(rows: i64, min: u8, max: u8) -> SegmentRange {
+        SegmentRange::single(rows, vec![min], vec![max])
+    }
+
+    fn seg2(rows: i64, a: (u8, u8), b: (u8, u8)) -> SegmentRange {
         SegmentRange {
             row_count: rows,
-            min: vec![min],
-            max: vec![max],
+            bounds: vec![(vec![a.0], vec![a.1]), (vec![b.0], vec![b.1])],
         }
     }
 
@@ -191,5 +281,34 @@ mod tests {
     fn a_full_segment_separates_two_runs_and_lone_smalls_stay_alone() {
         let segments = [seg(10, 0, 1), seg(100, 2, 3), seg(10, 4, 5)];
         assert_eq!(plan_compaction_units(&segments, 100, 1000), CompactionPlan::default());
+    }
+
+    #[test]
+    fn composite_boxes_that_miss_on_the_second_column_do_not_overlap() {
+        // same leading range, but the second column separates them: no key can be in both
+        let segments = [seg2(100, (1, 5), (0, 9)), seg2(100, (1, 5), (10, 19))];
+        assert_eq!(keys_disjoint(&segments, 1000), Some(true));
+        assert!(overlap_components(&segments).iter().all(|c| c.len() == 1));
+        assert_eq!(plan_compaction_units(&segments, 100, 1000), CompactionPlan::default());
+    }
+
+    #[test]
+    fn composite_boxes_that_intersect_on_every_column_overlap() {
+        let segments = [seg2(100, (1, 5), (0, 9)), seg2(100, (3, 8), (5, 12))];
+        assert_eq!(keys_disjoint(&segments, 1000), Some(false));
+        assert_eq!(overlap_components(&segments), vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn disjointness_gives_up_past_the_pair_budget() {
+        let segments: Vec<_> = (0..50).map(|i| seg2(10, (0, 255), (i * 2, i * 2 + 1))).collect();
+        assert_eq!(keys_disjoint(&segments, 10), None);
+        assert_eq!(keys_disjoint(&segments, 100_000), Some(true));
+    }
+
+    #[test]
+    fn single_column_disjointness_matches_interval_overlap() {
+        assert_eq!(keys_disjoint(&[seg(1, 0, 9), seg(1, 10, 19)], 100), Some(true));
+        assert_eq!(keys_disjoint(&[seg(1, 0, 10), seg(1, 10, 19)], 100), Some(false));
     }
 }
