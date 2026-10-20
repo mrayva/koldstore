@@ -32,6 +32,8 @@ static GUARD_SCAN_WRITES: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static COLD_OBJECT_AUTO_PURGE: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
+static AUTO_COMPACTION: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static HYDRATING: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -385,6 +387,14 @@ pub fn define_gucs() {
         flags,
     );
     GucRegistry::define_bool_guc(
+        c"koldstore.auto_compaction",
+        c"Compacts cold segments of managed tables from the maintenance worker.",
+        c"Off (default). When on, each database's maintenance worker periodically runs a bounded koldstore.compact_table() pass over tables whose cold segments overlap or are small, skipping tables with a flush running. Replaced objects are deleted after the compaction grace (never shorter than koldstore.cold_object_retention_seconds), so enable it only once backups are arranged accordingly. Superuser-only.",
+        &AUTO_COMPACTION,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
         c"koldstore.cold_object_auto_purge",
         c"Deletes retained cold objects automatically once their retention window has passed.",
         c"Only has an effect while koldstore.cold_object_retention_seconds > 0. On (default), each database's maintenance worker removes the cold objects of dropped tables whose window has passed, in bounded batches, so koldstore.deferred_cold_deletes does not grow without limit. Turn off to purge only by calling koldstore.purge_deferred_cold_objects() yourself. Superuser-only.",
@@ -635,6 +645,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::COLD_OBJECT_RETENTION_SECONDS_GUC,
             internal: false,
             default_value: "0",
+        },
+        GucDefinition {
+            name: settings::AUTO_COMPACTION_GUC,
+            internal: false,
+            default_value: "off",
         },
         GucDefinition {
             name: settings::COLD_OBJECT_AUTO_PURGE_GUC,
@@ -1112,6 +1127,20 @@ pub fn flush_job_max_runtime_seconds() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    }
+}
+
+/// Whether the maintenance worker compacts cold segments on its own.
+#[must_use]
+pub fn auto_compaction() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        AUTO_COMPACTION.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
     }
 }
 

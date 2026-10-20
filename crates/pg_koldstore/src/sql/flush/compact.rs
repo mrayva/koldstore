@@ -65,24 +65,66 @@ pub(crate) fn compact_table_value(
     let _lock = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)?.ok_or_else(|| {
         "a flush or compaction is already running for this table; retry later".to_string()
     })?;
+    compact_locked(table_oid, max_rows, grace_seconds, false)
+}
+
+/// One bounded pass for the maintenance worker. `Ok(None)` when the table is busy (a flush or
+/// another compaction holds its lock) or has nothing the automatic mode will touch.
+fn auto_compact_table(
+    table_oid: pgrx::pg_sys::Oid,
+    max_rows: i64,
+) -> Result<Option<Value>, String> {
+    let Some(_lock) = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)? else {
+        return Ok(None);
+    };
+    let report = compact_locked(table_oid, max_rows, 0, true)?;
+    Ok(report["compacted"].as_bool().unwrap_or(false).then_some(report))
+}
+
+/// The pass itself, with the table's job lock held. `auto` makes unsupported tables a quiet
+/// no-op instead of an error, skips reaping (the reap tick does it), and restricts overlap
+/// components to tables whose rewrite is stable (ordered by the key): for others every pass
+/// would reread and rewrite the same layout.
+fn compact_locked(
+    table_oid: pgrx::pg_sys::Oid,
+    max_rows: i64,
+    grace_seconds: i32,
+    auto: bool,
+) -> Result<Value, String> {
+    let refuse = |message: String| -> Result<Value, String> {
+        if auto {
+            Ok(json!({ "compacted": false, "reason": message }))
+        } else {
+            Err(message)
+        }
+    };
     let ctx = load_flush_prepared_context(
         table_oid,
         false,
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(),
     )?;
-    let client = crate::object_store::open_managed_object_store_client(
-        &ctx.storage.storage_type,
-        &ctx.storage.base_path,
-        &ctx.storage.credentials,
-        &ctx.storage.config,
-    )
-    .map_err(|error| error.to_string())?;
-
-    let reaped = reap_compacted_segments(table_oid, &client, grace_seconds)?;
+    let open_client = || {
+        crate::object_store::open_managed_object_store_client(
+            &ctx.storage.storage_type,
+            &ctx.storage.base_path,
+            &ctx.storage.credentials,
+            &ctx.storage.config,
+        )
+        .map_err(|error| error.to_string())
+    };
+    let mut client = None;
+    let reaped = if auto {
+        0
+    } else {
+        let opened = open_client()?;
+        let reaped = reap_compacted_segments(table_oid, &opened, grace_seconds)?;
+        client = Some(opened);
+        reaped
+    };
     let catalog = &ctx.catalog;
     if catalog.primary_key.columns.len() != 1 {
-        return Err("compaction supports single-column primary keys only".to_string());
+        return refuse("compaction supports single-column primary keys only".to_string());
     }
     let pk = &catalog.primary_key.columns[0];
     let pk_column = catalog
@@ -91,7 +133,7 @@ pub(crate) fn compact_table_value(
     if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(pk_column.pg_type.type_oid())
         .is_none()
     {
-        return Err(format!(
+        return refuse(format!(
             "compaction needs Sort Key bounds for the primary key, which type `{}` has none",
             pk_column.catalog_type_name
         ));
@@ -99,7 +141,7 @@ pub(crate) fn compact_table_value(
 
     let (segments, scoped_segments) = list_active_segments(table_oid, &ctx)?;
     if scoped_segments > 0 {
-        return Err("compaction of user-scoped tables is not supported yet".to_string());
+        return refuse("compaction of user-scoped tables is not supported yet".to_string());
     }
     let segments_before = segments.len();
     // Delete markers may only be dropped when every segment's key range is known: a segment
@@ -124,11 +166,27 @@ pub(crate) fn compact_table_value(
             })
         })
         .collect();
-    let plan = plan_compaction_units(
+    let mut plan = plan_compaction_units(
         &ranges,
         i64::try_from(ctx.max_rows_per_file).unwrap_or(i64::MAX),
         max_rows,
     );
+    if auto {
+        let key_ordered = ctx
+            .snapshot
+            .segment_order_column_id
+            .is_none_or(|column_id| column_id == pk.column_id);
+        if !key_ordered {
+            plan.units.retain(|unit| !unit.overlapping);
+        }
+        if plan.units.is_empty() {
+            return Ok(json!({ "compacted": false }));
+        }
+    }
+    let client = match client {
+        Some(client) => client,
+        None => open_client()?,
+    };
 
     let started = std::time::Instant::now();
     let mut budget = max_rows;
@@ -562,4 +620,55 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
         reaped += reap_table(table_oid, grace)?;
     }
     Ok(Some(json!({ "reaped_segments": reaped })))
+}
+
+/// Rows the maintenance worker may read per tick across all tables.
+const AUTO_COMPACTION_TICK_ROWS: i64 = 200_000;
+
+/// One maintenance pass of automatic compaction (`koldstore.auto_compaction`). `Ok(None)` when it
+/// is off or nothing was compacted.
+pub(crate) fn auto_compaction_tick() -> Result<Option<Value>, String> {
+    if !crate::guc::auto_compaction() {
+        return Ok(None);
+    }
+    let tables: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
+        client
+            .select(
+                "SELECT table_oid FROM koldstore.cold_segments \
+                 WHERE status = 'active' AND scope_key = '' \
+                 GROUP BY table_oid HAVING count(*) >= 2 ORDER BY table_oid",
+                None,
+                &[],
+            )?
+            .map(|row| {
+                Ok(row
+                    .get::<pgrx::pg_sys::Oid>(1)?
+                    .unwrap_or(pgrx::pg_sys::InvalidOid))
+            })
+            .collect::<Result<Vec<_>, pgrx::spi::Error>>()
+    })
+    .map_err(|error| error.to_string())?;
+    let mut budget = AUTO_COMPACTION_TICK_ROWS;
+    let (mut tables_compacted, mut rows_read) = (0_i64, 0_i64);
+    for table_oid in tables {
+        if budget <= 0 {
+            break;
+        }
+        // One table's failure (storage hiccup, dropped mid-pass) must not starve the others.
+        match auto_compact_table(table_oid, budget) {
+            Ok(Some(report)) => {
+                let read = report["rows_read"].as_i64().unwrap_or(0);
+                budget -= read.max(1);
+                rows_read += read;
+                tables_compacted += 1;
+            }
+            Ok(None) => {}
+            Err(error) => pgrx::warning!(
+                "koldstore auto-compaction: table oid {} skipped: {error}",
+                table_oid.to_u32()
+            ),
+        }
+    }
+    Ok((tables_compacted > 0)
+        .then(|| json!({ "tables_compacted": tables_compacted, "rows_read": rows_read })))
 }

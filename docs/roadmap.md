@@ -87,13 +87,12 @@ into fewer, larger files under the same table (and scope) prefix so cold scans
 open less objects and object-store LIST/GET overhead drops.
 
 Done: `koldstore.compact_table` (on demand; reaping of replaced objects also runs in the maintenance
-worker). It keeps the newest version of each key, drops delete markers, restores key-disjoint segments for
+worker; `koldstore.auto_compaction` lets the worker compact on its own). It keeps the newest version of each key, drops delete markers, restores key-disjoint segments for
 tables ordered by their primary key, packs runs of small segments, and publishes through the manifest-generation
 CAS shared with flush finalize (see [ADR-004](decisions/004-segment-publication-protocol.md)).
 
 Still open:
 
-- an automatic compaction trigger (today it is called by an operator or a scheduler such as pg_cron)
 - user-scoped tables and composite primary keys
 - streaming merges for units larger than `max_rows` (a unit is read into memory)
 - keeping `changes_since` history of overwritten cold versions

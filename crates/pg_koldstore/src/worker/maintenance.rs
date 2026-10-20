@@ -193,6 +193,17 @@ fn run_auto_purge(database_oid: u32) {
             "koldstore maintenance worker db={database_oid}: auto-purge deferred: {error}"
         ),
     }
+    match super::txn::run_recoverable("auto-compaction", crate::sql::flush::compact::auto_compaction_tick) {
+        Ok(Some(report)) => pgrx::log!(
+            "koldstore maintenance worker db={database_oid}: auto-compaction tables={} rows_read={}",
+            report["tables_compacted"],
+            report["rows_read"]
+        ),
+        Ok(None) => {}
+        Err(error) => pgrx::warning!(
+            "koldstore maintenance worker db={database_oid}: auto-compaction deferred: {error}"
+        ),
+    }
     // Compacted segments are retired objects of live tables (see `sql::flush::compact`); they are
     // reaped on the same cadence, independently of the retention setting above.
     match super::txn::run_recoverable("compacted segment reap", crate::sql::flush::compact::reap_tick) {

@@ -215,6 +215,8 @@ pub const fn bounded_flush_job_max_runtime_seconds(value: i32) -> i32 {
     }
 }
 
+/// GUC name: let the maintenance worker compact cold segments of managed tables on its own.
+pub const AUTO_COMPACTION_GUC: &str = "koldstore.auto_compaction";
 /// GUC name: purge retained cold objects automatically once their window has passed.
 pub const COLD_OBJECT_AUTO_PURGE_GUC: &str = "koldstore.cold_object_auto_purge";
 /// GUC name: seconds to keep cold objects of a dropped / unmanaged table before they may be purged.

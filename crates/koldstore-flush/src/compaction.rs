@@ -28,6 +28,9 @@ pub struct CompactionUnit {
     pub members: Vec<usize>,
     /// Sum of the members' row counts (what the rewrite reads).
     pub rows: i64,
+    /// True for an overlap component (it may hold several versions of a key); false for a run of
+    /// small disjoint segments.
+    pub overlapping: bool,
 }
 
 /// The planned units plus what was left out.
@@ -84,6 +87,7 @@ pub fn plan_compaction_units(
             plan.units.push(CompactionUnit {
                 members: std::mem::take(run),
                 rows: *run_rows,
+                overlapping: false,
             });
         } else {
             run.clear();
@@ -100,6 +104,7 @@ pub fn plan_compaction_units(
                 plan.units.push(CompactionUnit {
                     members: component,
                     rows,
+                    overlapping: true,
                 });
             }
             continue;
@@ -146,7 +151,8 @@ mod tests {
             plan.units,
             vec![CompactionUnit {
                 members: vec![0, 1],
-                rows: 200
+                rows: 200,
+                overlapping: true
             }]
         );
     }
