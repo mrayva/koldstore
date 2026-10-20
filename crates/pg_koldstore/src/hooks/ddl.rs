@@ -98,14 +98,21 @@ mod process_utility {
             let mut refresh_oid = None;
             let mut renamed_schema = None;
             let mut copy_from_oid = None;
+            // Partitions created or attached by this statement; a partition template manages them.
+            let mut new_partitions: Vec<*mut pg_sys::RangeVar> = Vec::new();
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
                     pg_sys::NodeTag::T_CreateStmt => {
-                        reject_create_in_managed_hierarchy((*copied).utilityStmt.cast::<pg_sys::CreateStmt>());
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::CreateStmt>();
+                        reject_create_in_managed_hierarchy(stmt);
+                        if !(*stmt).partbound.is_null() {
+                            new_partitions.push((*stmt).relation);
+                        }
                     }
                     pg_sys::NodeTag::T_AlterTableStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
                         reject_alter_hierarchy_of_managed(stmt);
+                        collect_attached_partitions(stmt, &mut new_partitions);
                         captured = strip_options(stmt);
                         has_standard_actions = !(*stmt).cmds.is_null();
                         refresh_oid = relation_oid_from_range_var((*stmt).relation);
@@ -128,6 +135,9 @@ mod process_utility {
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
                         drop_oids = drop_table_oids(stmt);
+                        if crate::catalog::cache::managed_catalog_ready() {
+                            drop_oids = crate::sql::migrate::partition::expand_drop_targets(drop_oids);
+                        }
                     }
                     pg_sys::NodeTag::T_CopyStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::CopyStmt>();
@@ -169,6 +179,15 @@ mod process_utility {
             }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);
+            }
+            if !new_partitions.is_empty() && crate::catalog::cache::managed_catalog_ready() {
+                // The partition must be visible to the SPI the template lookup and manage run.
+                pg_sys::CommandCounterIncrement();
+                for relation in new_partitions {
+                    if let Some(oid) = relation_oid_from_range_var(relation) {
+                        crate::sql::migrate::partition::auto_manage_new_partition(oid);
+                    }
+                }
             }
             if let Some(table_oid) = copy_from_oid {
                 let copied_rows = qc.is_null() || (*qc).nprocessed > 0;
@@ -508,6 +527,28 @@ mod process_utility {
                         reject_if_managed((*stmt).relation, "ALTER TABLE ... ATTACH PARTITION");
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    /// The partitions named by `ALTER TABLE ... ATTACH PARTITION` commands of `stmt`.
+    unsafe fn collect_attached_partitions(
+        stmt: *mut pg_sys::AlterTableStmt,
+        out: &mut Vec<*mut pg_sys::RangeVar>,
+    ) {
+        unsafe {
+            if stmt.is_null() || (*stmt).cmds.is_null() {
+                return;
+            }
+            for cmd in crate::merge_scan::pg::literals::list_node_pointers((*stmt).cmds) {
+                let cmd = cmd.cast::<pg_sys::AlterTableCmd>();
+                if cmd.is_null() || (*cmd).subtype != pg_sys::AlterTableType::AT_AttachPartition {
+                    continue;
+                }
+                let partition = (*cmd).def.cast::<pg_sys::PartitionCmd>();
+                if !partition.is_null() && !(*partition).name.is_null() {
+                    out.push((*partition).name);
                 }
             }
         }

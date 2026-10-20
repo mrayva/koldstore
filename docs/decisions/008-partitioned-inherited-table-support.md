@@ -22,6 +22,26 @@ are covered too, through the planner hook's probe built against the parent
 koldstore's scan-path installation. Nothing is open for partitioned
 targets.
 
+### Sixth slice: managing the partitioned parent (2026-10-19)
+
+`manage_table(parent)` is accepted. It manages every current leaf with the given options (skipping
+foreign-table partitions) and records the options in `koldstore.partition_templates` keyed by the
+parent's OID; the parent itself still gets no `koldstore.schemas` row, mirror, trigger or scan hook.
+A `ProcessUtility` hook then manages partitions created by `CREATE TABLE ... PARTITION OF` or attached
+by `ALTER TABLE ... ATTACH PARTITION`, in the DDL's own transaction, using the nearest ancestor's
+template (sub-partitioned nodes have no heap and pass the template down to their leaves). A failure to
+manage the new partition fails the DDL, so a partition is never silently left cold-incapable;
+`koldstore.set_partition_auto_manage(parent, false)` pauses it. `unmanage_table`, `flush_table`,
+`enqueue_flush_job`, `set_table_auto_flush` and `table_status` on the parent fan out to the managed
+leaves (`set_table_auto_flush` also updates the template); `DROP TABLE parent` expands to every leaf it
+drops so each gets the usual cold-object cleanup, and forgets the templates. Leaves stay independent:
+detaching or unmanaging one does not touch its siblings or the template.
+
+Two details worth keeping: the logical slot must exist before the DDL's transaction takes an XID, so
+`manage_table(parent)` provisions capture first even for a parent with no partitions yet, and parent
+detection uses `client.select` rather than `Spi::get_one_with_args` (which assigns an XID and would
+make slot provisioning refuse). Covered by `tests/sql/partitioned_parent.sql`.
+
 ## Date
 
 2026-10-02

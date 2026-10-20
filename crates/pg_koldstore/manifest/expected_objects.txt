@@ -87,6 +87,11 @@ column manifest.segment_count integer not null
 column manifest.sync_state text not null
 column manifest.table_oid oid not null
 column manifest.updated_at timestamp with time zone not null
+column partition_templates.auto_manage boolean not null
+column partition_templates.created_at timestamp with time zone not null
+column partition_templates.options jsonb not null
+column partition_templates.parent_oid oid not null
+column partition_templates.template_id uuid not null
 column schemas.activation_lsn pg_lsn
 column schemas.active boolean not null
 column schemas.columns jsonb not null
@@ -158,6 +163,7 @@ function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb 
 function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]
+function set_partition_auto_manage(table_name regclass, enabled boolean) returns boolean security definer [set_partition_auto_manage_pg_wrapper]
 function set_table_auto_flush(table_name regclass, enabled boolean) returns boolean security definer [set_table_auto_flush_pg_wrapper]
 function snowflake_id() returns bigint [snowflake_id_wrapper]
 function spock_pk_object(rel regclass, obj jsonb) returns jsonb [sql:8f43ded2dfa8]

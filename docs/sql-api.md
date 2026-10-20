@@ -126,7 +126,8 @@ Every SQL-callable function the extension installs today:
 | `koldstore.register_storage(...)` | `uuid` | Storage backend id (`koldstore.storage.id`) |
 | `koldstore.alter_storage_credentials(...)` | `void` | No value |
 | `koldstore.alter_storage_location(...)` | `uuid` | Storage backend id |
-| `koldstore.manage_table(...)` | `uuid` | Migration job id (`koldstore.jobs.id`) |
+| `koldstore.manage_table(...)` | `uuid` | Migration job id (`koldstore.jobs.id`); for a partitioned table, the partition template id |
+| `koldstore.set_partition_auto_manage(...)` | `boolean` | `true` when the table has a partition template |
 | `koldstore.set_table_auto_flush(...)` | `boolean` | `true` when an active managed table was updated |
 | `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
 | `koldstore.wait_for_async_mirror()` | `bigint` | Async source row changes applied by this fence |
@@ -345,6 +346,24 @@ Manual `flush_table` / `enqueue_flush_job` ignore this flag. See
 [Scheduling](operations/scheduling.md).
 
 **Returns:** `boolean` — `true` when an active managed row was updated.
+
+### Partitioned tables
+
+`manage_table`, `unmanage_table`, `flush_table`, `enqueue_flush_job`, `set_table_auto_flush` and
+`table_status` accept a partitioned table. `manage_table` manages every leaf partition with the given
+options and remembers them (`koldstore.partition_templates`), so a partition created or attached later
+is managed the same way in the same transaction; the other functions fan out to the managed leaves.
+`table_status` returns `partitioned_parent`, `partitions_total`, `partitions_managed`,
+`auto_manage_new_partitions`, the `template`, summed `hot_rows` / `mirror_rows` / `cold_row_count` /
+`cold_segment_count` / `pending_jobs` / size fields, and a `partitions` array with each partition's own
+status. `enqueue_flush_job(parent)` enqueues every leaf and returns the first job id.
+
+```sql
+SELECT koldstore.set_partition_auto_manage('events', false);  -- stop managing new partitions
+SELECT koldstore.set_partition_auto_manage('events', true);   -- resume
+```
+
+See [limitations](limitations.md) and [ADR-008](decisions/008-partitioned-inherited-table-support.md).
 
 ### `koldstore.unmanage_table`
 

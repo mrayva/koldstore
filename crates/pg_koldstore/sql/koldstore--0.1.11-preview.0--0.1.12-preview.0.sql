@@ -361,3 +361,21 @@ AS 'MODULE_PATHNAME', 'purge_deferred_cold_objects_pg_wrapper';
 
 -- Point-lookup segment pruning: per-segment membership bitmap of the primary-key values.
 ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS value_summary bytea;
+
+-- Managed partitioned tables: the options applied to partitions created or attached later.
+CREATE TABLE IF NOT EXISTS koldstore.partition_templates (
+  parent_oid oid PRIMARY KEY,
+  template_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  options jsonb NOT NULL,
+  auto_manage boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+REVOKE ALL ON koldstore.partition_templates FROM PUBLIC;
+
+CREATE FUNCTION koldstore."set_partition_auto_manage"(
+	"table_name" regclass,
+	"enabled" bool
+) RETURNS bool
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'set_partition_auto_manage_pg_wrapper';

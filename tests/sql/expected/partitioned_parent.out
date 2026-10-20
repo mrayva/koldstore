@@ -1,0 +1,213 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 150
+SELECT 150
+ parent_managed
+----------------
+ t
+(1 row)
+
+    leaves_after_manage
+---------------------------
+ {sqlreg.pp_1,sqlreg.pp_2}
+(1 row)
+
+ templates
+-----------
+         1
+(1 row)
+
+ parent_schema_rows
+--------------------
+                  0
+(1 row)
+
+psql:<PATH>: ERROR:  migrate table failed: sqlreg.pp is already managed as a partitioned table; unmanage_table() it first to change its options
+ caught_up
+-----------
+ t
+(1 row)
+
+ flushed | via_parent
+---------+------------
+ t       | true
+(1 row)
+
+ status_managed | status_total | mostly_cold | has_async_mirror
+----------------+--------------+-------------+------------------
+              2 |            2 | t           | t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+CREATE TABLE
+          leaves_after_create
+---------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3}
+(1 row)
+
+CREATE TABLE
+ALTER TABLE
+                leaves_after_attach
+---------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4}
+(1 row)
+
+CREATE TABLE
+INSERT 0 31
+ALTER TABLE
+                 leaves_after_populated_attach
+---------------------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4,sqlreg.pp_5}
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+                           leaves_after_subpartition
+-------------------------------------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4,sqlreg.pp_5,sqlreg.pp_sub_a}
+(1 row)
+
+ pp_3_hot_row_limit
+--------------------
+ 5
+(1 row)
+
+INSERT 0 31
+INSERT 0 31
+INSERT 0 31
+INSERT 0 21
+INSERT 0 21
+ caught_up_2
+-------------
+ t
+(1 row)
+
+ flushed_2
+-----------
+ t
+(1 row)
+
+ rows_identical_after_growth
+-----------------------------
+ t
+(1 row)
+
+ paused
+--------
+ t
+(1 row)
+
+CREATE TABLE
+                              leaves_while_paused
+-------------------------------------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4,sqlreg.pp_5,sqlreg.pp_sub_a}
+(1 row)
+
+ resumed
+---------
+ t
+(1 row)
+
+CREATE TABLE
+                                    leaves_after_resume
+-------------------------------------------------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4,sqlreg.pp_5,sqlreg.pp_7,sqlreg.pp_sub_a}
+(1 row)
+
+ autoflush_on
+--------------
+ t
+(1 row)
+
+ all_leaves_autoflush
+----------------------
+ t
+(1 row)
+
+ autoflush_off
+---------------
+ t
+(1 row)
+
+ any_leaf_autoflush
+--------------------
+ f
+(1 row)
+
+CREATE TABLE
+ new_leaf_autoflush
+--------------------
+ f
+(1 row)
+
+ALTER TABLE
+ detached_still_managed
+------------------------
+                      1
+(1 row)
+
+                                    leaves_after_detach
+-------------------------------------------------------------------------------------------
+ {sqlreg.pp_1,sqlreg.pp_2,sqlreg.pp_3,sqlreg.pp_4,sqlreg.pp_5,sqlreg.pp_8,sqlreg.pp_sub_a}
+(1 row)
+
+DROP TABLE
+ parent_unmanaged
+------------------
+ t
+(1 row)
+
+ leaves_after_unmanage
+-----------------------
+ {}
+(1 row)
+
+ templates_after_unmanage
+--------------------------
+                        0
+(1 row)
+
+ rows_identical_after_unmanage
+-------------------------------
+ t
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+INSERT 0 20
+ dp_managed
+------------
+ t
+(1 row)
+
+CREATE TABLE
+         dp_leaves
+---------------------------
+ {sqlreg.dp_1,sqlreg.dp_2}
+(1 row)
+
+DROP TABLE
+ leaf_schema_rows_left | template_rows_left
+-----------------------+--------------------
+                     0 |                  0
+(1 row)
+
+CREATE TABLE
+ ep_managed
+------------
+ t
+(1 row)
+
+CREATE TABLE
+   ep_leaves
+---------------
+ {sqlreg.ep_1}
+(1 row)
+

@@ -13,6 +13,8 @@ mod manage;
 #[cfg(feature = "pg")]
 mod migration_jobs;
 #[cfg(feature = "pg")]
+pub(crate) mod partition;
+#[cfg(feature = "pg")]
 mod schema_registry;
 #[cfg(feature = "pg")]
 mod unmanage;
@@ -103,6 +105,31 @@ pub fn manage_table_pg(
     allow_fk_hot_only: pgrx::default!(bool, false),
 ) -> pgrx::Uuid {
     crate::security::require_relation_owner_or_superuser(table_name.0, "manage this table");
+    if partition::is_partitioned_parent(table_name.0) {
+        // A partitioned table has no heap: manage every leaf and remember the options for new ones.
+        return partition::manage_parent(
+            table_name.0,
+            partition::ManageArgs {
+                storage: storage.to_string(),
+                table_type: table_type.to_string(),
+                scope_column: scope_column.map(ToString::to_string),
+                migration_order_by: migration_order_by.map(ToString::to_string),
+                compression: compression.map(ToString::to_string),
+                target_file_size_mb,
+                hot_row_limit,
+                min_flush_rows,
+                max_rows_per_file,
+                auto_flush,
+                segment_order_column: segment_order_column.map(ToString::to_string),
+                pruning_columns,
+                bloom_filter_columns,
+                parquet_row_group_size,
+                parquet_data_page_row_count_limit,
+                parquet_bloom_filter_fpp,
+                allow_fk_hot_only,
+            },
+        );
+    }
     manage::manage_table_pg_impl(
         table_name.0,
         table_type,
@@ -136,6 +163,9 @@ pub fn set_table_auto_flush_pg(table_name: pgrx::PgRelation, enabled: bool) -> b
         table_name.oid(),
         "change this table's auto-flush setting",
     );
+    if partition::is_partitioned_parent(table_name.oid()) {
+        return partition::set_auto_flush_parent(table_name.oid(), enabled);
+    }
     set_table_auto_flush_pg_impl(table_name.oid(), enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
 }
@@ -158,6 +188,25 @@ pub fn unmanage_table_pg(
         rehydrate: rehydrate.unwrap_or(true),
         drop_cold: drop_cold.unwrap_or(false),
     };
+    if partition::is_partitioned_parent(table_oid) {
+        return partition::unmanage_parent(table_oid, options);
+    }
     unmanage::unmanage_table_pg_impl(table_oid, options)
         .unwrap_or_else(|error| pgrx::error!("unmanage table failed: {error}"))
+}
+
+/// Pauses or resumes managing new partitions of a managed partitioned table.
+///
+/// SQL contract: `koldstore.set_partition_auto_manage(table_name regclass, enabled boolean) → boolean`
+/// (`true` when the table has a partition template). While paused, `CREATE TABLE ... PARTITION OF`
+/// and `ATTACH PARTITION` leave the new partition unmanaged; `manage_table(partition, ...)` still
+/// manages it by hand.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "set_partition_auto_manage", schema = "koldstore", security_definer)]
+pub fn set_partition_auto_manage_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    crate::security::require_relation_owner_or_superuser(
+        table_name.oid(),
+        "change this table's partition auto-management",
+    );
+    partition::set_auto_manage(table_name.oid(), enabled)
 }

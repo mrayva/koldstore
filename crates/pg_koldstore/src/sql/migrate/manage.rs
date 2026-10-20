@@ -70,9 +70,9 @@ fn reject_unsupported_relation_kind(table_oid: pgrx::pg_sys::Oid) {
         let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
             .unwrap_or_else(|_| format!("(oid {})", table_oid.to_u32()));
         pgrx::error!(
-            "migrate table failed: cannot manage {relation}: {reason}; a managed table cannot itself be a \
-             partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or \
-             inheritance child may still be managed on its own"
+            "migrate table failed: cannot manage {relation}: {reason}; only ordinary permanent tables, \
+             partitions and inheritance children can be managed (upstream issue #125, ADR-008). A \
+             partitioned table is managed through manage_table(), which manages its partitions"
         );
     }
 }

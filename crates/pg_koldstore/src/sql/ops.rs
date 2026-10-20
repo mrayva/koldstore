@@ -20,7 +20,11 @@ pub fn table_status_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
 
 #[cfg(feature = "pg")]
 fn table_status_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<serde_json::Value, String> {
-    let mut value = table_status_fields(table_oid)?;
+    let mut value = if crate::sql::migrate::partition::is_partitioned_parent(table_oid) {
+        crate::sql::migrate::partition::status_parent(table_oid)?
+    } else {
+        table_status_fields(table_oid)?
+    };
     let async_mirror = crate::mirror::status::async_mirror_status_value()
         .unwrap_or_else(|error| serde_json::json!({ "error": error, "healthy": false }));
     if let Some(obj) = value.as_object_mut() {
@@ -31,7 +35,7 @@ fn table_status_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<serde_json::Valu
 
 /// Table-only status fields (no async mirror). Used by [`table_status_pg_impl`].
 #[cfg(feature = "pg")]
-fn table_status_fields(table_oid: pgrx::pg_sys::Oid) -> Result<serde_json::Value, String> {
+pub(crate) fn table_status_fields(table_oid: pgrx::pg_sys::Oid) -> Result<serde_json::Value, String> {
     use pgrx::datum::DatumWithOid;
 
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;

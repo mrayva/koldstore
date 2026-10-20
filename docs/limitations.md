@@ -85,11 +85,23 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   parent row is refused (the referential-integrity scan of the child needs row locks,
   which cold rows do not support, #125), so parent rows cannot be removed while such a
   child has cold rows. Foreign keys are enforced on hot rows only.
-- A managed table cannot itself be a partitioned table or an inheritance
-  *parent* -- it has no storage of its own to flush or scan
+- **Partitioned tables.** `manage_table(partitioned_parent, ...)` manages every
+  current leaf partition with the given options and records them as a
+  *template* (`koldstore.partition_templates`); a partition created
+  (`CREATE TABLE ... PARTITION OF`) or attached (`ATTACH PARTITION`) later --
+  at any depth of sub-partitioning -- is managed with the same options in the
+  same transaction, and a failure to manage it fails that DDL
+  (`koldstore.set_partition_auto_manage(parent, false)` pauses this). On the
+  parent, `unmanage_table`, `flush_table`, `enqueue_flush_job`,
+  `set_table_auto_flush` and `table_status` fan out to the managed leaves
+  (`table_status` adds roll-up totals and a per-partition breakdown), and
+  `DROP TABLE parent` cleans up every managed leaf it drops. Foreign-table
+  partitions are skipped with a notice. The parent itself never gets a catalog
+  row -- it has no storage of its own to flush or scan -- and detaching a leaf
+  leaves it managed on its own. An inheritance *parent* still cannot be managed
   ([#125](https://github.com/kalamdb/koldstore/issues/125),
   [ADR-008](decisions/008-partitioned-inherited-table-support.md)). A
-  partition or inheritance **child/leaf** may be managed on its own, exactly
+  partition or inheritance **child/leaf** may also be managed on its own, exactly
   like a plain table, and `ATTACH PARTITION`/`INHERIT`/`DETACH PARTITION` work
   normally in either direction as long as the relation taking the *parent*
   role is not itself managed. A plain `SELECT` through the parent sees a
@@ -174,7 +186,7 @@ any row or object is changed.
 | A statement whose WHERE clause cannot be reproduced at all (a volatile function, `WHERE CURRENT OF`, a CTE used as a join source) | refused whenever the table has cold data | `cold_dml_scan_guard` |
 | Plain `UPDATE`/`DELETE` on cold-only rows, single table -- the top-level statement or a data-modifying CTE's own target -- or a row-changing `MERGE` (experimental, `koldstore.hydrate_on_write = on`) | supported by hydrating the rows first, up to `koldstore.max_hydrate_rows`; `READ COMMITTED`/`REPEATABLE READ` always, `SERIALIZABLE` only when `koldstore.reject_serializable_cold_reads` is off; user insert triggers fire for the hydrated rows; a `MERGE` inside a CTE is not attempted | `hydrate_on_write` |
 | `MERGE` changing target rows through a join the planner hook's probe cannot reproduce (a CTE source, a volatile function in the `ON` clause), or with `koldstore.hydrate_on_write` off (the default) | refused if the `ON` clause also matches cold-only target rows (a precise recount, not a blanket "the table has cold data" rejection) | `cold_dml_scan_guard` |
-| Partitioned, inherited, foreign, temporary, unlogged tables, views | refused by `manage_table` | `manage_relation_kinds` |
+| Inheritance parents, foreign, temporary, unlogged tables, views | refused by `manage_table` (a partitioned table is managed through its leaves) | `manage_relation_kinds`, `partitioned_parent` |
 | Adding a managed table to a hierarchy | refused | `manage_relation_kinds` |
 | Renaming/moving-schema a managed table (or its schema) with cold data | refused | `unsupported_constructs` |
 | `COPY <table> TO ...` (plain table form) on a managed table with cold data | refused | `unsupported_constructs` |

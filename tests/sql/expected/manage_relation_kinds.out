@@ -7,11 +7,13 @@ CREATE TABLE
 
 CREATE TABLE
 CREATE TABLE
-                                                                                                                          partitioned_parent
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_part: it is a partitioned table; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+ partitioned_parent
+--------------------
+ managed
 (1 row)
 
+CREATE TABLE
+CREATE TABLE
  partition_child
 -----------------
  managed
@@ -19,9 +21,9 @@ CREATE TABLE
 
 CREATE TABLE
 CREATE TABLE
-                                                                                                                              inheritance_parent
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_inh_parent: it has inheritance children; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                         inheritance_parent
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_inh_parent: it has inheritance children; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
                          inheritance_child
@@ -36,46 +38,46 @@ CREATE TABLE
 (1 row)
 
 CREATE TABLE
-                                                                                                                           temporary_table
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage pg_temp.k_temp: it is a temporary table; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                      temporary_table
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage pg_temp.k_temp: it is a temporary table; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 CREATE TABLE
-                                                                                                                             unlogged_table
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_unlogged: it is an unlogged table; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                        unlogged_table
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_unlogged: it is an unlogged table; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 CREATE FOREIGN DATA WRAPPER
 CREATE SERVER
 CREATE FOREIGN TABLE
-                                                                                                                            foreign_table
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_foreign: it is a foreign table; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                       foreign_table
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_foreign: it is a foreign table; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 CREATE VIEW
-                                                                                                                        plain_view
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_view: it is a view; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                   plain_view
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_view: it is a view; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 SELECT 0
-                                                                                                                            materialized_view
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_matview: it is a materialized view; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                       materialized_view
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_matview: it is a materialized view; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 CREATE SEQUENCE
-                                                                                                                          sequence
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_seq: it is a sequence; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                     sequence
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_seq: it is a sequence; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
-                                                                                                                          index_relation
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: cannot manage sqlreg.k_plain_pkey: it is an index; a managed table cannot itself be a partitioned table or an inheritance parent (upstream issue #125, ADR-008) -- a partition or inheritance child may still be managed on its own
+                                                                                                                                     index_relation
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: migrate table failed: cannot manage sqlreg.k_plain_pkey: it is an index; only ordinary permanent tables, partitions and inheritance children can be managed (upstream issue #125, ADR-008). A partitioned table is managed through manage_table(), which manages its partitions
 (1 row)
 
 CREATE TABLE

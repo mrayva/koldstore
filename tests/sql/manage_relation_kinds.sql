@@ -28,13 +28,16 @@ $$;
 CREATE TABLE sqlreg.k_plain (id bigint PRIMARY KEY, v text);
 SELECT sqlreg.try_manage('sqlreg.k_plain') AS plain_table;
 
--- partitioned table: the parent stays unmanageable (ADR-008: no storage of
--- its own to flush or scan), but a partition leaf may be managed on its own,
--- exactly like a plain table -- its own local PK-backed index is enough.
+-- partitioned table: the parent has no storage of its own, so manage_table(parent) manages its
+-- leaves (ADR-008, sixth slice; see partitioned_parent.sql) rather than the parent itself; a
+-- partition leaf may also be managed on its own, exactly like a plain table -- its own local
+-- PK-backed index is enough.
 CREATE TABLE sqlreg.k_part (id bigint, v text, PRIMARY KEY (id)) PARTITION BY RANGE (id);
 CREATE TABLE sqlreg.k_part_1 PARTITION OF sqlreg.k_part FOR VALUES FROM (0) TO (100);
 SELECT sqlreg.try_manage('sqlreg.k_part') AS partitioned_parent;
-SELECT sqlreg.try_manage('sqlreg.k_part_1') AS partition_child;
+CREATE TABLE sqlreg.k_part2 (id bigint, v text, PRIMARY KEY (id)) PARTITION BY RANGE (id);
+CREATE TABLE sqlreg.k_part2_1 PARTITION OF sqlreg.k_part2 FOR VALUES FROM (0) TO (100);
+SELECT sqlreg.try_manage('sqlreg.k_part2_1') AS partition_child;
 
 -- plain inheritance: the parent stays unmanageable for the same reason. A
 -- plain-inheritance child is a different story from a partition child,

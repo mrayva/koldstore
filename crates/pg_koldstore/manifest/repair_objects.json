@@ -122,6 +122,16 @@
                 "ALTER TABLE koldstore.cold_segment_index ADD CONSTRAINT cold_segment_index_segment_id_fkey FOREIGN KEY (segment_id) REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE"
             ]
         },
+        "partition_templates": {
+            "create": "CREATE TABLE koldstore.partition_templates (parent_oid oid NOT NULL, template_id uuid DEFAULT gen_random_uuid() NOT NULL, options jsonb NOT NULL, auto_manage boolean DEFAULT true NOT NULL, created_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.partition_templates ADD CONSTRAINT partition_templates_pkey PRIMARY KEY (parent_oid)"
+            ],
+            "foreign_keys": [
+            ]
+        },
         "deferred_cold_deletes": {
             "create": "CREATE TABLE koldstore.deferred_cold_deletes (id bigint DEFAULT nextval('koldstore.deferred_cold_deletes_id_seq'::regclass) NOT NULL, storage_id text NOT NULL, table_oid oid NOT NULL, object_key text NOT NULL, staged_at timestamp with time zone DEFAULT now() NOT NULL)",
             "indexes": [
@@ -636,6 +646,12 @@
             "unsupported": false,
             "needs_default": false
         },
+        "column partition_templates.options jsonb not null": {
+            "add": "ALTER TABLE koldstore.partition_templates ADD COLUMN options jsonb",
+            "table": "partition_templates",
+            "unsupported": false,
+            "needs_default": true
+        },
         "column schemas.initialization_state text not null": {
             "add": "ALTER TABLE koldstore.schemas ADD COLUMN initialization_state text DEFAULT 'not_started'::text NOT NULL",
             "table": "schemas",
@@ -651,6 +667,12 @@
         "column cold_segments.batch_number integer not null": {
             "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN batch_number integer",
             "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column partition_templates.parent_oid oid not null": {
+            "add": "ALTER TABLE koldstore.partition_templates ADD COLUMN parent_oid oid",
+            "table": "partition_templates",
             "unsupported": false,
             "needs_default": true
         },
@@ -677,6 +699,12 @@
             "table": "cold_segments",
             "unsupported": false,
             "needs_default": true
+        },
+        "column partition_templates.template_id uuid not null": {
+            "add": "ALTER TABLE koldstore.partition_templates ADD COLUMN template_id uuid DEFAULT gen_random_uuid() NOT NULL",
+            "table": "partition_templates",
+            "unsupported": false,
+            "needs_default": false
         },
         "column async_mirror_state.applied_lsn pg_lsn not null": {
             "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN applied_lsn pg_lsn",
@@ -735,6 +763,12 @@
         "column cold_segment_order_index.scope_key text not null": {
             "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN scope_key text DEFAULT ''::text NOT NULL",
             "table": "cold_segment_order_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column partition_templates.auto_manage boolean not null": {
+            "add": "ALTER TABLE koldstore.partition_templates ADD COLUMN auto_manage boolean DEFAULT true NOT NULL",
+            "table": "partition_templates",
             "unsupported": false,
             "needs_default": false
         },
@@ -879,6 +913,12 @@
         "column async_mirror_state.updated_at timestamp with time zone not null": {
             "add": "ALTER TABLE koldstore.async_mirror_state ADD COLUMN updated_at timestamp with time zone DEFAULT now() NOT NULL",
             "table": "async_mirror_state",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column partition_templates.created_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.partition_templates ADD COLUMN created_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "partition_templates",
             "unsupported": false,
             "needs_default": false
         },
@@ -1110,6 +1150,12 @@
             "add": "koldstore.internal_set_async_mirror_ensure_paused(paused boolean)",
             "name": "internal_set_async_mirror_ensure_paused",
             "create": "CREATE OR REPLACE FUNCTION koldstore.internal_set_async_mirror_ensure_paused(paused boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_async_mirror_ensure_paused_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function set_partition_auto_manage(table_name regclass, enabled boolean) returns boolean security definer [set_partition_auto_manage_pg_wrapper]": {
+            "add": "koldstore.set_partition_auto_manage(table_name regclass, enabled boolean)",
+            "name": "set_partition_auto_manage",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.set_partition_auto_manage(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_partition_auto_manage_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_bump_row_counts(p_table_oid oid, p_hot_delta bigint, p_mirror_delta bigint) returns void security definer [plpgsql:24e0158cd40e]": {

@@ -32,6 +32,9 @@ pub fn enqueue_flush_job_pg(
     force: pgrx::default!(bool, false),
 ) -> Option<pgrx::Uuid> {
     crate::security::require_relation_owner_or_superuser(table_name.oid(), "flush this table");
+    if crate::sql::migrate::partition::is_partitioned_parent(table_name.oid()) {
+        return crate::sql::migrate::partition::enqueue_parent(table_name.oid(), force);
+    }
     enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
@@ -219,6 +222,9 @@ pub fn flush_table_pg(
     force: pgrx::default!(bool, false),
 ) -> pgrx::JsonB {
     crate::security::require_relation_owner_or_superuser(table_name.oid(), "flush this table");
+    if crate::sql::migrate::partition::is_partitioned_parent(table_name.oid()) {
+        return crate::sql::migrate::partition::flush_parent(table_name.oid(), force);
+    }
     match execute::flush_table_pg_impl(table_name.oid(), force) {
         Ok(response) => {
             if !response.ok {

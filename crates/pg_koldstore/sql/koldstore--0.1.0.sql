@@ -180,6 +180,16 @@ CREATE TABLE IF NOT EXISTS koldstore.table_cancel_requests (
   requested_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Options applied to partitions created or attached under a managed partitioned table
+-- (docs/decisions/008-partitioned-inherited-table-support.md, sixth slice).
+CREATE TABLE IF NOT EXISTS koldstore.partition_templates (
+  parent_oid oid PRIMARY KEY,
+  template_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  options jsonb NOT NULL,
+  auto_manage boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
@@ -416,6 +426,7 @@ REVOKE ALL ON
   koldstore.manifest,
   koldstore.jobs,
   koldstore.table_cancel_requests,
+  koldstore.partition_templates,
   koldstore.cold_segments,
   koldstore.cold_segment_index,
   koldstore.cold_segment_order_index
