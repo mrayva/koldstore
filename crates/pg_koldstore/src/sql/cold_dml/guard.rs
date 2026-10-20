@@ -178,7 +178,7 @@ pub(crate) fn cold_only_matching_rows_with_params(
     let relation = super::qualified_relation(table_oid)?;
     let pk_columns = super::primary_key_columns(table_oid)?;
     let sql = format!(
-        "SELECT coalesce(jsonb_agg(jsonb_build_object('r', to_jsonb(t), 'k', {})), '[]'::jsonb) \
+        "SELECT coalesce(jsonb_agg(jsonb_build_object('r', to_jsonb(t.*), 'k', {})), '[]'::jsonb) \
          FROM {} AS t WHERE {where_sql}",
         super::key_lock::key_sql(&pk_columns, "t"),
         relation.quoted()
@@ -316,12 +316,24 @@ pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB
     // Every INSERT path fires this row trigger, COPY included (which never
     // reaches ExecutorEnd), so record the write for the same-transaction
     // cold-read check (upstream #121) before anything can return early.
+    let written_earlier = crate::txn_writes::was_written(table_oid);
     crate::txn_writes::record_managed_write(table_oid);
     if suspended() {
         return;
     }
-    let exists = cold_pk_exists(table_oid, &row.0)
+    let mut exists = cold_pk_exists(table_oid, &row.0)
         .unwrap_or_else(|error| pgrx::error!("cold-DML insert guard failed: {error}"));
+    // A delete another session committed moments ago is not masked from cold reads until the background
+    // applier has put its tombstone into the mirror, so re-inserting the key straight after deleting it
+    // was refused for those few milliseconds. When the key still looks present, apply committed WAL to the
+    // mirror (the fence hydrate-on-write uses) and look again through a fresh snapshot. It only runs on this
+    // path -- a key that looks present, which ends in a refusal and an aborted transaction unless the fence
+    // shows the key gone -- and is pointless when this transaction already wrote the table (its own delete
+    // is not committed yet).
+    if exists && !written_earlier && crate::guc::insert_guard_fence() && crate::guc::hydrate_fence_mirror() {
+        exists = super::key_lock::with_current_view(|| cold_pk_exists(table_oid, &row.0))
+            .unwrap_or_else(|error| pgrx::error!("cold-DML insert guard failed: {error}"));
+    }
     if exists {
         pgrx::error!(
             "koldstore: refusing INSERT on managed table {table_name} -- this primary key already \

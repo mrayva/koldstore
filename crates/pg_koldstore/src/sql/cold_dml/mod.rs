@@ -26,7 +26,7 @@
 //! ```sql
 //! -- 1. locate the row (hot or cold) as jsonb
 //! WITH pk AS (SELECT * FROM jsonb_populate_record(NULL::"schema"."table", $1))
-//! SELECT to_jsonb(t) FROM "schema"."table" AS t, pk
+//! SELECT to_jsonb(t.*) FROM "schema"."table" AS t, pk
 //! WHERE t."id" = pk."id" -- one clause per primary-key column
 //!
 //! -- 2. materialize it into the heap
@@ -270,7 +270,7 @@ fn locate_row_json(
         return Ok(None);
     }
 
-    let locate_sql = format!("SELECT to_jsonb(t) FROM {quoted} AS t WHERE {}", lookup.predicate);
+    let locate_sql = format!("SELECT to_jsonb(t.*) FROM {quoted} AS t WHERE {}", lookup.predicate);
     let mut locate_args = vec![DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
     locate_args.extend(lookup.temporal.iter().map(TemporalKeyBind::datum));
     // `get_one_with_args` positions its cursor at row 0 unconditionally

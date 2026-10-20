@@ -48,6 +48,8 @@ static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Opt
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
+static INSERT_GUARD_FENCE: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
 static HYDRATE_SLOT_LOCK_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 #[cfg(feature = "pg")]
 static REJECT_SERIALIZABLE_COLD_READS: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -249,6 +251,14 @@ pub fn define_gucs() {
         &HYDRATE_SLOT_LOCK_POLL_MS,
         0,
         60_000,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.insert_guard_fence",
+        c"Apply committed WAL to the mirror before refusing an INSERT whose key looks present in cold storage.",
+        c"A delete committed moments ago is not masked from cold reads until the background applier has applied it, so re-inserting the key straight after deleting it would be refused. When the INSERT guard finds the key in cold storage it applies committed WAL to the mirror (the same fence hydrate-on-write uses) and looks again before refusing. Skipped when the transaction already wrote the table (its own delete is not committed) and when koldstore.hydrate_fence_mirror is off.",
+        &INSERT_GUARD_FENCE,
         GucContext::Userset,
         flags,
     );
@@ -537,6 +547,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "10000",
         },
         GucDefinition {
+            name: INSERT_GUARD_FENCE_GUC,
+            internal: false,
+            default_value: "on",
+        },
+        GucDefinition {
             name: REJECT_SERIALIZABLE_COLD_READS_GUC,
             internal: false,
             default_value: "on",
@@ -671,6 +686,8 @@ pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_r
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
 pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
 pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
+/// SQL name of [`insert_guard_fence`].
+pub const INSERT_GUARD_FENCE_GUC: &str = "koldstore.insert_guard_fence";
 pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_poll_ms";
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
@@ -825,6 +842,20 @@ pub fn hydrate_slot_lock_poll_ms() -> u64 {
     #[cfg(not(feature = "pg"))]
     {
         0
+    }
+}
+
+/// Whether an INSERT that finds its key in cold storage fences the mirror and looks again before refusing.
+#[must_use]
+pub fn insert_guard_fence() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        INSERT_GUARD_FENCE.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
     }
 }
 

@@ -1,0 +1,100 @@
+CREATE TABLE
+INSERT 0 100
+SELECT 100
+ ri_managed
+------------
+ t
+(1 row)
+
+ ri_caught_up
+--------------
+ t
+(1 row)
+
+ ri_flushed
+------------
+ t
+(1 row)
+
+ ri_mostly_cold
+----------------
+ t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+ id |   v    | t
+----+--------+----
+  7 | edited | 14
+(1 row)
+
+DELETE 1
+DELETE 1
+INSERT 0 1
+INSERT 0 1
+ id |  v
+----+------
+  8 | back
+(1 row)
+
+DELETE 3
+DELETE 3
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+RESET
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."ri" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+SET
+BEGIN
+DELETE 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."ri" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+ROLLBACK
+RESET
+SET
+SET
+DELETE 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."ri" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+RESET
+RESET
+ ri_fenced
+-----------
+ t
+(1 row)
+
+DELETE 1
+ ri_content_equal
+------------------
+ t
+(1 row)
+
+ ri_total
+----------
+       98
+(1 row)
+
+ ri_reflushed
+--------------
+ t
+(1 row)
+
+ ri_fenced_2
+-------------
+ t
+(1 row)
+
+SET
+ ri_content_equal_after_flush
+------------------------------
+ t
+(1 row)
+
+ id |    v
+----+---------
+  8 | back
+ 21 | again21
+ 22 | again22
+(3 rows)
+
+RESET
