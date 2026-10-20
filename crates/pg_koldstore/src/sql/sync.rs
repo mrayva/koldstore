@@ -115,6 +115,32 @@ fn function_name(line: &str) -> Option<&str> {
     rest.split_once('(').map(|(name, _)| name)
 }
 
+/// Rewrites the library of a C function definition to `$libdir/koldstore`.
+///
+/// `pg_get_functiondef` prints whatever path the function was created with, and the reference
+/// database the definitions are generated from may have loaded a staged build
+/// (`AS '/tmp/.../koldstore'`). `CREATE FUNCTION` loads the file it names to validate the symbol, so
+/// a repaired function pointing at another copy of the library would map a second koldstore into
+/// the backend (a second set of hooks and thread state) -- and would keep pointing at a file that may
+/// not exist later. Every koldstore function must name the library the way the extension script does.
+#[must_use]
+pub fn with_library_path(definition: &str) -> String {
+    const LIBRARY: &str = "'$libdir/koldstore'";
+    let Some(start) = definition.find("AS '") else {
+        return definition.to_string();
+    };
+    let literal_start = start + "AS ".len();
+    let Some(length) = definition[literal_start + 1..].find('\'') else {
+        return definition.to_string();
+    };
+    let literal_end = literal_start + 1 + length + 1;
+    let path = &definition[literal_start + 1..literal_end - 1];
+    if path != "koldstore" && !path.ends_with("/koldstore") {
+        return definition.to_string();
+    }
+    format!("{}{LIBRARY}{}", &definition[..literal_start], &definition[literal_end..])
+}
+
 /// Plans the repair of a database whose objects differ from the library's.
 ///
 /// * A function whose signature changed (an unexpected one with the same name as a missing one) is
@@ -234,7 +260,7 @@ pub fn plan_repair(
             }
         } else if let Some(function) = defs.functions.get(line) {
             let mut statements = vec![
-                function.create.clone(),
+                with_library_path(&function.create),
                 format!("ALTER EXTENSION koldstore ADD FUNCTION {}", function.add),
             ];
             if function.revoke_public {
@@ -512,8 +538,36 @@ mod tests {
     }
 
     #[test]
+    fn a_repaired_function_always_names_the_library_through_libdir() {
+        let staged = "CREATE OR REPLACE FUNCTION koldstore.f()\n RETURNS void\n LANGUAGE c\nAS '/tmp/kl-stage/lib/koldstore', $function$f_wrapper$function$\n";
+        let fixed = with_library_path(staged);
+        assert!(fixed.contains("AS '$libdir/koldstore', $function$f_wrapper$function$"), "{fixed}");
+        assert!(!fixed.contains("/tmp/"));
+        // already correct, or not a koldstore library: unchanged
+        assert_eq!(with_library_path(&fixed), fixed);
+        let other = "CREATE FUNCTION x() RETURNS int LANGUAGE sql AS 'select 1'";
+        assert_eq!(with_library_path(other), other);
+    }
+
+    #[test]
+    fn the_planner_rewrites_a_staged_library_path() {
+        let mut defs = defs();
+        let key = "function f(a integer, b integer) returns uuid [f_wrapper]";
+        defs.functions.get_mut(key).unwrap().create =
+            "CREATE OR REPLACE FUNCTION koldstore.f(a integer, b integer)\n LANGUAGE c\nAS '/opt/stage/koldstore', $function$f_wrapper$function$".to_string();
+        let plan = plan_repair(&report(&[key], &[]), &defs, &[], &tables(&["t"]), false);
+        assert!(plan.steps[0].statements[0].contains("AS '$libdir/koldstore'"));
+    }
+
+    #[test]
     fn the_embedded_definitions_parse_and_cover_every_expected_object() {
         let defs: RepairDefs = serde_json::from_str(REPAIR_OBJECTS).expect("repair_objects.json parses");
+        for (line, function) in defs.functions.iter().filter(|(_, f)| f.create.contains("LANGUAGE c")) {
+            assert!(
+                function.create.contains("AS '$libdir/koldstore'"),
+                "repair definition of `{line}` must use $libdir/koldstore, not a staged path; regenerate with scripts/check-sql-drift.sh --update-expected"
+            );
+        }
         for line in include_str!("../../manifest/expected_objects.txt").lines().filter(|l| !l.is_empty()) {
             let covered = if line.starts_with("function ") {
                 defs.functions.contains_key(line)

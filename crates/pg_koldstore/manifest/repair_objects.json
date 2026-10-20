@@ -957,25 +957,25 @@
         "function snowflake_id() returns bigint [snowflake_id_wrapper]": {
             "add": "public.snowflake_id()",
             "name": "snowflake_id",
-            "create": "CREATE OR REPLACE FUNCTION public.snowflake_id()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$snowflake_id_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION public.snowflake_id()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$snowflake_id_wrapper$function$\n",
             "revoke_public": false
         },
         "function preload_status() returns jsonb [preload_status_pg_wrapper]": {
             "add": "koldstore.preload_status()",
             "name": "preload_status",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.preload_status()\n RETURNS jsonb\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$preload_status_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.preload_status()\n RETURNS jsonb\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '$libdir/koldstore', $function$preload_status_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function koldstore_user_id() returns text [koldstore_user_id_wrapper]": {
             "add": "public.koldstore_user_id()",
             "name": "koldstore_user_id",
-            "create": "CREATE OR REPLACE FUNCTION public.koldstore_user_id()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$koldstore_user_id_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION public.koldstore_user_id()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$koldstore_user_id_wrapper$function$\n",
             "revoke_public": false
         },
         "function koldstore_version() returns text [koldstore_version_wrapper]": {
             "add": "public.koldstore_version()",
             "name": "koldstore_version",
-            "create": "CREATE OR REPLACE FUNCTION public.koldstore_version()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$koldstore_version_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION public.koldstore_version()\n RETURNS text\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$koldstore_version_wrapper$function$\n",
             "revoke_public": false
         },
         "function spock_tuple_object(tup jsonb) returns jsonb [sql:32488385049f]": {
@@ -987,19 +987,19 @@
         "function async_mirror_status() returns jsonb [async_mirror_status_wrapper]": {
             "add": "koldstore.async_mirror_status()",
             "name": "async_mirror_status",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.async_mirror_status()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$async_mirror_status_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.async_mirror_status()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$async_mirror_status_wrapper$function$\n",
             "revoke_public": false
         },
         "function validate_sql_objects() returns jsonb [validate_sql_objects_pg_wrapper]": {
             "add": "koldstore.validate_sql_objects()",
             "name": "validate_sql_objects",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_sql_objects()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$validate_sql_objects_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_sql_objects()\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$validate_sql_objects_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function wait_for_async_mirror() returns bigint [wait_for_async_mirror_wrapper]": {
             "add": "koldstore.wait_for_async_mirror()",
             "name": "wait_for_async_mirror",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.wait_for_async_mirror()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$wait_for_async_mirror_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.wait_for_async_mirror()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$wait_for_async_mirror_wrapper$function$\n",
             "revoke_public": false
         },
         "function spock_pk_object(rel regclass, obj jsonb) returns jsonb [sql:8f43ded2dfa8]": {
@@ -1011,31 +1011,31 @@
         "function cancel_job(job_id uuid) returns boolean security definer [cancel_job_pg_wrapper]": {
             "add": "koldstore.cancel_job(job_id uuid)",
             "name": "cancel_job",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_job(job_id uuid)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$cancel_job_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_job(job_id uuid)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$cancel_job_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function disable_async_mirror() returns boolean security definer [disable_async_mirror_wrapper]": {
             "add": "koldstore.disable_async_mirror()",
             "name": "disable_async_mirror",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.disable_async_mirror()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$disable_async_mirror_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.disable_async_mirror()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$disable_async_mirror_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_attach_insert_guards() returns bigint [internal_attach_insert_guards_wrapper]": {
             "add": "koldstore.internal_attach_insert_guards()",
             "name": "internal_attach_insert_guards",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_attach_insert_guards()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_attach_insert_guards_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_attach_insert_guards()\n RETURNS bigint\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$internal_attach_insert_guards_wrapper$function$\n",
             "revoke_public": false
         },
         "function table_status(table_name regclass) returns jsonb security definer [table_status_pg_wrapper]": {
             "add": "koldstore.table_status(table_name regclass)",
             "name": "table_status",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.table_status(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$table_status_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.table_status(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$table_status_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_encode_sort_key(value anyelement) returns bytea [internal_encode_sort_key_wrapper]": {
             "add": "koldstore.internal_encode_sort_key(value anyelement)",
             "name": "internal_encode_sort_key",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_encode_sort_key(value anyelement)\n RETURNS bytea\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_encode_sort_key_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_encode_sort_key(value anyelement)\n RETURNS bytea\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '$libdir/koldstore', $function$internal_encode_sort_key_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_ensure_manifest_row(p_table_oid oid) returns void security definer [sql:456fd88ef614]": {
@@ -1047,25 +1047,25 @@
         "function hydrate_pk(table_name regclass, pk jsonb) returns jsonb security definer [hydrate_pk_pg_wrapper]": {
             "add": "koldstore.hydrate_pk(table_name regclass, pk jsonb)",
             "name": "hydrate_pk",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.hydrate_pk(table_name regclass, pk jsonb)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$hydrate_pk_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.hydrate_pk(table_name regclass, pk jsonb)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$hydrate_pk_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function cancel_table_jobs(table_name regclass) returns bigint security definer [cancel_table_jobs_pg_wrapper]": {
             "add": "koldstore.cancel_table_jobs(table_name regclass)",
             "name": "cancel_table_jobs",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_table_jobs(table_name regclass)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$cancel_table_jobs_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.cancel_table_jobs(table_name regclass)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$cancel_table_jobs_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_run_flush_scheduler_tick() returns boolean security definer [run_flush_scheduler_tick_pg_wrapper]": {
             "add": "koldstore.internal_run_flush_scheduler_tick()",
             "name": "internal_run_flush_scheduler_tick",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_run_flush_scheduler_tick()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$run_flush_scheduler_tick_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_run_flush_scheduler_tick()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$run_flush_scheduler_tick_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function purge_old_jobs(batch_limit integer DEFAULT 100) returns bigint security definer [purge_old_jobs_pg_wrapper]": {
             "add": "koldstore.purge_old_jobs(batch_limit integer)",
             "name": "purge_old_jobs",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_old_jobs(batch_limit integer DEFAULT 100)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$purge_old_jobs_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_old_jobs(batch_limit integer DEFAULT 100)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$purge_old_jobs_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]": {
@@ -1077,7 +1077,7 @@
         "function verify_table_integrity(table_name regclass) returns jsonb security definer [verify_table_integrity_pg_wrapper]": {
             "add": "koldstore.verify_table_integrity(table_name regclass)",
             "name": "verify_table_integrity",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.verify_table_integrity(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$verify_table_integrity_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.verify_table_integrity(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$verify_table_integrity_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function spock_replay_operation(rel regclass, op text, new_obj jsonb, old_obj jsonb) returns text [plpgsql:95bd3d1aadad]": {
@@ -1089,73 +1089,73 @@
         "function internal_ensure_async_mirror_worker() returns boolean security definer [request_async_mirror_maintenance_pg_wrapper]": {
             "add": "koldstore.internal_ensure_async_mirror_worker()",
             "name": "internal_ensure_async_mirror_worker",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_ensure_async_mirror_worker()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$request_async_mirror_maintenance_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_ensure_async_mirror_worker()\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$request_async_mirror_maintenance_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function flush_table(table_name regclass, force boolean DEFAULT false) returns jsonb security definer [flush_table_pg_wrapper]": {
             "add": "koldstore.flush_table(table_name regclass, force boolean)",
             "name": "flush_table",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.flush_table(table_name regclass, force boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$flush_table_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.flush_table(table_name regclass, force boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$flush_table_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function _cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text) returns void [cold_insert_guard_check_pg_wrapper]": {
             "add": "koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)",
             "name": "_cold_insert_guard_check",
-            "create": "CREATE OR REPLACE FUNCTION koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$cold_insert_guard_check_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$cold_insert_guard_check_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function backup_manifest(table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [backup_manifest_pg_wrapper]": {
             "add": "koldstore.backup_manifest(table_name regclass)",
             "name": "backup_manifest",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.backup_manifest(table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$backup_manifest_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.backup_manifest(table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$backup_manifest_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function alter_storage_credentials(name text, credentials jsonb) returns void security definer [alter_storage_credentials_pg_wrapper]": {
             "add": "koldstore.alter_storage_credentials(name text, credentials jsonb)",
             "name": "alter_storage_credentials",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_credentials(name text, credentials jsonb)\n RETURNS void\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$alter_storage_credentials_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_credentials(name text, credentials jsonb)\n RETURNS void\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$alter_storage_credentials_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function set_table_auto_flush(table_name regclass, enabled boolean) returns boolean security definer [set_table_auto_flush_pg_wrapper]": {
             "add": "koldstore.set_table_auto_flush(table_name regclass, enabled boolean)",
             "name": "set_table_auto_flush",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.set_table_auto_flush(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_table_auto_flush_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.set_table_auto_flush(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$set_table_auto_flush_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function enqueue_flush_job(table_name regclass, force boolean DEFAULT false) returns uuid security definer [enqueue_flush_job_pg_wrapper]": {
             "add": "koldstore.enqueue_flush_job(table_name regclass, force boolean)",
             "name": "enqueue_flush_job",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.enqueue_flush_job(table_name regclass, force boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$enqueue_flush_job_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.enqueue_flush_job(table_name regclass, force boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$enqueue_flush_job_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false) returns jsonb [sync_sql_objects_pg_wrapper]": {
             "add": "koldstore.sync_sql_objects(dry_run boolean, drop_unexpected boolean)",
             "name": "sync_sql_objects",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$sync_sql_objects_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$sync_sql_objects_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [delete_row_pg_wrapper]": {
             "add": "koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean)",
             "name": "delete_row",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$delete_row_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$delete_row_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]": {
             "add": "koldstore.recover_segments(table_name regclass, dry_run boolean)",
             "name": "recover_segments",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.recover_segments(table_name regclass, dry_run boolean DEFAULT false)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$recover_segments_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.recover_segments(table_name regclass, dry_run boolean DEFAULT false)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$recover_segments_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_set_async_mirror_ensure_paused(paused boolean) returns boolean security definer [set_async_mirror_ensure_paused_pg_wrapper]": {
             "add": "koldstore.internal_set_async_mirror_ensure_paused(paused boolean)",
             "name": "internal_set_async_mirror_ensure_paused",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_set_async_mirror_ensure_paused(paused boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_async_mirror_ensure_paused_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_set_async_mirror_ensure_paused(paused boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$set_async_mirror_ensure_paused_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function set_partition_auto_manage(table_name regclass, enabled boolean) returns boolean security definer [set_partition_auto_manage_pg_wrapper]": {
             "add": "koldstore.set_partition_auto_manage(table_name regclass, enabled boolean)",
             "name": "set_partition_auto_manage",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.set_partition_auto_manage(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$set_partition_auto_manage_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.set_partition_auto_manage(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$set_partition_auto_manage_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_bump_row_counts(p_table_oid oid, p_hot_delta bigint, p_mirror_delta bigint) returns void security definer [plpgsql:24e0158cd40e]": {
@@ -1173,25 +1173,25 @@
         "function internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint) returns void [internal_record_row_count_delta_wrapper]": {
             "add": "koldstore.internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint)",
             "name": "internal_record_row_count_delta",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '/tmp/kl-stage/lib/koldstore', $function$internal_record_row_count_delta_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.internal_record_row_count_delta(table_oid oid, hot_delta bigint, mirror_delta bigint)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$internal_record_row_count_delta_wrapper$function$\n",
             "revoke_public": false
         },
         "function update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [update_row_pg_wrapper]": {
             "add": "koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean)",
             "name": "update_row",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$update_row_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$update_row_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]": {
             "add": "koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean)",
             "name": "alter_storage_location",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$alter_storage_location_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$alter_storage_location_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false) returns jsonb security definer [validate_cold_storage_pg_wrapper]": {
             "add": "koldstore.validate_cold_storage(table_name regclass, deep boolean)",
             "name": "validate_cold_storage",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$validate_cold_storage_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$validate_cold_storage_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function internal_apply_flush_row_counts(p_table_oid oid, p_mirror_pruned bigint, p_hot_pruned bigint, p_cold_rows_added bigint) returns void security definer [plpgsql:1f5183cbcf0b]": {
@@ -1203,49 +1203,49 @@
         "function unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean) returns bigint security definer [unmanage_table_pg_wrapper]": {
             "add": "koldstore.unmanage_table(table_name regclass, rehydrate boolean, drop_cold boolean)",
             "name": "unmanage_table",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean)\n RETURNS bigint\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$unmanage_table_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean)\n RETURNS bigint\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$unmanage_table_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [list_jobs_pg_wrapper]": {
             "add": "koldstore.list_jobs(statuses jsonb, job_types jsonb, table_name regclass)",
             "name": "list_jobs",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$list_jobs_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.list_jobs(statuses jsonb DEFAULT NULL::jsonb, job_types jsonb DEFAULT NULL::jsonb, table_name regclass DEFAULT NULL::regclass)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$list_jobs_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]": {
             "add": "koldstore.rebuild_segment_summaries(table_name regclass, dry_run boolean, max_segments integer)",
             "name": "rebuild_segment_summaries",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$rebuild_segment_summaries_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$rebuild_segment_summaries_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]": {
             "add": "koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean)",
             "name": "register_storage",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$register_storage_pg_with_default_templates_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$register_storage_pg_with_default_templates_wrapper$function$\n",
             "revoke_public": false
         },
         "function purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false) returns jsonb security definer [purge_deferred_cold_objects_pg_wrapper]": {
             "add": "koldstore.purge_deferred_cold_objects(batch_limit integer, older_than_seconds integer, dry_run boolean)",
             "name": "purge_deferred_cold_objects",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$purge_deferred_cold_objects_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$purge_deferred_cold_objects_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]": {
             "add": "koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean)",
             "name": "register_storage",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$register_storage_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, \"check\" boolean DEFAULT true)\n RETURNS text\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$register_storage_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer) returns TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text) security definer [changes_since_pg_wrapper]": {
             "add": "koldstore.changes_since(table_name regclass, since_seq bigint, limit_rows integer, last_rows integer)",
             "name": "changes_since",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer)\n RETURNS TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text)\n LANGUAGE c\n STABLE PARALLEL SAFE SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$changes_since_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.changes_since(table_name regclass, since_seq bigint DEFAULT 0, limit_rows integer DEFAULT 1000, last_rows integer DEFAULT NULL::integer)\n RETURNS TABLE(seq bigint, op smallint, pk jsonb, deleted boolean, row_image jsonb, source text)\n LANGUAGE c\n STABLE PARALLEL SAFE SECURITY DEFINER\nAS '$libdir/koldstore', $function$changes_since_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false) returns uuid security definer [manage_table_pg_wrapper]": {
             "add": "koldstore.manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint, max_rows_per_file bigint, table_type text, scope_column text, migration_order_by text, compression text, target_file_size_mb bigint, auto_flush boolean, segment_order_column text, pruning_columns text[], bloom_filter_columns text[], parquet_row_group_size bigint, parquet_data_page_row_count_limit bigint, parquet_bloom_filter_fpp double precision, allow_fk_hot_only boolean)",
             "name": "manage_table",
-            "create": "CREATE OR REPLACE FUNCTION koldstore.manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n SECURITY DEFINER\nAS '/tmp/kl-stage/lib/koldstore', $function$manage_table_pg_wrapper$function$\n",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.manage_table(table_name regclass, storage text, hot_row_limit bigint, min_flush_rows bigint DEFAULT 1000, max_rows_per_file bigint DEFAULT 1000, table_type text DEFAULT 'shared'::text, scope_column text DEFAULT NULL::text, migration_order_by text DEFAULT NULL::text, compression text DEFAULT NULL::text, target_file_size_mb bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT true, segment_order_column text DEFAULT NULL::text, pruning_columns text[] DEFAULT NULL::text[], bloom_filter_columns text[] DEFAULT NULL::text[], parquet_row_group_size bigint DEFAULT NULL::bigint, parquet_data_page_row_count_limit bigint DEFAULT NULL::bigint, parquet_bloom_filter_fpp double precision DEFAULT NULL::double precision, allow_fk_hot_only boolean DEFAULT false)\n RETURNS uuid\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$manage_table_pg_wrapper$function$\n",
             "revoke_public": false
         }
     }

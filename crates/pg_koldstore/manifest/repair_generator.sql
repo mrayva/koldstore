@@ -11,7 +11,7 @@ SELECT jsonb_pretty(jsonb_build_object(
   'functions', COALESCE((
     SELECT jsonb_object_agg(c.line, jsonb_build_object(
              'name', p.proname,
-             'create', pg_get_functiondef(c.ref_oid),
+             'create', regexp_replace(pg_get_functiondef(c.ref_oid), 'AS ''[^'']*/koldstore''', 'AS ''$libdir/koldstore''', 'g'),
              'add', format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)),
              'revoke_public', NOT has_function_privilege('public', c.ref_oid, 'EXECUTE')))
     FROM cat c
