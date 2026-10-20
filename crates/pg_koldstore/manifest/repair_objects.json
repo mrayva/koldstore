@@ -116,7 +116,7 @@
             ]
         },
         "cold_segment_index": {
-            "create": "CREATE TABLE koldstore.cold_segment_index (segment_id uuid NOT NULL, table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, column_id smallint NOT NULL, type_oid oid NOT NULL, codec_version smallint NOT NULL, min_value bytea, max_value bytea, row_group_min_values bytea[] NOT NULL, row_group_max_values bytea[] NOT NULL, row_group_null_counts bigint[] NOT NULL, value_summary bytea)",
+            "create": "CREATE TABLE koldstore.cold_segment_index (segment_id uuid NOT NULL, table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, column_id smallint NOT NULL, type_oid oid NOT NULL, codec_version smallint NOT NULL, min_value bytea, max_value bytea, row_group_min_values bytea[] NOT NULL, row_group_max_values bytea[] NOT NULL, row_group_null_counts bigint[] NOT NULL, value_summary bytea, key_min bytea, key_max bytea)",
             "indexes": [
                 "CREATE INDEX cold_segment_index_max_idx ON koldstore.cold_segment_index USING btree (table_oid, scope_key, column_id, type_oid, codec_version, max_value) INCLUDE (min_value, segment_id)",
                 "CREATE INDEX cold_segment_index_min_idx ON koldstore.cold_segment_index USING btree (table_oid, scope_key, column_id, type_oid, codec_version, min_value) INCLUDE (max_value, segment_id)"
@@ -355,6 +355,18 @@
             "table": "storage",
             "unsupported": false,
             "needs_default": true
+        },
+        "column cold_segment_index.key_max bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN key_max bytea",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column cold_segment_index.key_min bytea": {
+            "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN key_min bytea",
+            "table": "cold_segment_index",
+            "unsupported": false,
+            "needs_default": false
         },
         "column cold_segments.path text not null": {
             "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN path text",

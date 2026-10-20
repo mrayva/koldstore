@@ -10,6 +10,7 @@ pub mod prune;
 pub mod reader;
 pub mod schema;
 pub mod temporal;
+pub mod key_bounds;
 pub mod value_summary;
 pub mod writer;
 
@@ -38,6 +39,9 @@ pub use reader::{
     ParquetReadProfile, ParquetReadRequest,
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
+pub use key_bounds::{
+    KeyBoundsBuilder, frame_component, rebuild_key_bounds_from_parquet, supports_key_bounds,
+};
 pub use value_summary::{
     RebuiltSummary, add_column_to_value_summary, add_key_columns_to_value_summary,
     rebuild_value_summary_from_parquet,

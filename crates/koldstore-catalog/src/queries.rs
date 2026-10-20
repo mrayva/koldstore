@@ -988,7 +988,13 @@ SELECT
          ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
         AND csi.codec_version = $3::smallint) AS maxs,
     (SELECT count(*) FROM koldstore.cold_segments o
-      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint
+      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint,
+    (SELECT csi.key_min FROM koldstore.cold_segment_index csi
+      WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+        AND csi.codec_version = $3::smallint) AS key_min,
+    (SELECT csi.key_max FROM koldstore.cold_segment_index csi
+      WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+        AND csi.codec_version = $3::smallint) AS key_max
 FROM koldstore.cold_segments cs
 LEFT JOIN versions v ON v.schema_version = cs.schema_version
 LEFT JOIN table_prefix pref ON true
@@ -1007,7 +1013,8 @@ ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
 /// One row per active shared-scope segment with its key box: the whole-segment Sort Key V1
 /// `min_value` / `max_value` of each key column, as parallel arrays in key order (`NULL` elements, or
 /// arrays shorter than the key, mean a column has no usable bounds), ordered by the first column's
-/// minimum. The last column counts active segments of other scopes.
+/// minimum. Then come the count of active segments of other scopes and the composite-key tuple
+/// bounds `key_min` / `key_max` (NULL when the segment has none).
 ///
 /// Parameters are table OID, the key columns' stable IDs (`smallint[]`, in key order) and the codec
 /// version.
@@ -1031,7 +1038,13 @@ SELECT
          ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
         AND csi.codec_version = $3::smallint) AS maxs,
     (SELECT count(*) FROM koldstore.cold_segments o
-      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint
+      WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint,
+    (SELECT csi.key_min FROM koldstore.cold_segment_index csi
+      WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+        AND csi.codec_version = $3::smallint) AS key_min,
+    (SELECT csi.key_max FROM koldstore.cold_segment_index csi
+      WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+        AND csi.codec_version = $3::smallint) AS key_max
 FROM koldstore.cold_segments cs
 WHERE cs.table_oid = $1::oid AND cs.status = 'active' AND cs.scope_key = ''
 ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi

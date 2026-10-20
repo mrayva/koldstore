@@ -254,6 +254,59 @@ impl NumericBoundsState {
     }
 }
 
+/// Accumulates the tuple-level key bounds of a composite primary key for the segment being written
+/// (see `koldstore_parquet::key_bounds`). Single-column keys do not need it: their column bounds are
+/// already exact. `builder` is `None` once anything went wrong, and the segment then has no tuple
+/// bounds (readers fall back to the per-column box test).
+struct KeyBoundsState {
+    columns: Vec<(String, koldstore_sortkey::SortKeyType)>,
+    column_id: koldstore_common::ColumnId,
+    builder: Option<koldstore_parquet::KeyBoundsBuilder>,
+}
+
+impl KeyBoundsState {
+    fn for_input(input: &StreamEncodeInput) -> Option<Self> {
+        if input.primary_key_columns.len() < 2 {
+            return None;
+        }
+        let first = input.primary_key_columns.first()?;
+        let indexed = input
+            .indexed_columns
+            .iter()
+            .find(|column| &column.name == first)?;
+        let mut columns = Vec::with_capacity(input.primary_key_columns.len());
+        for key in &input.primary_key_columns {
+            let column = input.parquet_columns.iter().find(|column| &column.name == key)?;
+            let ty = koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())?;
+            if !koldstore_parquet::supports_key_bounds(ty) {
+                return None;
+            }
+            columns.push((key.clone(), ty));
+        }
+        Some(Self {
+            columns,
+            column_id: indexed.column_id,
+            builder: Some(koldstore_parquet::KeyBoundsBuilder::new()),
+        })
+    }
+
+    fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
+        if let Some(builder) = self.builder.as_mut() {
+            let columns: Vec<(&str, koldstore_sortkey::SortKeyType)> =
+                self.columns.iter().map(|(name, ty)| (name.as_str(), *ty)).collect();
+            if builder.add_batch(batch, &columns).is_err() {
+                self.builder = None;
+            }
+        }
+    }
+
+    fn finish(&mut self, row_count: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+        let builder = self.builder.take();
+        self.builder = Some(koldstore_parquet::KeyBoundsBuilder::new());
+        builder?.finish(row_count)
+    }
+}
+
 struct SegmentBuilder {
     options: WriterOptions,
     split_policy: SegmentSplitPolicy,
@@ -263,6 +316,7 @@ struct SegmentBuilder {
     indexed_columns: Vec<ColumnRef>,
     primary_key_columns: Vec<String>,
     pk_summary: Option<PkSummaryState>,
+    key_bounds: Option<KeyBoundsState>,
     numeric_bounds: Vec<NumericBoundsState>,
 }
 
@@ -300,6 +354,7 @@ impl SegmentBuilder {
             indexed_columns: input.indexed_columns.clone(),
             primary_key_columns: input.primary_key_columns.clone(),
             pk_summary: PkSummaryState::for_input(input),
+            key_bounds: KeyBoundsState::for_input(input),
             numeric_bounds: NumericBoundsState::for_input(input),
         }
     }
@@ -323,6 +378,9 @@ impl SegmentBuilder {
             .map_err(|error| error.to_string())?;
         if let Some(summary) = self.pk_summary.as_mut() {
             summary.add_batch(&batch.batch);
+        }
+        if let Some(bounds) = self.key_bounds.as_mut() {
+            bounds.add_batch(&batch.batch);
         }
         for state in &mut self.numeric_bounds {
             state.add_batch(&batch.batch);
@@ -358,6 +416,19 @@ impl SegmentBuilder {
                     .find(|index| index.column_id == column_id)
                 {
                     index.value_summary = Some(summary);
+                }
+            }
+        }
+        if let Some(state) = self.key_bounds.as_mut() {
+            let column_id = state.column_id;
+            if let Some((key_min, key_max)) = state.finish(self.row_count) {
+                if let Some(index) = packed_metadata
+                    .column_indexes
+                    .iter_mut()
+                    .find(|index| index.column_id == column_id)
+                {
+                    index.key_min = Some(key_min);
+                    index.key_max = Some(key_max);
                 }
             }
         }

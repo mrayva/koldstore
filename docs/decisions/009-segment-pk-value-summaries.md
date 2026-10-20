@@ -199,3 +199,14 @@ overlapping id ranges), so the box test keeps calling the layout possibly overla
 of such a table only when it removes rows or merges segments, and the maintenance worker leaves their overlap units to
 explicit calls. A tuple-level (lexicographic) segment min/max would make the check exact; it needs a new catalog column.
 Covered by `composite_key_compaction`.
+
+Slice 4 (exact disjointness): a composite key's per-column boxes stay pessimistic whenever a leading value straddles two
+segments, which is exactly what a sorted rewrite produces. Flush now also stores the segment's lexicographic key-tuple
+minimum and maximum (`cold_segment_index.key_min` / `key_max`, on the first key column's row, composite keys only). A tuple
+is the key columns' Sort Key V1 bytes, each escaped (`0x00` -> `0x00 0xFF`) and terminated (`0x00 0x01`) so concatenation
+orders like the tuple (`koldstore_parquet::key_bounds`; text is raw UTF-8 and numeric the decimal order encoding, so the order
+is self-consistent rather than collation order, which is all disjointness needs). When every active segment has them the scan
+check is exact (sorted by minimum, each maximum below the next minimum); otherwise it falls back to the box test.
+`koldstore.rebuild_segment_summaries` fills them for segments written earlier (reading only the key columns, verified against the
+catalog checksum). Compaction plans such tables as one lexicographic interval per segment, so its output is found disjoint, a
+repeat is a no-op, and automatic compaction handles them like single-column keys. Covered by `composite_key_exact_disjoint`.

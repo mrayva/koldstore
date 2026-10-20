@@ -23,6 +23,8 @@ pub struct SegmentRange {
     pub row_count: i64,
     /// `(min, max)` Sort Key V1 bytes of each primary-key column, in key order.
     pub bounds: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Lexicographic `(min, max)` of the whole composite key tuple, when the segment has it.
+    pub tuple: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl SegmentRange {
@@ -32,18 +34,30 @@ impl SegmentRange {
         Self {
             row_count,
             bounds: vec![(min, max)],
+            tuple: None,
         }
     }
 
-    /// True when the segments' key boxes intersect on every key column, so one key may be in both.
+    /// True when one key may be in both segments: their key boxes intersect on every key column
+    /// *and*, if both carry them, their lexicographic key-tuple intervals intersect. Each test is
+    /// sound on its own (disjoint boxes, or disjoint tuple intervals, prove no shared key) and they
+    /// are independent: boxes see segments that interleave on the leading column but are separated
+    /// by another, tuple intervals see segments split mid-way through a leading value.
     #[must_use]
     pub fn may_share_keys(&self, other: &Self) -> bool {
-        self.bounds.len() == other.bounds.len()
+        let boxes = self.bounds.len() == other.bounds.len()
             && self
                 .bounds
                 .iter()
                 .zip(&other.bounds)
-                .all(|((min_a, max_a), (min_b, max_b))| min_a <= max_b && min_b <= max_a)
+                .all(|((min_a, max_a), (min_b, max_b))| min_a <= max_b && min_b <= max_a);
+        if !boxes {
+            return false;
+        }
+        match (&self.tuple, &other.tuple) {
+            (Some((min_a, max_a)), Some((min_b, max_b))) => min_a <= max_b && min_b <= max_a,
+            _ => true,
+        }
     }
 }
 
@@ -224,6 +238,7 @@ mod tests {
         SegmentRange {
             row_count: rows,
             bounds: vec![(vec![a.0], vec![a.1]), (vec![b.0], vec![b.1])],
+            tuple: None,
         }
     }
 
@@ -310,5 +325,43 @@ mod tests {
     fn single_column_disjointness_matches_interval_overlap() {
         assert_eq!(keys_disjoint(&[seg(1, 0, 9), seg(1, 10, 19)], 100), Some(true));
         assert_eq!(keys_disjoint(&[seg(1, 0, 10), seg(1, 10, 19)], 100), Some(false));
+    }
+
+    fn with_tuple(mut segment: SegmentRange, min: &[u8], max: &[u8]) -> SegmentRange {
+        segment.tuple = Some((min.to_vec(), max.to_vec()));
+        segment
+    }
+
+    #[test]
+    fn tuple_intervals_separate_segments_whose_boxes_intersect() {
+        // tenant 1 straddles both segments and the id ranges overlap, but the tuples do not
+        let segments = [
+            with_tuple(seg2(100, (0, 1), (1, 130)), &[0, 1], &[1, 70]),
+            with_tuple(seg2(100, (1, 2), (1, 130)), &[1, 71], &[2, 40]),
+        ];
+        assert_eq!(keys_disjoint(&segments, 100), Some(true));
+        // without the tuple bounds the boxes cannot tell
+        let boxes_only = [seg2(100, (0, 1), (1, 130)), seg2(100, (1, 2), (1, 130))];
+        assert_eq!(keys_disjoint(&boxes_only, 100), Some(false));
+    }
+
+    #[test]
+    fn boxes_separate_segments_whose_tuple_intervals_overlap() {
+        // ids ascend with the load order but every segment spans all tenants: the lexicographic
+        // intervals interleave, the id column separates the boxes
+        let segments = [
+            with_tuple(seg2(100, (0, 3), (1, 20)), &[0, 4], &[3, 19]),
+            with_tuple(seg2(100, (0, 3), (21, 40)), &[0, 24], &[3, 39]),
+        ];
+        assert_eq!(keys_disjoint(&segments, 100), Some(true));
+    }
+
+    #[test]
+    fn a_shared_key_is_found_when_both_tests_intersect() {
+        let segments = [
+            with_tuple(seg2(100, (0, 3), (1, 20)), &[0, 4], &[3, 19]),
+            with_tuple(seg2(100, (0, 3), (10, 40)), &[0, 12], &[3, 39]),
+        ];
+        assert_eq!(keys_disjoint(&segments, 100), Some(false));
     }
 }

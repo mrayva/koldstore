@@ -44,6 +44,8 @@ impl From<ManifestAssemblyError> for SegmentCatalogError {
 /// - `$30` pass_id
 /// - `$31` physically_sorted_sort_order_id (`0` = none; else marks matching order index)
 /// - `$32` per-index-row `value_summary` bitmaps (`bytea[]`, aligned with `$17..$24`; NULL = none)
+/// - `$33` / `$34` per-index-row composite-key tuple bounds `key_min` / `key_max` (`bytea[]`, aligned
+///   with `$32`; NULL = none; only the first key column's row of a composite key carries them)
 ///
 /// `segment_ordinal` is taken from each row's `batch_number`.
 ///
@@ -153,7 +155,9 @@ index_input AS (
         $22::bytea[],
         $23::integer[],
         $24::integer[],
-        $32::bytea[]
+        $32::bytea[],
+        $33::bytea[],
+        $34::bytea[]
     ) AS i(
         segment_id,
         column_id,
@@ -163,7 +167,9 @@ index_input AS (
         max_value,
         row_group_count,
         row_group_offset,
-        value_summary
+        value_summary,
+        key_min,
+        key_max
     )
 ),
 inserted_index AS (
@@ -179,7 +185,9 @@ INSERT INTO koldstore.cold_segment_index (
     row_group_min_values,
     row_group_max_values,
     row_group_null_counts,
-    value_summary
+    value_summary,
+    key_min,
+    key_max
 )
 SELECT
     cs.segment_id,
@@ -202,7 +210,9 @@ SELECT
         (i.row_group_offset + 1):
         (i.row_group_offset + i.row_group_count)
     ],
-    i.value_summary
+    i.value_summary,
+    i.key_min,
+    i.key_max
 FROM inserted_segments cs
 JOIN index_input i ON i.segment_id = cs.segment_id
 ON CONFLICT (segment_id, column_id)
@@ -216,7 +226,9 @@ DO UPDATE SET
     row_group_min_values = EXCLUDED.row_group_min_values,
     row_group_max_values = EXCLUDED.row_group_max_values,
     row_group_null_counts = EXCLUDED.row_group_null_counts,
-    value_summary = EXCLUDED.value_summary
+    value_summary = EXCLUDED.value_summary,
+    key_min = EXCLUDED.key_min,
+    key_max = EXCLUDED.key_max
 RETURNING
     segment_id,
     table_oid,

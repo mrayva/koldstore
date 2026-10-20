@@ -7,6 +7,8 @@ column backups.registered_at timestamp with time zone not null
 column backups.taken_at timestamp with time zone not null
 column cold_segment_index.codec_version smallint not null
 column cold_segment_index.column_id smallint not null
+column cold_segment_index.key_max bytea
+column cold_segment_index.key_min bytea
 column cold_segment_index.max_value bytea
 column cold_segment_index.min_value bytea
 column cold_segment_index.row_group_max_values bytea[] not null

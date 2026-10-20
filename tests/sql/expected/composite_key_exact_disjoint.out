@@ -1,0 +1,125 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 650
+SELECT 650
+ ex_managed
+------------
+ t
+(1 row)
+
+ ex_caught_up
+--------------
+ t
+(1 row)
+
+ ex_flushed
+------------
+ t
+(1 row)
+
+ ex_many_segments
+------------------
+ t
+(1 row)
+
+ ex_bounds_on_first_column_only
+--------------------------------
+ t
+(1 row)
+
+SET
+ ex_count_under_cap
+--------------------
+                650
+(1 row)
+
+RESET
+ ex_content_equal
+------------------
+ t
+(1 row)
+
+UPDATE 21
+You are now connected to database "koldstore_sql_regression" as user "mrayva".
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=50, limit=50). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+RESET
+ ex_dry_run_sees_missing
+-------------------------
+ t
+(1 row)
+
+ ex_rebuilt
+------------
+ t
+(1 row)
+
+ ex_remaining
+--------------
+            0
+(1 row)
+
+You are now connected to database "koldstore_sql_regression" as user "mrayva".
+SET
+ ex_count_after_rebuild
+------------------------
+                    650
+(1 row)
+
+RESET
+SET
+UPDATE 162
+UPDATE 162
+RESET
+ ex_fenced
+-----------
+ t
+(1 row)
+
+ ex_reflushed
+--------------
+ t
+(1 row)
+
+ ex_fenced_2
+-------------
+ t
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=50, limit=50). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+SET
+ ex_count_exact
+----------------
+            650
+(1 row)
+
+RESET
+ ex_content_equal_after_reflush
+--------------------------------
+ t
+(1 row)
+
+ ex_compacted
+--------------
+ t
+(1 row)
+
+ ex_content_after_compaction
+-----------------------------
+ t
+(1 row)
+
+You are now connected to database "koldstore_sql_regression" as user "mrayva".
+SET
+ ex_count_after_compaction_under_cap
+-------------------------------------
+                                 650
+(1 row)
+
+RESET
+ ex_noop_second
+----------------
+ f
+(1 row)
+

@@ -54,6 +54,8 @@ struct ListedSegment {
     row_count: i64,
     /// `(min, max)` per key column, in key order; `None` when any column lacks usable bounds.
     bounds: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Lexicographic `(min, max)` of the whole composite key tuple, when the segment has it.
+    tuple_bounds: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Compacts `table_oid`'s cold segments; returns a JSON report.
@@ -65,9 +67,13 @@ pub(crate) fn compact_table_value(
     if max_rows < 1 {
         return Err("max_rows must be at least 1".to_string());
     }
-    let _lock = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)?.ok_or_else(|| {
-        "a flush or compaction is already running for this table; retry later".to_string()
-    })?;
+    // A flush that has just finished may still be releasing the lock; wait a few seconds for it
+    // rather than failing a flush-then-compact sequence.
+    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(
+        table_oid,
+        std::time::Duration::from_secs(10),
+    )
+    .map_err(|error| format!("a flush or compaction is still running for this table: {error}"))?;
     compact_locked(table_oid, max_rows, grace_seconds, false)
 }
 
@@ -161,12 +167,19 @@ fn compact_locked(
             "reaped_segments": reaped,
         }));
     }
+    // A composite key whose every segment has exact tuple bounds is planned with both tests (see
+    // `SegmentRange::may_share_keys`): a sorted rewrite makes the output lexicographically disjoint,
+    // so a repeat finds nothing to do and the scan sees disjoint segments afterwards.
+    let exact_tuples = catalog.primary_key.columns.len() > 1
+        && segments.iter().all(|segment| segment.tuple_bounds.is_some());
+    let segments: Vec<&ListedSegment> = segments.iter().collect();
     let ranges: Vec<SegmentRange> = segments
         .iter()
         .filter_map(|segment| {
             segment.bounds.as_ref().map(|bounds| SegmentRange {
                 row_count: segment.row_count,
                 bounds: bounds.clone(),
+                tuple: if exact_tuples { segment.tuple_bounds.clone() } else { None },
             })
         })
         .collect();
@@ -178,7 +191,7 @@ fn compact_locked(
     if auto {
         // Only a single-column key ordered by itself is rewritten into key-disjoint segments; for
         // anything else an overlap component would be reread and rewritten unchanged every tick.
-        let stable_rewrite = catalog.primary_key.columns.len() == 1
+        let stable_rewrite = (catalog.primary_key.columns.len() == 1 || exact_tuples)
             && ctx
                 .snapshot
                 .segment_order_column_id
@@ -208,8 +221,8 @@ fn compact_locked(
         }
         budget -= unit.rows;
         let members: Vec<&ListedSegment> =
-            unit.members.iter().map(|index| &segments[*index]).collect();
-        let Some(outcome) = compact_unit(table_oid, &ctx, &client, &members, started)? else {
+            unit.members.iter().map(|index| segments[*index]).collect();
+        let Some(outcome) = compact_unit(table_oid, &ctx, &client, &members, started, exact_tuples)? else {
             units_without_gain += 1;
             continue;
         };
@@ -263,6 +276,7 @@ fn compact_unit(
     client: &koldstore_storage::ObjectStoreClient,
     members: &[&ListedSegment],
     started: std::time::Instant,
+    exact_tuples: bool,
 ) -> Result<Option<UnitOutcome>, String> {
     let catalog = &ctx.catalog;
     let hints: Vec<SegmentStatsHint> = members.iter().map(|segment| segment.hint.clone()).collect();
@@ -322,8 +336,8 @@ fn compact_unit(
     // even when no row is dropped. Otherwise (composite key, or ordered by another column) the
     // rewritten segments' key boxes may still touch, so publish only when it removes rows or merges
     // segments; otherwise every call would rewrite the same layout again.
-    let stable_rewrite =
-        key_names.len() == 1 && order_name.is_none_or(|name| name == key_names[0]);
+    let stable_rewrite = (key_names.len() == 1 || exact_tuples)
+        && order_name.is_none_or(|name| name == key_names[0]);
     if !stable_rewrite {
         let target = ctx.max_rows_per_file.max(1);
         let output_segments = kept.len().div_ceil(target);
@@ -518,6 +532,7 @@ fn list_active_segments(
                 let mins = to_vec(tuple.get::<pgrx::Array<&[u8]>>(9)?);
                 let maxs = to_vec(tuple.get::<pgrx::Array<&[u8]>>(10)?);
                 scoped = tuple.get::<i64>(11)?.unwrap_or(0);
+                let tuple_bounds = tuple.get::<Vec<u8>>(12)?.zip(tuple.get::<Vec<u8>>(13)?);
                 let bounds = (mins.len() == key_ids.len() && maxs.len() == key_ids.len())
                     .then(|| {
                         mins.into_iter()
@@ -548,6 +563,7 @@ fn list_active_segments(
                     },
                     row_count,
                     bounds,
+                    tuple_bounds,
                 });
             }
             Ok((out, scoped))

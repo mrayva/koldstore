@@ -823,7 +823,7 @@ fn compute_cold_pk_ranges_disjoint(
         DatumWithOid::from(key_columns.iter().map(|key| key.column_id.get()).collect::<Vec<i16>>()),
         DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
     ];
-    type Boxed = (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>, i64);
+    type Boxed = (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>, i64, Option<Vec<u8>>, Option<Vec<u8>>);
     let rows: Vec<Boxed> = crate::catalog::owner::with_extension_owner(|| {
         crate::spi::execute_prepared(&statement, &args, |tuples| {
             let to_vec = |array: Option<pgrx::Array<&[u8]>>| -> Vec<Option<Vec<u8>>> {
@@ -837,17 +837,19 @@ fn compute_cold_pk_ranges_disjoint(
                     to_vec(tuple.get::<pgrx::Array<&[u8]>>(1)?),
                     to_vec(tuple.get::<pgrx::Array<&[u8]>>(2)?),
                     tuple.get::<i64>(3)?.unwrap_or(0),
+                    tuple.get::<Vec<u8>>(4)?,
+                    tuple.get::<Vec<u8>>(5)?,
                 ));
             }
             Ok(out)
         })
         .map_err(|error| error.to_string())
     })??;
-    if rows.len() != active_segments || rows.iter().any(|(_, _, scoped)| *scoped != 0) {
+    if rows.len() != active_segments || rows.iter().any(|(_, _, scoped, _, _)| *scoped != 0) {
         return Ok(false); // a segment is missing from the listing, or the table is scoped
     }
     let mut boxes = Vec::with_capacity(rows.len());
-    for (mins, maxs, _) in rows {
+    for (mins, maxs, _, key_min, key_max) in rows {
         // A segment lacking an index row (or bounds) for any key column may hold any key there.
         if mins.len() != key_columns.len() || maxs.len() != key_columns.len() {
             return Ok(false);
@@ -859,7 +861,10 @@ fn compute_cold_pk_ranges_disjoint(
             };
             bounds.push((min, max));
         }
-        boxes.push(koldstore_flush::compaction::SegmentRange { row_count: 0, bounds });
+        // Composite keys only; the tuple interval is an independent proof of disjointness (see
+        // `SegmentRange::may_share_keys`).
+        let tuple = if key_columns.len() > 1 { key_min.zip(key_max) } else { None };
+        boxes.push(koldstore_flush::compaction::SegmentRange { row_count: 0, bounds, tuple });
     }
     Ok(koldstore_flush::compaction::keys_disjoint(&boxes, MAX_DISJOINT_PAIR_CHECKS).unwrap_or(false))
 }

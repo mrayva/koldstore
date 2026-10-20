@@ -32,7 +32,7 @@ pub const fn supports_value_summary(ty: SortKeyType) -> bool {
 }
 
 /// The Sort Key V1 bytes of row `index` of `array`, or `None` for a null.
-fn encode_row(
+pub(crate) fn encode_row(
     array: &dyn Array,
     ty: SortKeyType,
     index: usize,

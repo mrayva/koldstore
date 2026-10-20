@@ -339,6 +339,8 @@ pub(super) fn persist_flush_segments_batch(
     let mut index_min_values: Vec<Option<Vec<u8>>> = Vec::new();
     let mut index_max_values: Vec<Option<Vec<u8>>> = Vec::new();
     let mut index_value_summaries: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut index_key_mins: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut index_key_maxs: Vec<Option<Vec<u8>>> = Vec::new();
     let mut index_row_group_counts = Vec::new();
     let mut index_row_group_offsets = Vec::new();
     let mut row_group_min_values: Vec<Option<Vec<u8>>> = Vec::new();
@@ -395,6 +397,8 @@ pub(super) fn persist_flush_segments_batch(
             index_min_values.push(bound.min_value.clone());
             index_max_values.push(bound.max_value.clone());
             index_value_summaries.push(bound.value_summary.clone());
+            index_key_mins.push(bound.key_min.clone());
+            index_key_maxs.push(bound.key_max.clone());
             index_row_group_counts.push(row_group_count);
             index_row_group_offsets.push(i32::try_from(row_group_min_values.len()).map_err(
                 |_| {
@@ -444,6 +448,8 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.pass_id)),
             DatumWithOid::from(writer.physically_sorted_sort_order_id),
             DatumWithOid::from(index_value_summaries),
+            DatumWithOid::from(index_key_mins),
+            DatumWithOid::from(index_key_maxs),
         ],
     )
     .map_err(|error| error.to_string())?;

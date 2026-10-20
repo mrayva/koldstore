@@ -275,6 +275,10 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segment_index (
     -- Membership bitmap over this column's values in the segment, built by koldstore-sortkey.
     -- NULL means "cannot prune". Lets point lookups skip segments that cannot hold the key.
     value_summary bytea,
+    -- Lexicographic min/max of the whole composite primary-key tuple (framed Sort Key V1 bytes,
+    -- see koldstore-parquet key_bounds). Carried by the first key column's row of a composite key only.
+    key_min bytea,
+    key_max bytea,
     PRIMARY KEY (segment_id, column_id),
     CHECK ((min_value IS NULL) = (max_value IS NULL)),
     CHECK (min_value IS NULL OR min_value <= max_value),

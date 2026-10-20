@@ -80,6 +80,13 @@ pub struct PackedColumnIndex {
     /// Filled by the flush writer, not derivable from the footer; `None` never prunes.
     #[serde(default)]
     pub value_summary: Option<Vec<u8>>,
+    /// Lexicographic minimum of the whole composite primary-key tuple of the segment (framed Sort Key
+    /// V1 bytes, see `key_bounds`). Carried by the first key column's row of a composite key only.
+    #[serde(default)]
+    pub key_min: Option<Vec<u8>>,
+    /// Lexicographic maximum of the key tuple; see [`Self::key_min`].
+    #[serde(default)]
+    pub key_max: Option<Vec<u8>>,
 }
 
 /// Footer-derived metadata persisted beside one immutable cold segment.
@@ -305,6 +312,8 @@ fn extract_column_index(
         row_group_max_values,
         row_group_null_counts,
         value_summary: None,
+        key_min: None,
+        key_max: None,
     })
 }
 
