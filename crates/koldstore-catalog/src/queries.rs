@@ -931,12 +931,14 @@ pub fn plan_publishable_cold_segment_count() -> SqlResult<SqlStatement> {
 
 /// Lists every active shared-scope segment with what compaction needs to group and read it: the
 /// full object key, size, schema version, sequence range, physical column names, row count and the
-/// whole-segment Sort Key V1 bounds of one key column.
+/// whole-segment Sort Key V1 bounds of each key column (`mins` / `maxs`, parallel `bytea[]` in key
+/// order).
 ///
-/// Parameters are table OID, stable key-column ID, type OID and codec version. `min_value` /
-/// `max_value` are NULL when the segment has no index row for the column (compaction then refuses to
-/// drop delete markers, since that segment may hold an older version of any key). The last column
-/// counts active segments of other scopes, which compaction does not handle.
+/// Parameters are table OID, the key columns' stable IDs (`smallint[]`, in key order) and the codec
+/// version. An array shorter than the key, or with a NULL element, means the segment has no usable
+/// bounds for a key column (compaction then refuses to drop delete markers, since that segment may
+/// hold an older version of any key). The last column counts active segments of other scopes, which
+/// compaction does not handle.
 ///
 /// # Errors
 ///
@@ -975,30 +977,30 @@ SELECT
     v.physical_names::text,
     cs.segment_id,
     cs.row_count,
-    csi.min_value,
-    csi.max_value,
+    (SELECT array_agg(csi.min_value ORDER BY k.ord)
+       FROM unnest($2::smallint[]) WITH ORDINALITY AS k(cid, ord)
+       JOIN koldstore.cold_segment_index csi
+         ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
+        AND csi.codec_version = $3::smallint) AS mins,
+    (SELECT array_agg(csi.max_value ORDER BY k.ord)
+       FROM unnest($2::smallint[]) WITH ORDINALITY AS k(cid, ord)
+       JOIN koldstore.cold_segment_index csi
+         ON csi.segment_id = cs.segment_id AND csi.column_id = k.cid
+        AND csi.codec_version = $3::smallint) AS maxs,
     (SELECT count(*) FROM koldstore.cold_segments o
       WHERE o.table_oid = $1::oid AND o.status = 'active' AND o.scope_key <> '')::bigint
 FROM koldstore.cold_segments cs
-LEFT JOIN koldstore.cold_segment_index csi
-  ON csi.segment_id = cs.segment_id
- AND csi.column_id = $2::smallint
- AND csi.type_oid = $3::oid
- AND csi.codec_version = $4::smallint
 LEFT JOIN versions v ON v.schema_version = cs.schema_version
 LEFT JOIN table_prefix pref ON true
 WHERE cs.table_oid = $1::oid
   AND cs.scope_key = ''
   AND cs.status = 'active'
-ORDER BY csi.min_value NULLS LAST, cs.batch_number, cs.segment_id
+ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
+           WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
+             AND csi.codec_version = $3::smallint) NULLS LAST, cs.batch_number, cs.segment_id
 "#
         ),
-        [
-            SqlParamType::Oid,
-            SqlParamType::Integer,
-            SqlParamType::Oid,
-            SqlParamType::Integer,
-        ],
+        [SqlParamType::Oid, SqlParamType::SmallIntArray, SqlParamType::Integer],
     )
 }
 

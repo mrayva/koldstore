@@ -173,13 +173,6 @@ RESET
  t
 (1 row)
 
-CREATE TABLE
- comp_managed
---------------
- t
-(1 row)
-
-psql:<PATH>: ERROR:  compact_table failed: compaction supports single-column primary keys only
 psql:<PATH>: ERROR:  compact_table failed: max_rows must be at least 1
 CREATE TABLE
 INSERT 0 120

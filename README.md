@@ -445,7 +445,7 @@ Near-term implementation research:
 1. Preserve native PostgreSQL performance for hot-dominant queries.
 2. Finish progressive, bounded Arrow and Parquet reads.
 3. Improve cold point lookups with statistics, Bloom filters, and page indexes.
-4. Extend compaction to scoped tables and composite keys.
+4. Extend compaction to scoped tables.
 5. Complete direct cold-row DML semantics.
 6. Deliver coordinated backup, restore, export, and recovery tooling.
 7. Expand schema-evolution support.

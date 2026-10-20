@@ -93,7 +93,7 @@ CAS shared with flush finalize (see [ADR-004](decisions/004-segment-publication-
 
 Still open:
 
-- user-scoped tables and composite primary keys
+- user-scoped tables
 - streaming merges for units larger than `max_rows` (a unit is read into memory)
 - keeping `changes_since` history of overwritten cold versions
 

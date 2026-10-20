@@ -15,13 +15,15 @@
 //! reading them) and are reaped afterwards.
 //!
 //! The cold history of a key collapses to its newest version, so `changes_since` over cold data no
-//! longer reports the overwritten versions. Scoped (per-user) tables and composite keys are not
-//! handled yet.
+//! longer reports the overwritten versions. Scoped (per-user) tables are not handled yet.
 //!
 //! Output rows are sorted like a flush sorts them: by the segment-order column when the table has
-//! one, then by key. When that column is not the key, rewritten segments do not become key-disjoint
-//! (they are ordered by the other column), so a unit is only published when it removes superseded
-//! rows or merges segments; otherwise every call would rewrite the same layout again.
+//! one, then by the key columns in key order. Two segments can share a composite key only if their
+//! per-column bounds intersect on every key column (`koldstore_flush::compaction`). A single-column
+//! key ordered by itself ends up key-disjoint; otherwise (a composite key, or a table ordered by
+//! another column) the rewritten segments' boxes may still touch, so a unit is only published when
+//! it removes superseded rows or merges segments, and the maintenance worker leaves overlap units of
+//! such tables to explicit `compact_table` calls (they would be reread unchanged every tick).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -50,7 +52,8 @@ struct ListedSegment {
     segment_id: uuid::Uuid,
     hint: SegmentStatsHint,
     row_count: i64,
-    bounds: Option<(Vec<u8>, Vec<u8>)>,
+    /// `(min, max)` per key column, in key order; `None` when any column lacks usable bounds.
+    bounds: Option<Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 /// Compacts `table_oid`'s cold segments; returns a JSON report.
@@ -123,21 +126,23 @@ fn compact_locked(
         reaped
     };
     let catalog = &ctx.catalog;
-    if catalog.primary_key.columns.len() != 1 {
-        return refuse("compaction supports single-column primary keys only".to_string());
+    if catalog.primary_key.columns.is_empty() {
+        return refuse("compaction needs a primary key".to_string());
     }
-    let pk = &catalog.primary_key.columns[0];
-    let pk_column = catalog
-        .column_by_id(pk.column_id)
-        .ok_or_else(|| "primary-key column is missing from the catalog".to_string())?;
-    if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(pk_column.pg_type.type_oid())
-        .is_none()
-    {
-        return refuse(format!(
-            "compaction needs Sort Key bounds for the primary key, which type `{}` has none",
-            pk_column.catalog_type_name
-        ));
+    for key in &catalog.primary_key.columns {
+        let column = catalog
+            .column_by_id(key.column_id)
+            .ok_or_else(|| "primary-key column is missing from the catalog".to_string())?;
+        if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())
+            .is_none()
+        {
+            return refuse(format!(
+                "compaction needs Sort Key bounds for every primary-key column, which type `{}` of `{}` has none",
+                column.catalog_type_name, column.name
+            ));
+        }
     }
+    let lead_key = catalog.primary_key.columns[0].column_id;
 
     let (segments, scoped_segments) = list_active_segments(table_oid, &ctx)?;
     if scoped_segments > 0 {
@@ -159,10 +164,10 @@ fn compact_locked(
     let ranges: Vec<SegmentRange> = segments
         .iter()
         .filter_map(|segment| {
-            segment
-                .bounds
-                .as_ref()
-                .map(|(min, max)| SegmentRange::single(segment.row_count, min.clone(), max.clone()))
+            segment.bounds.as_ref().map(|bounds| SegmentRange {
+                row_count: segment.row_count,
+                bounds: bounds.clone(),
+            })
         })
         .collect();
     let mut plan = plan_compaction_units(
@@ -171,11 +176,14 @@ fn compact_locked(
         max_rows,
     );
     if auto {
-        let key_ordered = ctx
-            .snapshot
-            .segment_order_column_id
-            .is_none_or(|column_id| column_id == pk.column_id);
-        if !key_ordered {
+        // Only a single-column key ordered by itself is rewritten into key-disjoint segments; for
+        // anything else an overlap component would be reread and rewritten unchanged every tick.
+        let stable_rewrite = catalog.primary_key.columns.len() == 1
+            && ctx
+                .snapshot
+                .segment_order_column_id
+                .is_none_or(|column_id| column_id == lead_key);
+        if !stable_rewrite {
             plan.units.retain(|unit| !unit.overlapping);
         }
         if plan.units.is_empty() {
@@ -278,7 +286,13 @@ fn compact_unit(
             }
         }
     }
-    let pk_name = &catalog.primary_key.columns[0].name;
+    let key_names: Vec<&String> = catalog
+        .primary_key
+        .columns
+        .iter()
+        .filter_map(|key| catalog.column_by_id(key.column_id))
+        .map(|column| &column.name)
+        .collect();
     let order_name: Option<&String> = ctx
         .snapshot
         .segment_order_column_id
@@ -292,16 +306,25 @@ fn compact_unit(
     let cell = |row: &koldstore_parquet::CleanColdRow, name: &String| -> CellValue {
         row.row_image.get(name).cloned().unwrap_or_else(|| null.clone())
     };
+    // Same order a flush produces: the segment-order column, then the key columns in key order.
     kept.sort_by(|left, right| {
         let by_order = order_name.map_or(std::cmp::Ordering::Equal, |name| {
             cmp_cells(&cell(left, name), &cell(right, name))
         });
-        by_order
-            .then_with(|| cmp_cells(&cell(left, pk_name), &cell(right, pk_name)))
+        key_names
+            .iter()
+            .fold(by_order, |ordering, name| {
+                ordering.then_with(|| cmp_cells(&cell(left, name), &cell(right, name)))
+            })
             .then(left.seq.cmp(&right.seq))
     });
-    let key_ordered = order_name.is_none_or(|name| name == pk_name);
-    if !key_ordered {
+    // A single-column key ordered by itself always ends up key-disjoint, which is worth publishing
+    // even when no row is dropped. Otherwise (composite key, or ordered by another column) the
+    // rewritten segments' key boxes may still touch, so publish only when it removes rows or merges
+    // segments; otherwise every call would rewrite the same layout again.
+    let stable_rewrite =
+        key_names.len() == 1 && order_name.is_none_or(|name| name == key_names[0]);
+    if !stable_rewrite {
         let target = ctx.max_rows_per_file.max(1);
         let output_segments = kept.len().div_ceil(target);
         if kept.len() as i64 == rows_read && output_segments >= members.len() {
@@ -451,17 +474,18 @@ fn list_active_segments(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
 ) -> Result<(Vec<ListedSegment>, i64), String> {
-    let pk = &ctx.catalog.primary_key.columns[0];
-    let column = ctx
+    let key_ids: Vec<i16> = ctx
         .catalog
-        .column_by_id(pk.column_id)
-        .ok_or_else(|| "primary-key column is missing from the catalog".to_string())?;
+        .primary_key
+        .columns
+        .iter()
+        .map(|key| key.column_id.get())
+        .collect();
     let statement = koldstore_catalog::queries::plan_compaction_segment_listing()
         .map_err(|error| error.to_string())?;
     let args = [
         DatumWithOid::from(table_oid),
-        DatumWithOid::from(i32::from(pk.column_id.get())),
-        DatumWithOid::from(pgrx::pg_sys::Oid::from(column.pg_type.type_oid())),
+        DatumWithOid::from(key_ids.clone()),
         DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
     ];
     let current_version = ctx.storage.schema_version;
@@ -486,9 +510,22 @@ fn list_active_segments(
                     .map(crate::spi::uuid_from_pgrx)
                     .unwrap_or_default();
                 let row_count = tuple.get::<i64>(8)?.unwrap_or(0);
-                let min = tuple.get::<Vec<u8>>(9)?;
-                let max = tuple.get::<Vec<u8>>(10)?;
+                let to_vec = |array: Option<pgrx::Array<&[u8]>>| -> Vec<Option<Vec<u8>>> {
+                    array
+                        .map(|array| array.iter().map(|value| value.map(<[u8]>::to_vec)).collect())
+                        .unwrap_or_default()
+                };
+                let mins = to_vec(tuple.get::<pgrx::Array<&[u8]>>(9)?);
+                let maxs = to_vec(tuple.get::<pgrx::Array<&[u8]>>(10)?);
                 scoped = tuple.get::<i64>(11)?.unwrap_or(0);
+                let bounds = (mins.len() == key_ids.len() && maxs.len() == key_ids.len())
+                    .then(|| {
+                        mins.into_iter()
+                            .zip(maxs)
+                            .map(|(min, max)| min.zip(max))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .flatten();
                 let to_seq = |raw: i64| {
                     SeqId::new(raw).map_err(|error| {
                         pgrx::spi::SpiError::DatumError(
@@ -510,7 +547,7 @@ fn list_active_segments(
                         selected_row_groups: None,
                     },
                     row_count,
-                    bounds: min.zip(max),
+                    bounds,
                 });
             }
             Ok((out, scoped))

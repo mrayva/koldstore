@@ -1,0 +1,180 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ cc_managed
+------------
+ t
+(1 row)
+
+ cc_caught_up
+--------------
+ t
+(1 row)
+
+ cc_flushed
+------------
+ t
+(1 row)
+
+ cc_noop_first
+---------------
+ f
+(1 row)
+
+SET
+UPDATE 4
+UPDATE 4
+DELETE 5
+DELETE 5
+RESET
+ cc_fenced
+-----------
+ t
+(1 row)
+
+ cc_reflushed
+--------------
+ t
+(1 row)
+
+ cc_fenced_2
+-------------
+ t
+(1 row)
+
+ cc_content_before
+-------------------
+ t
+(1 row)
+
+SELECT 1
+SELECT 1
+ cc_compacted | cc_dropped_old_versions
+--------------+-------------------------
+ t            | t
+(1 row)
+
+ cc_content_after
+------------------
+ t
+(1 row)
+
+ cc_rows_shrank
+----------------
+ t
+(1 row)
+
+ cc_edited_value
+-----------------
+ edited
+(1 row)
+
+ cc_deleted_rows_gone
+----------------------
+                    0
+(1 row)
+
+ cc_noop_second
+----------------
+ f
+(1 row)
+
+ cc_reaped
+-----------
+ t
+(1 row)
+
+ cc_orphans
+------------
+          0
+(1 row)
+
+ cc_valid
+----------
+ true
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+INSERT 0 1
+INSERT 0 1
+RESET
+ cc_fenced_3
+-------------
+ t
+(1 row)
+
+ cc_reflushed_2
+----------------
+ t
+(1 row)
+
+ cc_fenced_4
+-------------
+ t
+(1 row)
+
+ cc_content_final
+------------------
+ t
+(1 row)
+
+ cc_compacted_again
+--------------------
+ t
+(1 row)
+
+ cc_content_after_second
+-------------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 200
+SELECT 200
+ cct_managed
+-------------
+ t
+(1 row)
+
+ cct_caught_up
+---------------
+ t
+(1 row)
+
+ cct_flushed
+-------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+RESET
+ cct_fenced
+------------
+ t
+(1 row)
+
+ cct_reflushed
+---------------
+ t
+(1 row)
+
+ cct_fenced_2
+--------------
+ t
+(1 row)
+
+ cct_compacted
+---------------
+ t
+(1 row)
+
+ cct_content_after
+-------------------
+ t
+(1 row)
+

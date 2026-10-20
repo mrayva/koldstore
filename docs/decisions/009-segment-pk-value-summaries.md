@@ -182,8 +182,7 @@ that splits segments well keeps it near-linear; segments that all span the leadi
 another column (an ascending id) and so count as disjoint. Every key column needs a bounds encoding and an index row in
 every segment, otherwise the answer is "not disjoint". Covered by the `composite_key_disjoint_scan` SQL case.
 
-Compaction (`koldstore.compact_table`) still refuses composite keys; its planner already groups segments by the same box
-overlap, so the remaining work is ordering and deduplicating on the full key (slice 3). Slice 2 is pruning by a key prefix.
+Compaction (`koldstore.compact_table`) handles composite keys (slice 3, below). Slice 2 is pruning by value lists.
 
 Slice 2 (pruning): a prefix or range of a composite key already pruned by the key columns' bounds, and a full-key equality
 by the summary. A list did not: `(tenant, id) IN (...)`, an OR of full-key equalities, or `tenant IN (...)` fell back to the
@@ -192,3 +191,11 @@ a row-value `IN`) gives every key column that every disjunct pins a value list (
 different columns' values together), and the per-value candidate union is no longer limited to single-column keys. A lookup
 of one column of a composite key never probes the value summary (it hashes the whole key); the column's row-group bounds and
 the other predicates still narrow each value. Covered by `composite_key_value_lists`.
+
+Slice 3 (compaction): `compact_table` groups segments by the same box overlap, deduplicates on the whole key, and sorts the
+output like a flush (segment-order column, then the key columns in key order). A composite key's rewritten segments are
+lexicographically disjoint but their per-column boxes can still touch (a tenant that straddles two segments with
+overlapping id ranges), so the box test keeps calling the layout possibly overlapping; compaction therefore publishes a unit
+of such a table only when it removes rows or merges segments, and the maintenance worker leaves their overlap units to
+explicit calls. A tuple-level (lexicographic) segment min/max would make the check exact; it needs a new catalog column.
+Covered by `composite_key_compaction`.

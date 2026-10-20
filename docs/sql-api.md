@@ -775,10 +775,12 @@ the affected segments:
   version of every key wins (keeping its original `seq`), delete markers are dropped, rows are sorted like a
   flush sorts them and split at `max_rows_per_file`;
 - runs of adjacent, already disjoint segments that are at most half full are packed into fuller ones;
-- when the table is ordered by its primary key (or has no order column) the rewritten segments are
-  key-disjoint, which lets scans skip retaining cold keys (`koldstore.max_merge_seen_keys` no longer limits a
-  full scan). A table ordered by another column is deduplicated and packed, but its segments stay ordered by
-  that column, so a unit is only rewritten when it removes rows or merges segments.
+- when the table has a single-column primary key and is ordered by it (or has no order column) the rewritten
+  segments are key-disjoint, which lets scans skip retaining cold keys (`koldstore.max_merge_seen_keys` no longer limits a
+  full scan). A composite key, or a table ordered by another column, is deduplicated and packed (rows sorted by the
+  order column, then the key columns, like a flush), but the rewritten segments' key boxes may still touch, so a
+  unit is only rewritten when it removes rows or merges segments, and automatic compaction leaves such tables'
+  overlap units to explicit calls.
 
 Each unit is published atomically: one catalog statement activates the new segments and retires the old ones
 under the manifest-generation CAS (the same one flush uses), so a reader sees either layout, never a mix.
@@ -795,7 +797,7 @@ the maintenance worker deletes them afterwards. The grace is never shorter than
 registered with `koldstore.register_backup`. A backup that is neither covered by the window nor registered can
 no longer restore the cold tier of a compacted table once the grace has passed.
 
-With `koldstore.auto_compaction = on` the maintenance worker runs the same pass on its own (bounded per tick, off by default). Not handled yet: user-scoped tables and composite primary keys (refused with an error). Compaction collapses
+With `koldstore.auto_compaction = on` the maintenance worker runs the same pass on its own (bounded per tick, off by default). Not handled yet: user-scoped tables (refused with an error). Compaction collapses
 the cold history of a key to its newest version, so `changes_since` no longer reports overwritten cold versions.
 Segments without primary-key bounds (written by a very old release) make the call decline until
 `koldstore.rebuild_segment_summaries` has run, since delete markers can only be dropped when every segment's

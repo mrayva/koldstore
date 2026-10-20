@@ -101,10 +101,6 @@ SELECT (koldstore.compact_table('sqlreg.cp'::regclass, grace_seconds => 0) ->> '
 SELECT sqlreg.same_content('sqlreg.cp', 'sqlreg.cp_ctl', 'id') AS cp_content_after_second_compaction;
 
 -- ------------------------------------------------ refusals
-CREATE TABLE sqlreg.cp_comp (a int, b int, v text, PRIMARY KEY (a, b));
-SELECT koldstore.manage_table(table_name => 'sqlreg.cp_comp'::regclass, storage => 'sqlreg_fs',
-  hot_row_limit => 5, min_flush_rows => 1, auto_flush => false) IS NOT NULL AS comp_managed;
-SELECT koldstore.compact_table('sqlreg.cp_comp'::regclass);
 SELECT koldstore.compact_table('sqlreg.cp'::regclass, max_rows => 0);
 -- ordered by a column other than the key: still deduplicates, sorted by that column
 CREATE TABLE sqlreg.cp_ord (id bigint PRIMARY KEY, n int NOT NULL, v text);
