@@ -1,0 +1,74 @@
+CREATE TABLE
+INSERT 0 200
+ big_managed
+-------------
+ t
+(1 row)
+
+ big_caught_up
+---------------
+ t
+(1 row)
+
+ big_flushed
+-------------
+ t
+(1 row)
+
+ big_mostly_cold
+-----------------
+ t
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=30, limit=30). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 41
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_big" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_big" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+RESET
+ big_total
+-----------
+       244
+(1 row)
+
+CREATE TABLE
+INSERT 0 80
+CREATE TABLE
+INSERT 0 80
+CREATE TABLE
+INSERT 0 80
+CREATE TABLE
+INSERT 0 80
+CREATE TABLE
+INSERT 0 80
+DO
+ others_caught_up
+------------------
+ t
+(1 row)
+
+ txt_flushed | cmp_flushed | uuid_flushed | ts_flushed | num_flushed
+-------------+-------------+--------------+------------+-------------
+ t           | t           | t            | t          | t
+(1 row)
+
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_txt" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_cmp" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_num" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+SET
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_uuid" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."cig_ts" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+RESET
+ txt_total | cmp_total | uuid_total | ts_total | num_total
+-----------+-----------+------------+----------+-----------
+        81 |        81 |         81 |       81 |        81
+(1 row)
+

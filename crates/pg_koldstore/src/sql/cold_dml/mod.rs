@@ -112,6 +112,137 @@ fn pk_join_predicate(pk_columns: &[String]) -> String {
         .join(" AND ")
 }
 
+/// One primary-key value of a type whose text input is session-dependent (`STABLE`), evaluated by
+/// PostgreSQL itself and then bound as a typed parameter.
+#[cfg(feature = "pg")]
+enum TemporalKeyBind {
+    Date(pgrx::datum::Date),
+    Timestamp(pgrx::datum::Timestamp),
+    Timestamptz(pgrx::datum::TimestampWithTimeZone),
+}
+
+#[cfg(feature = "pg")]
+impl TemporalKeyBind {
+    fn datum(&self) -> DatumWithOid<'_> {
+        match self {
+            Self::Date(value) => DatumWithOid::from(*value),
+            Self::Timestamp(value) => DatumWithOid::from(*value),
+            Self::Timestamptz(value) => DatumWithOid::from(*value),
+        }
+    }
+}
+
+/// The primary-key lookup predicate of [`locate_row_json`] plus the typed parameters it binds.
+#[cfg(feature = "pg")]
+struct PkLookup {
+    predicate: String,
+    temporal: Vec<TemporalKeyBind>,
+    /// `false` when a key column was missing from (or null in) the key object: nothing can match.
+    complete: bool,
+}
+
+/// Builds `t."col" = ($1 ->> 'col')::<type> AND ...` for the table's primary key.
+///
+/// `$1` is the key as the jsonb object `to_jsonb` produces; every column's text form parses back
+/// with the column's own input function (numbers and booleans as text, uuid as canonical text,
+/// `bytea` as `\x` hex, floats including `"NaN"` / `"Infinity"`). Because `$1` is bound, the cast
+/// folds to a constant at plan time -- but only for `IMMUTABLE` input functions. `date`, `timestamp`
+/// and `timestamptz` parse text through the session's DateStyle / TimeZone (`STABLE`), which the
+/// planner will not fold, so those keys are evaluated by PostgreSQL in a first query and bound as
+/// typed parameters (`$2`, `$3`, ...) of the second, where bound values do become constants.
+#[cfg(feature = "pg")]
+fn pk_lookup(table_oid: pgrx::pg_sys::Oid, pk_json: &serde_json::Value) -> Result<PkLookup, String> {
+    let sql = "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod), a.atttypid::oid \
+               FROM pg_catalog.pg_index i \
+               JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::int2[]) \
+               WHERE i.indrelid = $1 AND i.indisprimary \
+               ORDER BY array_position(i.indkey::int2[], a.attnum)";
+    let columns = pgrx::Spi::connect(
+        |client| -> Result<Vec<(String, String, pgrx::pg_sys::Oid)>, pgrx::spi::Error> {
+            let mut out = Vec::new();
+            for row in client.select(sql, None, &[DatumWithOid::from(table_oid)])? {
+                let name = row.get::<String>(1)?.unwrap_or_default();
+                let type_name = row.get::<String>(2)?.unwrap_or_default();
+                let type_oid = row.get::<pgrx::pg_sys::Oid>(3)?.unwrap_or(pgrx::pg_sys::InvalidOid);
+                out.push((name, type_name, type_oid));
+            }
+            Ok(out)
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if columns.is_empty() {
+        return Err("managed table has no primary-key columns".to_string());
+    }
+
+    let is_temporal = |oid: pgrx::pg_sys::Oid| {
+        oid == pgrx::pg_sys::DATEOID || oid == pgrx::pg_sys::TIMESTAMPOID || oid == pgrx::pg_sys::TIMESTAMPTZOID
+    };
+    // First query: the temporal keys, parsed by PostgreSQL.
+    let temporal_columns: Vec<&(String, String, pgrx::pg_sys::Oid)> =
+        columns.iter().filter(|column| is_temporal(column.2)).collect();
+    let mut temporal = Vec::with_capacity(temporal_columns.len());
+    let mut complete = true;
+    if !temporal_columns.is_empty() {
+        let select_list = temporal_columns
+            .iter()
+            .map(|(name, type_name, _)| format!("($1 ->> '{}')::{type_name}", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key = pgrx::JsonB(pk_json.clone());
+        let parsed = pgrx::Spi::connect(
+            |client| -> Result<Vec<Option<TemporalKeyBind>>, pgrx::spi::Error> {
+                let table = client.select(&format!("SELECT {select_list}"), Some(1), &[DatumWithOid::from(key)])?;
+                let Some(row) = table.into_iter().next() else {
+                    return Ok(Vec::new());
+                };
+                let mut out = Vec::with_capacity(temporal_columns.len());
+                for (index, (_, _, oid)) in temporal_columns.iter().enumerate() {
+                    let ordinal = index + 1;
+                    out.push(if *oid == pgrx::pg_sys::DATEOID {
+                        row.get::<pgrx::datum::Date>(ordinal)?.map(TemporalKeyBind::Date)
+                    } else if *oid == pgrx::pg_sys::TIMESTAMPOID {
+                        row.get::<pgrx::datum::Timestamp>(ordinal)?.map(TemporalKeyBind::Timestamp)
+                    } else {
+                        row.get::<pgrx::datum::TimestampWithTimeZone>(ordinal)?
+                            .map(TemporalKeyBind::Timestamptz)
+                    });
+                }
+                Ok(out)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for value in parsed {
+            match value {
+                Some(bind) => temporal.push(bind),
+                None => complete = false,
+            }
+        }
+        complete = complete && temporal.len() == temporal_columns.len();
+    }
+
+    let mut next_temporal = 2; // $1 is the key object
+    let predicate = columns
+        .iter()
+        .map(|(name, type_name, oid)| {
+            let quoted = koldstore_common::sql::ident::quote_ident(name);
+            if is_temporal(*oid) {
+                let clause = format!("t.{quoted} = ${next_temporal}");
+                next_temporal += 1;
+                clause
+            } else {
+                let key = name.replace('\'', "''");
+                format!("t.{quoted} = ($1 ->> '{key}')::{type_name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok(PkLookup {
+        predicate,
+        temporal,
+        complete,
+    })
+}
+
 /// Locates `pk` (hot or cold) as a full-row jsonb value via a *standalone*
 /// `SELECT`, so `KoldMergeScan` actually fires on the source scan -- see the
 /// module doc comment for why this must never be combined with a write
@@ -127,16 +258,21 @@ fn locate_row_json(
     pk_json: &serde_json::Value,
 ) -> Result<Option<pgrx::JsonB>, String> {
     let relation = qualified_relation(table_oid)?;
-    let pk_columns = primary_key_columns(table_oid)?;
     let quoted = relation.quoted();
-    let predicate = pk_join_predicate(&pk_columns);
+    // The key must reach the scan as a constant equality (`t.id = <const>`), which is what lets the
+    // merge scan prune cold segments by min/max, bloom filter and value summary. A join against a
+    // `jsonb_populate_record` CTE hides the value from the planner, so every probe -- including the
+    // INSERT guard's, which runs once per inserted row -- read the whole cold tier (seconds per row
+    // at 3M cold rows). Extracting each key with a typed cast of `$1 ->> 'col'` folds to a constant at
+    // plan time because the value is bound.
+    let lookup = pk_lookup(table_oid, pk_json)?;
+    if !lookup.complete {
+        return Ok(None);
+    }
 
-    let locate_sql = format!(
-        "WITH pk AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)) \
-         SELECT to_jsonb(t) FROM {quoted} AS t, pk \
-         WHERE {predicate}"
-    );
-    let locate_args = [DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
+    let locate_sql = format!("SELECT to_jsonb(t) FROM {quoted} AS t WHERE {}", lookup.predicate);
+    let mut locate_args = vec![DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
+    locate_args.extend(lookup.temporal.iter().map(TemporalKeyBind::datum));
     // `get_one_with_args` positions its cursor at row 0 unconditionally
     // (pgrx's `SpiTupleTable::first()` does this even when the result set
     // is empty), so a genuinely zero-row result -- the key does not exist
