@@ -416,9 +416,38 @@ fn hydrate_target(target: &HydrateTarget) -> bool {
         crate::catalog::cache::cached_manifest_planner_hint(table_oid),
         Ok(Some((segments, _))) if segments > 0
     );
-    // After an earlier write in this transaction the merged view cannot be trusted
-    // (upstream #121); leave it to the write guards.
-    if !has_cold || crate::txn_writes::was_written(table_oid) {
+    if !has_cold {
+        return false;
+    }
+    // After an earlier write in this transaction the merged view cannot be trusted (upstream
+    // #121): a cold row whose key this transaction deleted or edited still looks live, and
+    // hydrating it would resurrect it. Hydrating is therefore off, but skipping silently would
+    // make the statement miss every cold row it should change, so a statement that matches
+    // cold-only rows is refused instead. Rows the heap holds (already hydrated or inserted here)
+    // are not cold-only, so repeated edits of the same rows stay fine.
+    if crate::txn_writes::was_written(table_oid) {
+        if crate::guc::allow_same_txn_cold_reads() {
+            return false;
+        }
+        let probe = crate::sql::cold_dml::guard::cold_only_matching_rows_with_params(
+            table_oid, where_sql, params,
+        )
+        .unwrap_or_else(|error| pgrx::error!("koldstore: hydrate-on-write failed: {error}"));
+        if !probe.is_empty() {
+            pgrx::ereport!(
+                pgrx::PgLogLevel::ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "koldstore: refusing this UPDATE/DELETE on managed table {} -- it matches cold row(s), \
+                     and this transaction has already modified the table, so those rows cannot be \
+                     hydrated safely (a key changed here could be resurrected; upstream issue #121). Run \
+                     it in its own transaction (COMMIT first, then koldstore.wait_for_async_mirror() if \
+                     the earlier change must be visible to it), or set \
+                     koldstore.allow_same_txn_cold_reads = on to skip the cold rows silently",
+                    crate::txn_writes::relation_display_name(table_oid)
+                )
+            );
+        }
         return false;
     }
 

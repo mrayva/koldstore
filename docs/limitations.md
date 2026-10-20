@@ -173,6 +173,7 @@ any row or object is changed.
 |-----------|----------|------|
 | `SELECT` hot + cold, `ORDER BY` (incl. composite primary key) | supported | `merge_order_composite_pk`, `query_semantics` |
 | Read of a table written in the same transaction | refused when cold data is consulted | `txn_local_visibility` |
+| `UPDATE`/`DELETE` matching cold rows after an earlier write to the table in the same transaction | refused (it cannot hydrate them safely; it used to skip them silently) | `same_txn_cold_dml` |
 | `SELECT ... FOR UPDATE / SHARE` | refused when cold data can contribute | `unsupported_constructs` |
 | `TABLESAMPLE` | refused when cold data can contribute | `unsupported_constructs` |
 | `ctid` / system columns | refused when cold data can contribute | `unsupported_constructs` |

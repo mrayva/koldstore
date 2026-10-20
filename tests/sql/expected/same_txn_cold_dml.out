@@ -1,0 +1,63 @@
+CREATE TABLE
+INSERT 0 40
+ sd_managed
+------------
+ t
+(1 row)
+
+ sd_caught_up
+--------------
+ t
+(1 row)
+
+ sd_flushed
+------------
+ t
+(1 row)
+
+ sd_fenced
+-----------
+ t
+(1 row)
+
+SET
+BEGIN
+UPDATE 2
+psql:<PATH>: ERROR:  koldstore: refusing this UPDATE/DELETE on managed table sqlreg.sd -- it matches cold row(s), and this transaction has already modified the table, so those rows cannot be hydrated safely (a key changed here could be resurrected; upstream issue #121). Run it in its own transaction (COMMIT first, then koldstore.wait_for_async_mirror() if the earlier change must be visible to it), or set koldstore.allow_same_txn_cold_reads = on to skip the cold rows silently
+ROLLBACK
+BEGIN
+UPDATE 2
+UPDATE 2
+DELETE 1
+COMMIT
+ sd_fenced_2
+-------------
+ t
+(1 row)
+
+ id | v
+----+---
+ 10 | b
+(1 row)
+
+BEGIN
+INSERT 0 1
+UPDATE 1
+COMMIT
+DELETE 6
+ sd_fenced_3
+-------------
+ t
+(1 row)
+
+ sd_between_20_25
+------------------
+                0
+(1 row)
+
+BEGIN
+SET
+UPDATE 1
+DELETE 0
+COMMIT
+RESET
