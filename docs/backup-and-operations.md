@@ -15,7 +15,8 @@ operations that delete referenced cold objects are:
 
 - `DROP TABLE` / `DROP SCHEMA` of a managed table,
 - `compact_table` / the maintenance worker, once a replaced segment's grace period has passed (never
-  shorter than `koldstore.cold_object_retention_seconds`; see `koldstore.compact_table` in the SQL API),
+  shorter than `koldstore.cold_object_retention_seconds`, and never while a backup taken before the
+  compaction is registered with `koldstore.register_backup`; see the SQL API),
 - `unmanage_table(..., drop_cold => true)`,
 - `recover_segments(...)` on objects the *current* catalog no longer references (orphans relative to
   now, but possibly referenced by an older backup).

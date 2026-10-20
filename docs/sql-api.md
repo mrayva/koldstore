@@ -144,6 +144,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.purge_deferred_cold_objects(...)` | `jsonb` | Deletes retained cold objects whose window has passed |
 | `koldstore.compact_table(...)` | `jsonb` | Rewrites overlapping / small cold segments; report of what changed |
 | `koldstore.reap_compacted_segments(...)` | `bigint` | Deletes replaced segments' objects past their grace period |
+| `koldstore.register_backup(...)` / `koldstore.unregister_backup(...)` | `timestamptz` / `boolean` | Registers a backup whose cold objects must be kept (see below) |
 
 ## Storage and Migration
 
@@ -790,15 +791,39 @@ flush lock, so it fails fast when a flush is running and flushes skip the table 
 Replaced segments are marked `compacted` and keep their objects for `grace_seconds` (default 600) so queries
 planned on the previous layout finish; the next `compact_table` call, `koldstore.reap_compacted_segments`, or
 the maintenance worker deletes them afterwards. The grace is never shorter than
-`koldstore.cold_object_retention_seconds`: a physical backup taken before a compaction still references the
-replaced objects, so with a retention window set they stay as long as the window. Without one, a backup older
-than the grace can no longer restore the cold tier of a compacted table.
+`koldstore.cold_object_retention_seconds`, and objects are kept while a backup taken before the compaction is
+registered with `koldstore.register_backup`. A backup that is neither covered by the window nor registered can
+no longer restore the cold tier of a compacted table once the grace has passed.
 
 With `koldstore.auto_compaction = on` the maintenance worker runs the same pass on its own (bounded per tick, off by default). Not handled yet: user-scoped tables and composite primary keys (refused with an error). Compaction collapses
 the cold history of a key to its newest version, so `changes_since` no longer reports overwritten cold versions.
 Segments without primary-key bounds (written by a very old release) make the call decline until
 `koldstore.rebuild_segment_summaries` has run, since delete markers can only be dropped when every segment's
 key range is known. Owner or superuser.
+
+### `koldstore.register_backup` / `koldstore.unregister_backup`
+
+```sql
+SELECT koldstore.register_backup('nightly');                         -- taken_at defaults to now()
+SELECT koldstore.register_backup('nightly', '2026-10-20 02:00+00');  -- or the time the base backup started
+SELECT koldstore.unregister_backup('nightly');                       -- once it can no longer be restored
+```
+
+A physical backup restores the catalog, which references cold objects. Anything that deletes an object the
+backup references makes it unrestorable, so the two operations that delete objects of live data honor a
+registry (`koldstore.backups`, superuser-only):
+
+- a segment retired by `compact_table` / automatic compaction keeps its object while any registered backup
+  has `taken_at` earlier than the retirement (reported as `held_by_registered_backups`);
+- while any backup is registered, `DROP TABLE` and `unmanage_table(drop_cold => true)` queue the table's
+  objects (`koldstore.deferred_cold_deletes`) instead of deleting them at commit, and
+  `purge_deferred_cold_objects` (also run by the maintenance worker) skips objects queued after the oldest
+  registered backup.
+
+`unregister_backup` also purges the dropped-table objects the backup was holding (the retention window, if one is set, still applies). Register at the moment the base backup *starts* (the `now()` default is right for that) and unregister when the
+backup expires. A forgotten registration keeps objects forever (growing storage), by design; list them with
+`SELECT * FROM koldstore.backups`. Registration is a promise from the backup tooling to KoldStore: it does not
+take or verify a backup. Superuser only.
 
 ### `koldstore.validate_cold_storage`
 

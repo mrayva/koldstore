@@ -239,6 +239,7 @@ fn compact_locked(
         "bytes_replaced": bytes_removed,
         "bytes_written": bytes_added,
         "reaped_segments": reaped,
+        "held_by_registered_backups": held_by_backups(table_oid)?,
         "grace_seconds": grace_seconds,
     }))
 }
@@ -600,6 +601,7 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
                 "SELECT DISTINCT table_oid FROM koldstore.cold_segments \
                  WHERE status = 'compacted' \
                    AND created_at <= now() - make_interval(secs => $1::double precision) \
+                   AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < created_at) \
                  LIMIT 5",
                 None,
                 &[DatumWithOid::from(f64::from(grace))],
@@ -671,4 +673,17 @@ pub(crate) fn auto_compaction_tick() -> Result<Option<Value>, String> {
     }
     Ok((tables_compacted > 0)
         .then(|| json!({ "tables_compacted": tables_compacted, "rows_read": rows_read })))
+}
+
+/// Retired segments of `table_oid` that a registered backup (taken before their retirement) still
+/// needs, so reaping keeps their objects.
+fn held_by_backups(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    pgrx::Spi::get_one_with_args::<i64>(
+        "SELECT count(*)::bigint FROM koldstore.cold_segments cs \
+         WHERE cs.table_oid = $1::oid AND cs.status = 'compacted' \
+           AND EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < cs.created_at)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map(|count| count.unwrap_or(0))
+    .map_err(|error| error.to_string())
 }

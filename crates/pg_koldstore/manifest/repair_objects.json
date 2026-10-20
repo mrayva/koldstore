@@ -17,6 +17,16 @@
             "foreign_keys": [
             ]
         },
+        "backups": {
+            "create": "CREATE TABLE koldstore.backups (name text NOT NULL, taken_at timestamp with time zone DEFAULT now() NOT NULL, registered_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.backups ADD CONSTRAINT backups_pkey PRIMARY KEY (name)"
+            ],
+            "foreign_keys": [
+            ]
+        },
         "schemas": {
             "create": "CREATE TABLE koldstore.schemas (id uuid NOT NULL, table_oid oid NOT NULL, version integer NOT NULL, active boolean DEFAULT true NOT NULL, table_type text NOT NULL, columns jsonb DEFAULT '[]'::jsonb NOT NULL, primary_key jsonb NOT NULL, scope_column name, mirror_relation regclass, primary_key_shape jsonb DEFAULT '[]'::jsonb NOT NULL, initialization_state text DEFAULT 'not_started'::text NOT NULL, activation_lsn pg_lsn, indexed_columns jsonb DEFAULT '[]'::jsonb NOT NULL, type_matrix jsonb DEFAULT '{}'::jsonb NOT NULL, options jsonb DEFAULT '{}'::jsonb NOT NULL, storage_id text, last_flush_seq bigint DEFAULT 0 NOT NULL, last_flush_at timestamp with time zone, created_at timestamp with time zone DEFAULT now() NOT NULL, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
             "indexes": [
@@ -243,6 +253,12 @@
             "table": "schemas",
             "unsupported": false,
             "needs_default": false
+        },
+        "column backups.name text not null": {
+            "add": "ALTER TABLE koldstore.backups ADD COLUMN name text",
+            "table": "backups",
+            "unsupported": false,
+            "needs_default": true
         },
         "column cold_segments.pass_id uuid": {
             "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN pass_id uuid",
@@ -796,6 +812,12 @@
             "unsupported": false,
             "needs_default": false
         },
+        "column backups.taken_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.backups ADD COLUMN taken_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "backups",
+            "unsupported": false,
+            "needs_default": false
+        },
         "column cold_segment_index.codec_version smallint not null": {
             "add": "ALTER TABLE koldstore.cold_segment_index ADD COLUMN codec_version smallint",
             "table": "cold_segment_index",
@@ -867,6 +889,12 @@
             "table": "cold_segment_order_index",
             "unsupported": false,
             "needs_default": true
+        },
+        "column backups.registered_at timestamp with time zone not null": {
+            "add": "ALTER TABLE koldstore.backups ADD COLUMN registered_at timestamp with time zone DEFAULT now() NOT NULL",
+            "table": "backups",
+            "unsupported": false,
+            "needs_default": false
         },
         "column cold_segment_order_index.sort_order_id integer not null": {
             "add": "ALTER TABLE koldstore.cold_segment_order_index ADD COLUMN sort_order_id integer",
@@ -1038,6 +1066,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.internal_encode_sort_key(value anyelement)\n RETURNS bytea\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '$libdir/koldstore', $function$internal_encode_sort_key_wrapper$function$\n",
             "revoke_public": false
         },
+        "function unregister_backup(name text) returns boolean security definer [unregister_backup_pg_wrapper]": {
+            "add": "koldstore.unregister_backup(name text)",
+            "name": "unregister_backup",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.unregister_backup(name text)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$unregister_backup_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function internal_ensure_manifest_row(p_table_oid oid) returns void security definer [sql:456fd88ef614]": {
             "add": "koldstore.internal_ensure_manifest_row(p_table_oid oid)",
             "name": "internal_ensure_manifest_row",
@@ -1186,6 +1220,12 @@
             "add": "koldstore.reap_compacted_segments(table_name regclass, grace_seconds integer)",
             "name": "reap_compacted_segments",
             "create": "CREATE OR REPLACE FUNCTION koldstore.reap_compacted_segments(table_name regclass, grace_seconds integer DEFAULT 600)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$reap_compacted_segments_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function register_backup(name text, taken_at timestamp with time zone DEFAULT now()) returns timestamp with time zone security definer [register_backup_pg_wrapper]": {
+            "add": "koldstore.register_backup(name text, taken_at timestamp with time zone)",
+            "name": "register_backup",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.register_backup(name text, taken_at timestamp with time zone DEFAULT now())\n RETURNS timestamp with time zone\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$register_backup_pg_wrapper$function$\n",
             "revoke_public": false
         },
         "function alter_storage_location(name text, base_path text, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]": {

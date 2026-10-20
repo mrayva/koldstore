@@ -1032,6 +1032,8 @@ LEFT JOIN table_prefix pref ON true
 WHERE cs.table_oid = $1::oid
   AND cs.status = 'compacted'
   AND cs.created_at <= now() - make_interval(secs => $2::double precision)
+  -- a backup taken before the retirement still references this object
+  AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < cs.created_at)
 ORDER BY cs.created_at, cs.segment_id
 "#
         ),

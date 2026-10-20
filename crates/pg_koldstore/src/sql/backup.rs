@@ -334,6 +334,7 @@ fn purge_deferred_value(
             .select(
                 "SELECT id, storage_id, object_key FROM koldstore.deferred_cold_deletes
                  WHERE staged_at <= now() - make_interval(secs => $1::double precision)
+                   AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < staged_at)
                  ORDER BY id LIMIT $2",
                 None,
                 &[DatumWithOid::from(window), DatumWithOid::from(batch_limit)],
@@ -419,7 +420,8 @@ const AUTO_PURGE_BATCH: i64 = 500;
 /// One automatic purge pass for the maintenance worker.
 ///
 /// `Ok(None)` when there is nothing to do: retention is off (`koldstore.cold_object_retention_seconds`
-/// is 0), `koldstore.cold_object_auto_purge` is off, the retention queue does not exist in this
+/// is 0; objects a registered backup held back are then purged when it is unregistered),
+/// `koldstore.cold_object_auto_purge` is off, the retention queue does not exist in this
 /// database yet, or nothing has been queued longer than the window. Otherwise it purges one bounded
 /// batch exactly as `koldstore.purge_deferred_cold_objects()` would (same live-prefix protection).
 pub(crate) fn auto_purge_tick() -> Result<Option<Value>, String> {
@@ -437,7 +439,8 @@ pub(crate) fn auto_purge_tick() -> Result<Option<Value>, String> {
     }
     let due = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM koldstore.deferred_cold_deletes \
-         WHERE staged_at <= now() - make_interval(secs => $1::double precision))",
+         WHERE staged_at <= now() - make_interval(secs => $1::double precision) \
+           AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < staged_at))",
         &[DatumWithOid::from(window)],
     )
     .map_err(|error| error.to_string())?
@@ -481,4 +484,65 @@ pub fn purge_deferred_cold_objects_pg(
     )
     .map(pgrx::JsonB)
     .unwrap_or_else(|error| pgrx::error!("purge deferred cold objects failed: {error}"))
+}
+
+/// Registers (or moves) a backup so the cold objects it references are kept.
+///
+/// SQL contract: `koldstore.register_backup(name text, taken_at timestamptz default now()) →
+/// timestamptz` (the recorded time). Cold objects replaced by compaction, or left by a dropped
+/// table, *after* `taken_at` are never deleted while the backup is registered, because restoring
+/// it needs them. Register right when the base backup starts (`now()` is the safe default) and call
+/// `koldstore.unregister_backup` once it is no longer restorable. Superuser only.
+#[pgrx::pg_extern(name = "register_backup", schema = "koldstore", security_definer)]
+pub fn register_backup_pg(
+    name: &str,
+    taken_at: pgrx::default!(pgrx::datum::TimestampWithTimeZone, "now()"),
+) -> pgrx::datum::TimestampWithTimeZone {
+    crate::security::require_superuser("register a backup");
+    if name.is_empty() {
+        pgrx::error!("backup name must not be empty");
+    }
+    pgrx::Spi::get_one_with_args::<pgrx::datum::TimestampWithTimeZone>(
+        "INSERT INTO koldstore.backups (name, taken_at) VALUES ($1, $2) \
+         ON CONFLICT (name) DO UPDATE SET taken_at = EXCLUDED.taken_at \
+         RETURNING taken_at",
+        &[DatumWithOid::from(name), DatumWithOid::from(taken_at)],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| pgrx::error!("register backup failed"))
+}
+
+/// Removes a registered backup; its cold objects become reapable again.
+///
+/// SQL contract: `koldstore.unregister_backup(name text) → boolean` (`true` when it existed).
+/// Superuser only.
+#[pgrx::pg_extern(name = "unregister_backup", schema = "koldstore", security_definer)]
+pub fn unregister_backup_pg(name: &str) -> bool {
+    crate::security::require_superuser("unregister a backup");
+    let existed = pgrx::Spi::get_one_with_args::<i64>(
+        "WITH d AS (DELETE FROM koldstore.backups WHERE name = $1 RETURNING 1) \
+         SELECT count(*)::bigint FROM d",
+        &[DatumWithOid::from(name)],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+        > 0;
+    if existed {
+        // Drop the objects the backup was holding (the retention window, if any, still applies);
+        // a storage failure here only leaves them queued for `purge_deferred_cold_objects`.
+        let has_queue = pgrx::Spi::get_one::<bool>(
+            "SELECT to_regclass('koldstore.deferred_cold_deletes') IS NOT NULL",
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+        if has_queue {
+            if let Err(error) = purge_deferred_value(AUTO_PURGE_BATCH, None, false) {
+                pgrx::warning!("koldstore: could not purge objects released by the backup: {error}");
+            }
+        }
+    }
+    existed
 }

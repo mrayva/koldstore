@@ -2,6 +2,9 @@ column async_mirror_state.applied_lsn pg_lsn not null
 column async_mirror_state.database_oid oid not null
 column async_mirror_state.seq_high_watermark bigint not null
 column async_mirror_state.updated_at timestamp with time zone not null
+column backups.name text not null
+column backups.registered_at timestamp with time zone not null
+column backups.taken_at timestamp with time zone not null
 column cold_segment_index.codec_version smallint not null
 column cold_segment_index.column_id smallint not null
 column cold_segment_index.max_value bytea
@@ -163,6 +166,7 @@ function reap_compacted_segments(table_name regclass, grace_seconds integer DEFA
 function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]
 function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]
 function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]
+function register_backup(name text, taken_at timestamp with time zone DEFAULT now()) returns timestamp with time zone security definer [register_backup_pg_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]
 function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, regular_path_tmpl text, scoped_path_tmpl text, "check" boolean DEFAULT true) returns text security definer [register_storage_pg_wrapper]
 function set_partition_auto_manage(table_name regclass, enabled boolean) returns boolean security definer [set_partition_auto_manage_pg_wrapper]
@@ -174,6 +178,7 @@ function spock_tuple_object(tup jsonb) returns jsonb [sql:32488385049f]
 function sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false) returns jsonb [sync_sql_objects_pg_wrapper]
 function table_status(table_name regclass) returns jsonb security definer [table_status_pg_wrapper]
 function unmanage_table(table_name regclass, rehydrate boolean DEFAULT NULL::boolean, drop_cold boolean DEFAULT NULL::boolean) returns bigint security definer [unmanage_table_pg_wrapper]
+function unregister_backup(name text) returns boolean security definer [unregister_backup_pg_wrapper]
 function update_row(table_name regclass, pk jsonb, patch jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [update_row_pg_wrapper]
 function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep boolean DEFAULT false) returns jsonb security definer [validate_cold_storage_pg_wrapper]
 function validate_sql_objects() returns jsonb [validate_sql_objects_pg_wrapper]

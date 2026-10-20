@@ -68,7 +68,7 @@ pub(crate) fn stage(
         return Ok(());
     }
     #[cfg(feature = "pg")]
-    if crate::guc::cold_object_retention_seconds() > 0 {
+    if crate::guc::cold_object_retention_seconds() > 0 || backup_registered() {
         return defer_in_catalog(&storage.storage_id, table_oid, &keys);
     }
     PENDING.with(|pending| {
@@ -79,6 +79,19 @@ pub(crate) fn stage(
         });
     });
     Ok(())
+}
+
+/// True when a backup is registered (`koldstore.register_backup`): a dropped table's objects are
+/// then queued instead of deleted at commit, and purged once no backup older than the drop remains.
+#[cfg(feature = "pg")]
+fn backup_registered() -> bool {
+    pgrx::Spi::get_one::<bool>(
+        "SELECT to_regclass('koldstore.backups') IS NOT NULL \
+           AND EXISTS (SELECT 1 FROM koldstore.backups)",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }
 
 /// Records `keys` for deferred deletion, restarting the window for keys already queued.

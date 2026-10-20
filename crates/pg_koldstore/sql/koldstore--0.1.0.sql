@@ -190,6 +190,14 @@ CREATE TABLE IF NOT EXISTS koldstore.partition_templates (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Backups the operator still wants restorable: cold objects retired (compaction) or dropped after a
+-- backup's taken_at are kept until it is unregistered (koldstore.register_backup).
+CREATE TABLE IF NOT EXISTS koldstore.backups (
+  name text PRIMARY KEY,
+  taken_at timestamptz NOT NULL DEFAULT now(),
+  registered_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
@@ -427,6 +435,7 @@ REVOKE ALL ON
   koldstore.jobs,
   koldstore.table_cancel_requests,
   koldstore.partition_templates,
+  koldstore.backups,
   koldstore.cold_segments,
   koldstore.cold_segment_index,
   koldstore.cold_segment_order_index

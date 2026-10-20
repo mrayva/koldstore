@@ -397,3 +397,27 @@ CREATE FUNCTION koldstore."reap_compacted_segments"(
 STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'reap_compacted_segments_pg_wrapper';
+
+-- Backup registry: cold objects replaced by compaction (or dropped with a table) after a registered
+-- backup was taken are kept until the backup is unregistered.
+CREATE TABLE IF NOT EXISTS koldstore.backups (
+  name text PRIMARY KEY,
+  taken_at timestamptz NOT NULL DEFAULT now(),
+  registered_at timestamptz NOT NULL DEFAULT now()
+);
+REVOKE ALL ON koldstore.backups FROM PUBLIC;
+
+CREATE FUNCTION koldstore."register_backup"(
+	"name" TEXT,
+	"taken_at" timestamptz DEFAULT now()
+) RETURNS timestamptz
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'register_backup_pg_wrapper';
+
+CREATE FUNCTION koldstore."unregister_backup"(
+	"name" TEXT
+) RETURNS bool
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'unregister_backup_pg_wrapper';

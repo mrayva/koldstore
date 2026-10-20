@@ -38,6 +38,10 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
         purpose: "cross-session cancel signals that avoid jobs-row lock contention",
     },
     CatalogTableSpec {
+        name: "koldstore.backups",
+        purpose: "registered backups whose cold objects compaction and dropped tables must not delete",
+    },
+    CatalogTableSpec {
         name: "koldstore.partition_templates",
         purpose: "options applied to partitions created or attached under a managed partitioned table",
     },
