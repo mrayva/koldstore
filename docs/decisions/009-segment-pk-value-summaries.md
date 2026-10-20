@@ -184,3 +184,11 @@ every segment, otherwise the answer is "not disjoint". Covered by the `composite
 
 Compaction (`koldstore.compact_table`) still refuses composite keys; its planner already groups segments by the same box
 overlap, so the remaining work is ordering and deduplicating on the full key (slice 3). Slice 2 is pruning by a key prefix.
+
+Slice 2 (pruning): a prefix or range of a composite key already pruned by the key columns' bounds, and a full-key equality
+by the summary. A list did not: `(tenant, id) IN (...)`, an OR of full-key equalities, or `tenant IN (...)` fell back to the
+list's `[min, max]`. Now an OR whose disjuncts are equalities or conjunctions of equalities (which is also how PostgreSQL plans
+a row-value `IN`) gives every key column that every disjunct pins a value list (a per-column superset: it does not tie
+different columns' values together), and the per-value candidate union is no longer limited to single-column keys. A lookup
+of one column of a composite key never probes the value summary (it hashes the whole key); the column's row-group bounds and
+the other predicates still narrow each value. Covered by `composite_key_value_lists`.

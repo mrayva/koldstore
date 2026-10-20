@@ -301,9 +301,7 @@ unsafe fn segment_prune_node_predicates(
         pg_sys::NodeTag::T_BoolExpr => {
             let bool_expr = expr.cast::<pg_sys::BoolExpr>();
             if (*bool_expr).boolop == pg_sys::BoolExprType::OR_EXPR {
-                return segment_prune_or_equalities(bool_expr, catalog, params)
-                    .into_iter()
-                    .collect();
+                return segment_prune_or_equalities(bool_expr, catalog, params);
             }
             if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
                 return Vec::new();
@@ -346,28 +344,80 @@ unsafe fn segment_prune_array_expr(
     value_list_predicate(column, values)
 }
 
-/// `col = a OR col = b OR ...` on one column (the planner may already have turned it into `= ANY`).
+/// `col = a OR col = b OR ...` on one column, and its composite-key form: a disjunction of
+/// conjunctions of equalities, `(k1 = a AND k2 = b) OR (k1 = c AND k2 = d)`, which is also what a row
+/// value `(k1, k2) IN ((a, b), (c, d))` is planned as.
+///
+/// Every disjunct has to pin a column for that column to get a value list: a row matching disjunct
+/// *i* has `column = value_i`, so it has one of the listed values for each column all disjuncts
+/// pin. The result is a per-column superset (it does not tie the values of different columns
+/// together), which is all pruning needs. A disjunct that is neither an equality nor a conjunction
+/// disables the whole list: it can match outside the listed values.
 unsafe fn segment_prune_or_equalities(
     bool_expr: *mut pg_sys::BoolExpr,
     catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
-) -> Option<SegmentPrunePredicate> {
-    let mut column_id = None;
-    let mut values = Vec::new();
+) -> Vec<SegmentPrunePredicate> {
+    // column id -> one equality value per disjunct (None when a disjunct does not pin the column)
+    let mut per_column: Vec<(i16, Vec<Option<koldstore_sortkey::SortKeyValue>>)> = Vec::new();
+    let mut disjuncts = 0_usize;
     for node in list_node_pointers((*bool_expr).args) {
         let node = node.cast::<pg_sys::Expr>();
-        if node.is_null() || (*node).type_ != pg_sys::NodeTag::T_OpExpr {
-            return None; // any other disjunct can match outside the listed values
+        if node.is_null() {
+            return Vec::new();
         }
-        let predicate = segment_prune_op_expr(node, catalog, params)?;
-        if !predicate.is_equality() || column_id.is_some_and(|id| id != predicate.column_id) {
-            return None;
+        let conjuncts: Vec<*mut pg_sys::Expr> = match (*node).type_ {
+            pg_sys::NodeTag::T_OpExpr => vec![node],
+            pg_sys::NodeTag::T_BoolExpr
+                if (*node.cast::<pg_sys::BoolExpr>()).boolop == pg_sys::BoolExprType::AND_EXPR =>
+            {
+                list_node_pointers((*node.cast::<pg_sys::BoolExpr>()).args)
+                    .into_iter()
+                    .map(|arg| arg.cast::<pg_sys::Expr>())
+                    .collect()
+            }
+            _ => return Vec::new(), // any other disjunct can match outside the listed values
+        };
+        let mut pinned: Vec<(i16, koldstore_sortkey::SortKeyValue)> = Vec::new();
+        for conjunct in conjuncts {
+            if conjunct.is_null() || (*conjunct).type_ != pg_sys::NodeTag::T_OpExpr {
+                continue; // an unrecognised conjunct only narrows the disjunct further
+            }
+            if let Some(predicate) = segment_prune_op_expr(conjunct, catalog, params) {
+                if predicate.is_equality() && !pinned.iter().any(|(id, _)| *id == predicate.column_id) {
+                    if let Some(value) = predicate.min {
+                        pinned.push((predicate.column_id, value));
+                    }
+                }
+            }
         }
-        column_id = Some(predicate.column_id);
-        values.extend(predicate.min);
+        if pinned.is_empty() {
+            return Vec::new(); // this disjunct constrains no column: the whole OR is unconstrained
+        }
+        for (column_id, value) in pinned {
+            match per_column.iter_mut().find(|(id, _)| *id == column_id) {
+                Some((_, values)) => {
+                    values.resize(disjuncts, None);
+                    values.push(Some(value));
+                }
+                None => {
+                    let mut values = vec![None; disjuncts];
+                    values.push(Some(value));
+                    per_column.push((column_id, values));
+                }
+            }
+        }
+        disjuncts += 1;
     }
-    let column = catalog.column_by_attnum(column_id?)?;
-    value_list_predicate(column, values)
+    per_column
+        .into_iter()
+        .filter_map(|(column_id, mut values)| {
+            values.resize(disjuncts, None);
+            let values: Option<Vec<_>> = values.into_iter().collect();
+            let column = catalog.column_by_attnum(column_id)?;
+            value_list_predicate(column, values?)
+        })
+        .collect()
 }
 
 fn value_list_predicate(

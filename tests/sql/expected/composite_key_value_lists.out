@@ -1,0 +1,118 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 2000
+SELECT 2000
+ kl_managed
+------------
+ t
+(1 row)
+
+ kl_caught_up
+--------------
+ t
+(1 row)
+
+ kl_flushed
+------------
+ t
+(1 row)
+
+ kl_many_segments
+------------------
+ t
+(1 row)
+
+ kl_tenant_in_opened
+---------------------
+                   2
+(1 row)
+
+ kl_or_opened
+--------------
+            2
+(1 row)
+
+ kl_row_in_opened
+------------------
+                2
+(1 row)
+
+ kl_three_keys_opened
+----------------------
+ t
+(1 row)
+
+ kl_mixed_or_pruned
+--------------------
+                  0
+(1 row)
+
+ kl_content_equal
+------------------
+ t
+(1 row)
+
+ kl_tenant_in_rows
+-------------------
+               200
+(1 row)
+
+ kl_ctl_tenant_in_rows
+-----------------------
+                   200
+(1 row)
+
+ tenant | id
+--------+----
+      3 |  4
+     12 |  9
+(2 rows)
+
+ tenant | id
+--------+----
+      3 |  4
+     12 |  9
+(2 rows)
+
+ kl_mixed_or_rows
+------------------
+              119
+(1 row)
+
+ kl_ctl_mixed_or_rows
+----------------------
+                  119
+(1 row)
+
+ kl_range_in_or
+----------------
+             14
+(1 row)
+
+ kl_ctl_range_in_or
+--------------------
+                 14
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+RESET
+ kl_fenced
+-----------
+ t
+(1 row)
+
+ tenant | id |   v
+--------+----+--------
+      3 |  4 | edited
+      3 |  5 | v305
+     12 |  9 | edited
+(3 rows)
+
+ kl_content_equal_after_edit
+-----------------------------
+ t
+(1 row)
+

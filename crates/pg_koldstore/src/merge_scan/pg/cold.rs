@@ -665,15 +665,17 @@ fn resolve_segment_index_candidates(
             query: None,
         });
     };
-    // `col IN (a, b, ...)` on a single-column key: look each value up on its own (so the value
-    // summary and row-group bounds apply per value) and keep the union of the segments. A long list
-    // falls back to the `[min, max]` range the predicate also carries.
+    // `col IN (a, b, ...)` on a key column: look each value up on its own (so the row-group bounds,
+    // and for a single-column key the value summary, apply per value) and keep the union of the
+    // segments. For a composite key a lookup of one column never probes the summary (it hashes the
+    // whole key), but the column's bounds and the other predicates still narrow each lookup. A long
+    // list falls back to the `[min, max]` range the predicate also carries.
     if let Some(list) = predicates.iter().find(|predicate| {
         predicate.column_id == column.column_id.get()
             && predicate.any_of.len() >= 2
             && predicate.any_of.len() <= MAX_UNION_POINT_LOOKUPS
     }) {
-        if catalog.primary_key.columns.len() == 1 {
+        {
             let mut union: Option<std::collections::BTreeMap<String, SegmentStatsHint>> =
                 Some(std::collections::BTreeMap::new());
             let mut first_plan = None;

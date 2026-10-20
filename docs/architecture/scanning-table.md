@@ -362,7 +362,7 @@ and let an older one reappear. The same disjointness check lifts that limit: whe
 every key has one cold version, any column that has segment statistics (a column
 with a regular index, or one listed in `pruning_columns`) prunes too. Key columns
 prune on equality, `IN` / `= ANY` / `OR` value lists (one catalog lookup per value
-for a single-column key up to 64 values, the `[min, max]` range beyond that) and,
+for a key column up to 64 values, the `[min, max]` range beyond that; an OR of full composite-key equalities, or a row-value `IN`, lists the values each key column is pinned to) and,
 where byte order is the type's order, on ranges. `text` keys have UTF-8 byte
 bounds, so they prune on equality and value lists only, and only under a
 deterministic collation (a primary key cannot have any other); `numeric` keys use
