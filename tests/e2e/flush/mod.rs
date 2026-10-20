@@ -15,6 +15,7 @@ mod flush_live_progress;
 mod flush_matrix;
 mod flush_minio;
 mod flush_object_outage;
+mod flush_orphaned_jobs;
 mod flush_policy;
 mod flush_queue_mode;
 mod flush_queue_starvation;

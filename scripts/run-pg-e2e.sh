@@ -361,6 +361,12 @@ fi
 # KOLDSTORE_E2E_STRICT=1 disables the retry, KOLDSTORE_E2E_SINGLE_PHASE=1 restores one parallel run,
 # KOLDSTORE_E2E_PHASE=main|latency runs just one phase.
 LATENCY_FILTER='test(dml::changes_since_latency::) | test(dml::aaa_changes_since_latency_diagnostics::) | test(managed_commit_wakes_sleeping_worker_without_poll_delay) | test(dml::persistent_wal_applier::) | test(flush_multiple_tables_in_parallel_with_light_dml) | test(queue_flush_does_not_stall_concurrent_hot_pk_work) | test(queue_flush_executor_startup_and_rss_stay_within_budget)'
+# KOLDSTORE_E2E_FILTER='<nextest filterset>' runs only the matching tests, in one serial pass
+# (for example KOLDSTORE_E2E_FILTER='test(flush_orphaned_jobs)').
+if [[ -n "${KOLDSTORE_E2E_FILTER:-}" ]]; then
+  cargo nextest run -p e2e --test-threads 1 --no-fail-fast -E "${KOLDSTORE_E2E_FILTER}"
+  exit $?
+fi
 if [[ "${KOLDSTORE_E2E_SINGLE_PHASE:-}" == "1" || "${KOLDSTORE_E2E_SINGLE_PHASE:-}" == "true" ]]; then
   cargo nextest run "${NEXT_ARGS[@]}"
   exit $?

@@ -184,11 +184,43 @@ fn claim_one_flush_job() -> Result<(ClaimOutcome, Option<ClaimedWork>), String> 
                         "koldstore flush executor: candidate table_oid={} changed before claim: {error}",
                         candidate.table_oid.to_u32()
                     );
+                    // A table that is dropped or no longer managed can never be claimed: leaving its
+                    // job pending would make this executor retry it every BUSY_RETRY, forever.
+                    match retire_orphaned_flush_jobs(candidate.table_oid) {
+                        Ok(0) => {}
+                        Ok(retired) => pgrx::log!(
+                            "koldstore flush executor: cancelled {retired} pending flush job(s) for table_oid={} \
+                             (no longer an active managed table)",
+                            candidate.table_oid.to_u32()
+                        ),
+                        Err(retire_error) => pgrx::log!(
+                            "koldstore flush executor: could not cancel orphaned flush jobs for table_oid={}: {retire_error}",
+                            candidate.table_oid.to_u32()
+                        ),
+                    }
                     drop(guard);
                 }
             }
         }
     }
+}
+
+/// Cancels the pending flush jobs of a table that has no active managed schema (dropped, or
+/// unmanaged while a job was queued). Returns how many jobs were cancelled; a still-managed table
+/// is left alone, since its claim failure may be transient.
+fn retire_orphaned_flush_jobs(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    pgrx::Spi::get_one_with_args::<i64>(
+        "WITH cancelled AS ( \
+             UPDATE koldstore.jobs j \
+             SET status = 'cancelled', phase = 'cancelled', finished_at = clock_timestamp(), updated_at = now() \
+             WHERE j.table_oid = $1 AND j.job_type = 'flush' AND j.status = 'pending' \
+               AND NOT EXISTS (SELECT 1 FROM koldstore.schemas s WHERE s.table_oid = $1 AND s.active) \
+             RETURNING 1) \
+         SELECT count(*) FROM cancelled",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map(|count| count.unwrap_or(0))
+    .map_err(|error| error.to_string())
 }
 
 struct FlushWorkerRegistration {

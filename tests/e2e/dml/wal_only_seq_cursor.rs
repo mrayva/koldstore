@@ -1181,6 +1181,30 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                 .await?
                 .context("force flush must return a job id")?;
             assert!(!flushed.is_empty());
+            // Each wave must land in its own segment before the next wave is written: waves that
+            // coalesce under load leave two segments, and a limited page then has to read the
+            // newest one this test parks.
+            let wanted = wave + 1;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                let active: i64 = db
+                    .client
+                    .query_one(
+                        "SELECT count(*)::bigint FROM koldstore.cold_segments \
+                         WHERE table_oid = $1::text::regclass::oid AND status = 'active'",
+                        &[&relation],
+                    )
+                    .await?
+                    .get(0);
+                if active >= wanted {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "wave {wave} flush did not publish its own segment (active segments: {active})"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
 
         let cold_segments = db
@@ -1211,8 +1235,8 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
             })
             .collect::<Vec<_>>();
         assert!(
-            cold_segments.len() >= 2,
-            "expected at least two cold segments after three flush waves, got {}",
+            cold_segments.len() >= 3,
+            "expected three cold segments after three flush waves, got {}",
             cold_segments.len()
         );
 
