@@ -172,7 +172,7 @@ pub fn extract_packed_segment_metadata(
                 )
             })?;
         let type_oid = column.pg_type.type_oid();
-        let Some(sort_key_type) = SortKeyType::from_type_oid(type_oid) else {
+        let Some(sort_key_type) = SortKeyType::from_type_oid_for_bounds(type_oid) else {
             continue;
         };
         let column_index = parquet_column_index(metadata, &column.name).ok_or_else(|| {
@@ -181,7 +181,10 @@ pub fn extract_packed_segment_metadata(
                 column.name
             )
         })?;
+        // A text key's bounds are best-effort: Parquet truncates long string statistics (still valid
+        // bounds) and a missing one only means the segment is not pruned by it, so never fail a flush.
         let required = !column.nullable
+            && sort_key_type.is_order_column_type()
             && primary_key_columns
                 .iter()
                 .any(|primary_key| primary_key == &column.name);
@@ -254,10 +257,17 @@ fn extract_column_index(
                 "cold segment row group {row_group_id} has invalid `{column_name}` null count"
             ));
         }
-        let bounds = statistics
-            .map(|statistics| exact_sort_key_bounds(sort_key_type, statistics))
-            .transpose()?
-            .flatten();
+        // `numeric` is stored as text, so its Parquet statistics order digits as strings: no use. Its
+        // segment bounds are computed from the values at flush time (see koldstore-flush); the
+        // per-row-group bounds stay unknown and the row groups are simply not narrowed.
+        let bounds = if sort_key_type == SortKeyType::Numeric {
+            None
+        } else {
+            statistics
+                .map(|statistics| exact_sort_key_bounds(sort_key_type, statistics))
+                .transpose()?
+                .flatten()
+        };
         let all_null = null_count == Some(row_group_row_counts[row_group_id]);
         if all_null && bounds.is_some() {
             return Err(format!(
@@ -321,6 +331,18 @@ fn exact_sort_key_bounds(
     sort_key_type: SortKeyType,
     statistics: &Statistics,
 ) -> Result<Option<PackedSortKeyBounds>, String> {
+    if sort_key_type == SortKeyType::Text {
+        // Parquet string statistics are the UTF-8 bytes themselves. Long values are truncated (the
+        // minimum to a prefix, the maximum to an incremented prefix): inexact, but still a valid lower
+        // and upper bound, which is all equality pruning needs.
+        return Ok(match statistics {
+            Statistics::ByteArray(values) => values
+                .min_opt()
+                .zip(values.max_opt())
+                .map(|(min, max)| (min.data().to_vec(), max.data().to_vec())),
+            _ => None,
+        });
+    }
     if !statistics.min_is_exact() || !statistics.max_is_exact() {
         return Ok(None);
     }

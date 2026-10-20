@@ -35,6 +35,63 @@ pub(super) unsafe fn literal_sort_key_value(
     datum_to_sort_key_value(datum, column)
 }
 
+/// The elements of a constant (or bound) array as Sort Key V1 values for `column`, for
+/// `col = ANY(array)` / `col IN (...)` segment pruning. NULL elements are dropped (they never equal
+/// anything). `None` when the array's element type cannot be read as the column's type: integer
+/// arrays of another width are accepted for any integer column (the comparison operator is a
+/// cross-type one), everything else must match exactly.
+pub(super) unsafe fn array_sort_key_values(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+    params: pg_sys::ParamListInfo,
+) -> Option<Vec<koldstore_sortkey::SortKeyValue>> {
+    let (datum, isnull, array_type) = const_or_param_datum(expr, params)?;
+    if isnull {
+        return None;
+    }
+    let element_type = pg_sys::get_element_type(array_type);
+    if element_type == pg_sys::InvalidOid {
+        return None;
+    }
+    let column_type = column.pg_type.type_oid();
+    let is_integer = |oid: u32| {
+        oid == pg_sys::INT2OID.to_u32() || oid == pg_sys::INT4OID.to_u32() || oid == pg_sys::INT8OID.to_u32()
+    };
+    if !(element_type.to_u32() == column_type || (is_integer(column_type) && is_integer(element_type.to_u32()))) {
+        return None;
+    }
+    let array = pg_sys::pg_detoast_datum(datum.cast_mut_ptr()).cast::<pg_sys::ArrayType>();
+    if array.is_null() {
+        return None;
+    }
+    let mut typlen: i16 = 0;
+    let mut typbyval = false;
+    let mut typalign: std::os::raw::c_char = 0;
+    pg_sys::get_typlenbyvalalign(element_type, &mut typlen, &mut typbyval, &mut typalign);
+    let mut elements: *mut pg_sys::Datum = std::ptr::null_mut();
+    let mut nulls: *mut bool = std::ptr::null_mut();
+    let mut count: std::os::raw::c_int = 0;
+    pg_sys::deconstruct_array(
+        array,
+        element_type,
+        i32::from(typlen),
+        typbyval,
+        typalign,
+        &mut elements,
+        &mut nulls,
+        &mut count,
+    );
+    let count = usize::try_from(count).ok()?;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        if *nulls.add(index) {
+            continue;
+        }
+        values.push(datum_to_sort_key_value(*elements.add(index), column)?);
+    }
+    Some(values)
+}
+
 pub(crate) unsafe fn const_or_param_datum(
     expr: *mut pg_sys::Expr,
     params: pg_sys::ParamListInfo,
@@ -134,8 +191,23 @@ pub(super) unsafe fn datum_to_sort_key_value(
 ) -> Option<koldstore_sortkey::SortKeyValue> {
     use koldstore_sortkey::SortKeyValue;
 
-    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())?;
     match sort_type {
+        koldstore_sortkey::SortKeyType::Text => {
+            let text = datum.cast_mut_ptr::<pg_sys::text>();
+            if text.is_null() {
+                return None;
+            }
+            let cstr = pg_sys::text_to_cstring(text);
+            cstr_owned_pfree(cstr).map(SortKeyValue::Text)
+        }
+        koldstore_sortkey::SortKeyType::Numeric => {
+            let mut typoutput = pg_sys::InvalidOid;
+            let mut typisvarlena = false;
+            pg_sys::getTypeOutputInfo(pg_sys::NUMERICOID, &mut typoutput, &mut typisvarlena);
+            let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
+            cstr_owned_pfree(out).map(SortKeyValue::Numeric)
+        }
         koldstore_sortkey::SortKeyType::Bool => Some(SortKeyValue::Bool(datum.value() != 0)),
         koldstore_sortkey::SortKeyType::Int2 => {
             let narrowed = i16::try_from(datum.value() as i64).ok()?;

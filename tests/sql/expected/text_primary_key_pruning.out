@@ -1,0 +1,102 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 300
+INSERT 0 6
+SELECT 306
+ tk_managed
+------------
+ t
+(1 row)
+
+ tk_caught_up
+--------------
+ t
+(1 row)
+
+ tk_flushed
+------------
+ t
+(1 row)
+
+ tk_many_segments
+------------------
+ t
+(1 row)
+
+ tk_index_rows
+---------------
+            16
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=70, limit=70). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+     k
+------------
+ key-000007
+(1 row)
+
+                                                     k
+------------------------------------------------------------------------------------------------------------
+ key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-a
+(1 row)
+
+    k
+---------
+ ключ-ёж
+(1 row)
+
+    k
+---------
+ 鍵-漢字
+(1 row)
+
+ k
+---
+
+(1 row)
+
+    k
+----------
+ key-it's
+(1 row)
+
+ k
+---
+(0 rows)
+
+     k
+------------
+ key-000007
+ key-000150
+(2 rows)
+
+     k
+------------
+ key-000007
+ key-000250
+(2 rows)
+
+INSERT 0 1
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."tk" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+RESET
+ tk_fenced
+-----------
+ t
+(1 row)
+
+ tk_mismatches
+---------------
+             0
+(1 row)
+
+CREATE COLLATION
+CREATE TABLE
+INSERT 0 50
+psql:<PATH>: ERROR:  migrate table failed: primary-key column `k` uses unsupported nondeterministic collation `sqlreg.ci`
+DELETE 8
+ unindexed_mismatches
+----------------------
+                    0
+(1 row)
+

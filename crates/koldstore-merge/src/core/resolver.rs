@@ -174,6 +174,10 @@ pub struct NewestFirstWinnerResolver {
     seen: HashSet<LogicalPkValues>,
     /// Optional fail-closed cap on distinct identities retained by this scan.
     max_seen_keys: Option<usize>,
+    /// `false` when no key can appear in two cold segments: cold identities are then checked against
+    /// the hot / tombstone set but never retained, so a scan over any number of cold rows needs no
+    /// memory for them. Set by the planner only when the segments' key ranges are provably disjoint.
+    skip_cold_identity_retention: bool,
 }
 
 /// Raised when a scan would retain more exact PK identities than allowed.
@@ -209,7 +213,18 @@ impl NewestFirstWinnerResolver {
             seen: masked.clone(),
             masked,
             max_seen_keys: None,
+            skip_cold_identity_retention: false,
         }
+    }
+
+    /// Stops retaining identities of cold rows (see [`Self::skip_cold_identity_retention`]).
+    ///
+    /// Only correct when no key is stored in more than one cold segment. Cold rows are still dropped
+    /// when the hot batch, a tombstone or an earlier mask already claimed their key.
+    #[must_use]
+    pub fn without_cold_identity_retention(mut self) -> Self {
+        self.skip_cold_identity_retention = true;
+        self
     }
 
     /// Caps distinct PK identities retained by this resolver (`None` / `0` = unlimited).
@@ -227,7 +242,7 @@ impl NewestFirstWinnerResolver {
         &mut self,
         rows: Vec<HotRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
-        self.resolve_batch(rows, RowSource::Hot, |row| {
+        self.resolve_batch(rows, RowSource::Hot, true, |row| {
             (row.pk, row.seq, row.deleted, row.row_image)
         })
     }
@@ -239,7 +254,8 @@ impl NewestFirstWinnerResolver {
         &mut self,
         rows: Vec<ColdRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
-        self.resolve_batch(rows, RowSource::Cold, |row| {
+        let retain = !self.skip_cold_identity_retention;
+        self.resolve_batch(rows, RowSource::Cold, retain, |row| {
             (row.pk, row.seq, row.deleted, row.row_image)
         })
     }
@@ -248,6 +264,7 @@ impl NewestFirstWinnerResolver {
         &mut self,
         rows: Vec<R>,
         source: RowSource,
+        retain_identities: bool,
         into_parts: impl Fn(R) -> (LogicalPk, SeqId, bool, RowImage),
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
         let mut winners = HashMap::with_capacity(rows.len());
@@ -270,7 +287,7 @@ impl NewestFirstWinnerResolver {
                 order.push(identity);
             }
         }
-        self.take_unseen_ordered(winners, order)
+        self.take_unseen_ordered(winners, order, retain_identities)
     }
 
     /// Masks keys only for batches supplied after this call.
@@ -307,12 +324,21 @@ impl NewestFirstWinnerResolver {
         &mut self,
         mut winners: HashMap<LogicalPkValues, Candidate>,
         order: Vec<LogicalPkValues>,
+        retain_identities: bool,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
         let mut resolved = Vec::with_capacity(order.len());
         for identity in order {
             let Some(winner) = winners.remove(&identity) else {
                 continue;
             };
+            if !retain_identities {
+                // Disjoint cold segments: a key can be masked only by the hot / tombstone set that is
+                // already in `seen`, and nothing later needs this one.
+                if !winner.deleted && !self.seen.contains(&identity) {
+                    resolved.push(winner.into_resolved(None));
+                }
+                continue;
+            }
             if winner.deleted {
                 self.insert_seen(identity)?;
                 continue;

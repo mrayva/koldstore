@@ -115,6 +115,8 @@ pub(super) struct ColdRowStream {
     primary_key_columns: Vec<ColumnRef>,
     schema_version: i32,
     pk_probe: Option<(ColumnRef, Vec<String>)>,
+    /// No primary key is stored in more than one active segment (see [`cold_pk_ranges_disjoint`]).
+    pk_ranges_disjoint: bool,
 }
 
 type ColdBatch = (Vec<ColdRow>, Vec<SegmentReadProfile>);
@@ -159,6 +161,13 @@ struct ColdSegmentReadRequest<'a> {
 }
 
 impl ColdRowStream {
+    /// True when the active segments' primary-key ranges do not overlap, so no key can have an older
+    /// version in another cold segment and cold identities need not be retained while merging.
+    #[must_use]
+    pub(super) fn pk_ranges_disjoint(&self) -> bool {
+        self.pk_ranges_disjoint
+    }
+
     /// Enables compete-then-body opens for OrderedProgressive when beneficial.
     ///
     /// Returns `true` when late materialization is armed. Narrow projections
@@ -363,6 +372,7 @@ pub(super) fn prepare_cold_row_stream(
                 primary_key_columns: request.snapshot.primary_key_columns.clone(),
                 schema_version: request.snapshot.schema_version,
                 pk_probe: planned.pk_probe,
+                pk_ranges_disjoint: planned.pk_ranges_disjoint,
             }),
         ))
     })
@@ -375,6 +385,7 @@ struct PlannedColdSegments {
     segments: Vec<SegmentStatsHint>,
     projection_columns: Vec<ColumnRef>,
     pk_probe: Option<(ColumnRef, Vec<String>)>,
+    pk_ranges_disjoint: bool,
 }
 
 fn plan_cold_segments(
@@ -393,20 +404,10 @@ fn plan_cold_segments(
     let catalog = catalog.as_ref();
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
-    let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(*scanrelid, *qual, catalog, *params) },
-        |column_id| {
-            let column = catalog.column_by_attnum(column_id)?;
-            Some(cold_prune_column_policy(
-                column,
-                scope_column_id,
-                segment_order_column_id,
-            ))
-        },
-    );
+    let all_predicates = unsafe { segment_prune_predicates(*scanrelid, *qual, catalog, *params) };
     let projection_columns = projection_columns(projected_columns, &snapshot.primary_key_columns);
     let mut requested_columns = projection_columns.clone();
-    requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
+    requested_columns.extend(all_predicates.iter().filter_map(|predicate| {
         catalog
             .column_by_attnum(predicate.column_id)
             .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
@@ -435,6 +436,21 @@ fn plan_cold_segments(
     }
     indexed_filter_column_ids.sort_unstable();
     indexed_filter_column_ids.dedup();
+    // When no key is stored in two active segments, every key has exactly one cold version, so pruning
+    // a segment by ANY column that has segment statistics cannot hide a newer version and resurrect an
+    // older one -- the reason pruning is otherwise limited to columns whose values never change (key,
+    // scope, order). Hot rows are always read in full and still mask cold ones. Such a column (one with a
+    // regular index or listed in `pruning_columns`) is then treated like an immutable one.
+    let pk_ranges_disjoint = manifest_stats.segments.len() > 1
+        && cold_pk_ranges_disjoint(*table_oid, manifest_stats.generation, catalog, manifest_stats.segments.len());
+    let prune_predicates = retain_pre_merge_cold_prune_predicates(all_predicates, |column_id| {
+        let column = catalog.column_by_attnum(column_id)?;
+        let mut policy = cold_prune_column_policy(column, scope_column_id, segment_order_column_id);
+        if pk_ranges_disjoint && indexed_filter_column_ids.contains(&column_id) {
+            policy.is_order_column = true;
+        }
+        Some(policy)
+    });
     validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
         .map_err(|error| error.to_string())?;
     let segments_considered = manifest_stats.segments.len();
@@ -508,6 +524,7 @@ fn plan_cold_segments(
         segments,
         projection_columns,
         pk_probe,
+        pk_ranges_disjoint,
     }))
 }
 
@@ -541,7 +558,7 @@ fn cold_prune_column_policy(
         is_primary_key: column.is_primary_key,
         is_scope: scope_column_id.is_some_and(|id| id == column.column_id),
         is_order_column: segment_order_column_id.is_some_and(|id| id == column.column_id),
-        sort_key_indexable: koldstore_sortkey::SortKeyType::from_type_oid(
+        sort_key_indexable: koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(
             column.pg_type.type_oid(),
         )
         .is_some(),
@@ -609,7 +626,7 @@ fn resolve_segment_index_candidates(
 ) -> Result<SegmentIndexCandidateResolution, String> {
     let preferred = segment_order_column_id.and_then(|column_id| {
         catalog.column_by_id(column_id).filter(|column| {
-            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
+            koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid()).is_some()
                 && predicates
                     .iter()
                     .any(|predicate| predicate.column_id == column.column_id.get())
@@ -620,7 +637,7 @@ fn resolve_segment_index_candidates(
             catalog
                 .column_by_attnum(predicate.column_id)
                 .filter(|column| {
-                    koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+                    koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())
                         .is_some()
                 })
         })
@@ -648,6 +665,77 @@ fn resolve_segment_index_candidates(
             query: None,
         });
     };
+    // `col IN (a, b, ...)` on a single-column key: look each value up on its own (so the value
+    // summary and row-group bounds apply per value) and keep the union of the segments. A long list
+    // falls back to the `[min, max]` range the predicate also carries.
+    if let Some(list) = predicates.iter().find(|predicate| {
+        predicate.column_id == column.column_id.get()
+            && predicate.any_of.len() >= 2
+            && predicate.any_of.len() <= MAX_UNION_POINT_LOOKUPS
+    }) {
+        if catalog.primary_key.columns.len() == 1 {
+            let mut union: Option<std::collections::BTreeMap<String, SegmentStatsHint>> =
+                Some(std::collections::BTreeMap::new());
+            let mut first_plan = None;
+            let mut first_query = None;
+            for value in &list.any_of {
+                let point_predicates = predicates
+                    .iter()
+                    .map(|predicate| {
+                        if std::ptr::eq(predicate, list) {
+                            SegmentPrunePredicate::equality(
+                                predicate.column_id,
+                                predicate.column.clone(),
+                                value.clone(),
+                            )
+                        } else {
+                            predicate.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let loaded = load_segment_index_candidates(
+                    table_oid,
+                    manifest_generation,
+                    catalog,
+                    column,
+                    &point_predicates,
+                    collect_profile,
+                    None,
+                )?;
+                first_plan = first_plan.or(loaded.plan);
+                first_query = first_query.or(loaded.query);
+                match (union.as_mut(), loaded.candidates) {
+                    (Some(merged), Some(candidates)) => {
+                        for candidate in candidates.iter() {
+                            merged
+                                .entry(candidate.object_path.clone())
+                                .and_modify(|existing| {
+                                    existing.selected_row_groups = union_row_groups(
+                                        existing.selected_row_groups.take(),
+                                        candidate.selected_row_groups.clone(),
+                                    );
+                                })
+                                .or_insert_with(|| candidate.clone());
+                        }
+                    }
+                    // one value could not be narrowed: the union is every segment
+                    _ => union = None,
+                }
+            }
+            let candidates = union.map(|merged| {
+                let list: Vec<SegmentStatsHint> = merged.into_values().collect();
+                std::sync::Arc::<[SegmentStatsHint]>::from(list)
+            });
+            return Ok(SegmentIndexCandidateResolution {
+                candidates,
+                shape: SegmentIndexLookupShape::BoundedRange,
+                column_id: Some(column.column_id.get()),
+                column_name: collect_profile.then(|| column.name.clone()),
+                plan: first_plan,
+                query: first_query,
+            });
+        }
+    }
     let loaded = load_segment_index_candidates(
         table_oid,
         manifest_generation,
@@ -665,6 +753,119 @@ fn resolve_segment_index_candidates(
         plan: loaded.plan,
         query: loaded.query,
     })
+}
+
+thread_local! {
+    /// `(table oid, manifest generation)` -> whether the table's active segments have disjoint key ranges.
+    static PK_DISJOINT_CACHE: std::cell::RefCell<HashMap<(u32, u64), bool>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Whether no primary key can be stored in two active cold segments.
+///
+/// A merged read keeps every cold key it has seen so that an older version in another segment is
+/// masked; at millions of rows that is hundreds of megabytes and trips `koldstore.max_merge_seen_keys`.
+/// When the active segments' key ranges (the single-column primary key's min/max in
+/// `cold_segment_index`) do not overlap, no such older version exists and the keys need not be kept.
+/// Updated or re-flushed keys make ranges overlap, in which case the exact (retaining) path is used.
+/// Composite keys, keys without a Sort Key encoding, scoped (per-user) tables, segments lacking an
+/// index row or with unknown bounds all answer `false`. Cached per manifest generation.
+fn cold_pk_ranges_disjoint(
+    table_oid: pg_sys::Oid,
+    manifest_generation: u64,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    active_segments: usize,
+) -> bool {
+    let key = (table_oid.to_u32(), manifest_generation);
+    if let Some(cached) = PK_DISJOINT_CACHE.with(|cache| cache.borrow().get(&key).copied()) {
+        return cached;
+    }
+    let computed = compute_cold_pk_ranges_disjoint(table_oid, catalog, active_segments).unwrap_or(false);
+    PK_DISJOINT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        cache.insert(key, computed);
+    });
+    computed
+}
+
+fn compute_cold_pk_ranges_disjoint(
+    table_oid: pg_sys::Oid,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    active_segments: usize,
+) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    if catalog.primary_key.columns.len() != 1 {
+        return Ok(false);
+    }
+    let Some(column) = catalog.column_by_id(catalog.primary_key.columns[0].column_id) else {
+        return Ok(false);
+    };
+    if koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid()).is_none() {
+        return Ok(false);
+    }
+    let sql = "SELECT csi.min_value, csi.max_value, \
+                      (SELECT count(*) FROM koldstore.cold_segments x \
+                        WHERE x.table_oid = $1::oid AND x.status = 'active' AND x.scope_key <> '') \
+               FROM koldstore.cold_segment_index csi \
+               JOIN koldstore.cold_segments cs ON cs.segment_id = csi.segment_id \
+               WHERE cs.table_oid = $1::oid AND cs.status = 'active' AND cs.scope_key = '' \
+                 AND csi.column_id = $2::smallint AND csi.type_oid = $3::oid AND csi.codec_version = $4::smallint \
+               ORDER BY csi.min_value, csi.max_value";
+    let args = [
+        DatumWithOid::from(table_oid),
+        DatumWithOid::from(column.column_id.get()),
+        DatumWithOid::from(pg_sys::Oid::from(column.pg_type.type_oid())),
+        DatumWithOid::from(i16::from(koldstore_sortkey::CODEC_VERSION)),
+    ];
+    let bounds: Vec<(Option<Vec<u8>>, Option<Vec<u8>>, i64)> = crate::catalog::owner::with_extension_owner(|| {
+        pgrx::Spi::connect(|client| -> Result<Vec<_>, pgrx::spi::Error> {
+            let mut out = Vec::new();
+            for row in client.select(sql, None, &args)? {
+                out.push((
+                    row.get::<Vec<u8>>(1)?,
+                    row.get::<Vec<u8>>(2)?,
+                    row.get::<i64>(3)?.unwrap_or(0),
+                ));
+            }
+            Ok(out)
+        })
+        .map_err(|error| error.to_string())
+    })??;
+    if bounds.len() != active_segments || bounds.iter().any(|(_, _, scoped)| *scoped != 0) {
+        return Ok(false); // a segment has no index row for the key, or the table is scoped
+    }
+    let mut previous_max: Option<&Vec<u8>> = None;
+    for (min, max, _) in &bounds {
+        let (Some(min), Some(max)) = (min, max) else {
+            return Ok(false);
+        };
+        if previous_max.is_some_and(|previous| previous >= min) {
+            return Ok(false); // ranges touch or overlap: the same key may be in both
+        }
+        previous_max = Some(max);
+    }
+    Ok(true)
+}
+
+/// A value list longer than this is pruned by its `[min, max]` range instead of one catalog lookup
+/// per value.
+const MAX_UNION_POINT_LOOKUPS: usize = 64;
+
+/// Union of two segments' selected row groups; `None` (no row-group narrowing) wins.
+fn union_row_groups(left: Option<Vec<usize>>, right: Option<Vec<usize>>) -> Option<Vec<usize>> {
+    match (left, right) {
+        (Some(mut left), Some(right)) => {
+            left.extend(right);
+            left.sort_unstable();
+            left.dedup();
+            Some(left)
+        }
+        _ => None,
+    }
 }
 
 fn load_segment_index_candidates(
@@ -930,7 +1131,7 @@ fn encode_prune_predicate_bounds(
             continue;
         };
         let Some(expected) =
-            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+            koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())
         else {
             continue;
         };
@@ -1254,6 +1455,9 @@ fn pk_equality_values(
             koldstore_sortkey::pg_micros_to_unix(*n).to_string()
         }
         koldstore_sortkey::SortKeyValue::Uuid(uuid) => uuid.to_string(),
+        // The Parquet-level bloom / row-level probe is typed per Arrow column and has no string
+        // form; a text key is pruned by segment and row-group bounds only.
+        koldstore_sortkey::SortKeyValue::Text(_) | koldstore_sortkey::SortKeyValue::Numeric(_) => return None,
     };
     Some((pk.clone(), vec![literal]))
 }

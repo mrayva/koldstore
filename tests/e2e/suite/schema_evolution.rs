@@ -135,9 +135,10 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
             qty_stats_before > 0,
             "expected Sort Key index rows for integer qty before rename"
         );
+        // text has bounds-only Sort Key rows (UTF-8 min/max), written for an indexed column like any other
         assert_eq!(
-            title_stats_before, 0,
-            "text title must not produce Sort Key V1 index rows"
+            title_stats_before, 1,
+            "indexed text title should have one bounds-only index row per segment"
         );
 
         db.client

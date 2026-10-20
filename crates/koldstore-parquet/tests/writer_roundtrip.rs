@@ -342,9 +342,10 @@ fn packed_footer_stats_require_primary_key_bounds_and_omit_unsupported_types() {
         1,
     )
     .unwrap()];
+    // `jsonb` has no Sort Key encoding at all, so it never gets a segment index entry.
     let columns = [
         PgColumn::new("id", PgType::Int8, false),
-        PgColumn::new("body", PgType::Text, true),
+        PgColumn::new("body", PgType::Jsonb, true),
     ];
     let batch = record_batch_from_clean_cold_records(&columns, &rows).unwrap();
     let indexed = [
@@ -377,6 +378,51 @@ fn packed_footer_stats_require_primary_key_bounds_and_omit_unsupported_types() {
     .unwrap();
     assert_eq!(packed.column_indexes.len(), 1);
     assert_eq!(packed.column_indexes[0].column_id, ColumnId::from_attnum(1));
+}
+
+#[test]
+fn a_text_key_gets_best_effort_utf8_bounds_even_when_they_are_truncated() {
+    let long = format!("zz{}", "q".repeat(200));
+    let rows = ["apple", "mango", long.as_str()]
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            plan_clean_cold_record(
+                [("k", json!(key)), ("n", json!(index as i64))],
+                ["k"],
+                u32::try_from(index).unwrap() as i64 + 1,
+                1,
+                1,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let columns = [
+        PgColumn::new("k", PgType::Text, false),
+        PgColumn::new("n", PgType::Int8, false),
+    ];
+    let batch = record_batch_from_clean_cold_records(&columns, &rows).unwrap();
+    let indexed = [ColumnRef::new(ColumnId::from_attnum(1), "k")];
+    let encoded =
+        ParquetSegmentWriter::new(WriterOptions::default().with_statistics_columns(["k", "seq"]))
+            .encode_record_batch_with_metadata(&batch)
+            .unwrap();
+    let packed = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &indexed,
+        &["k".to_string()],
+    )
+    .unwrap();
+    assert_eq!(packed.column_indexes.len(), 1);
+    let index = &packed.column_indexes[0];
+    assert_eq!(index.type_oid, 25);
+    // the minimum is exact; the maximum was truncated by Parquet, so it is an upper bound (never below
+    // the true maximum), which is all an equality probe needs
+    assert_eq!(index.min_value.as_deref(), Some(b"apple".as_slice()));
+    let max = index.max_value.as_ref().expect("a text segment has an upper bound");
+    assert!(max.as_slice() >= long.as_bytes() || long.as_bytes().starts_with(max), "upper bound must not be below the maximum");
+    assert!(max.as_slice() >= b"mango".as_slice());
 }
 
 #[test]

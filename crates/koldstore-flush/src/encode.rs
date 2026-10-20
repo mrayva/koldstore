@@ -178,6 +178,82 @@ impl PkSummaryState {
     }
 }
 
+/// Segment bounds of an indexed `numeric` column, computed from the values as they are written.
+///
+/// Numeric is stored as text, so Parquet's statistics cannot bound it; the bounds are the minimum and
+/// maximum of [`koldstore_sortkey::encode_numeric_key`] over the segment's non-null values. `complete`
+/// goes `false` if any value could not be encoded -- then the segment simply has no bounds (never wrong
+/// ones).
+struct NumericBoundsState {
+    name: String,
+    column_id: koldstore_common::ColumnId,
+    min: Option<Vec<u8>>,
+    max: Option<Vec<u8>>,
+    complete: bool,
+}
+
+impl NumericBoundsState {
+    fn for_input(input: &StreamEncodeInput) -> Vec<Self> {
+        input
+            .indexed_columns
+            .iter()
+            .filter(|indexed| {
+                input
+                    .parquet_columns
+                    .iter()
+                    .any(|column| column.name == indexed.name && column.pg_type == koldstore_parquet::PgType::Numeric)
+            })
+            .map(|indexed| Self {
+                name: indexed.name.clone(),
+                column_id: indexed.column_id,
+                min: None,
+                max: None,
+                complete: true,
+            })
+            .collect()
+    }
+
+    fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
+        use arrow_array::Array;
+
+        if !self.complete {
+            return;
+        }
+        let Some(array) = batch.column_by_name(&self.name) else {
+            self.complete = false;
+            return;
+        };
+        let Some(strings) = array.as_any().downcast_ref::<arrow_array::StringArray>() else {
+            self.complete = false;
+            return;
+        };
+        for row in 0..strings.len() {
+            if strings.is_null(row) {
+                continue;
+            }
+            let Ok(key) = koldstore_sortkey::encode_numeric_key(strings.value(row)) else {
+                self.complete = false;
+                return;
+            };
+            if self.min.as_ref().is_none_or(|current| key < *current) {
+                self.min = Some(key.clone());
+            }
+            if self.max.as_ref().is_none_or(|current| key > *current) {
+                self.max = Some(key);
+            }
+        }
+    }
+
+    /// Takes the bounds for the segment just closed and resets for the next one.
+    fn finish(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        let bounds = (self.complete).then(|| self.min.take().zip(self.max.take())).flatten();
+        self.min = None;
+        self.max = None;
+        self.complete = true;
+        bounds
+    }
+}
+
 struct SegmentBuilder {
     options: WriterOptions,
     split_policy: SegmentSplitPolicy,
@@ -187,6 +263,7 @@ struct SegmentBuilder {
     indexed_columns: Vec<ColumnRef>,
     primary_key_columns: Vec<String>,
     pk_summary: Option<PkSummaryState>,
+    numeric_bounds: Vec<NumericBoundsState>,
 }
 
 impl SegmentBuilder {
@@ -223,6 +300,7 @@ impl SegmentBuilder {
             indexed_columns: input.indexed_columns.clone(),
             primary_key_columns: input.primary_key_columns.clone(),
             pk_summary: PkSummaryState::for_input(input),
+            numeric_bounds: NumericBoundsState::for_input(input),
         }
     }
 
@@ -245,6 +323,9 @@ impl SegmentBuilder {
             .map_err(|error| error.to_string())?;
         if let Some(summary) = self.pk_summary.as_mut() {
             summary.add_batch(&batch.batch);
+        }
+        for state in &mut self.numeric_bounds {
+            state.add_batch(&batch.batch);
         }
         self.row_count = self.row_count.saturating_add(batch_row_count);
         // PERFORMANCE: drop Arrow immediately after encode so uncompressed row
@@ -277,6 +358,19 @@ impl SegmentBuilder {
                     .find(|index| index.column_id == column_id)
                 {
                     index.value_summary = Some(summary);
+                }
+            }
+        }
+        for state in &mut self.numeric_bounds {
+            let column_id = state.column_id;
+            if let Some((min, max)) = state.finish() {
+                if let Some(index) = packed_metadata
+                    .column_indexes
+                    .iter_mut()
+                    .find(|index| index.column_id == column_id)
+                {
+                    index.min_value = Some(min);
+                    index.max_value = Some(max);
                 }
             }
         }

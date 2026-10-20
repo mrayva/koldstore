@@ -24,6 +24,10 @@ pub fn encode_sort_key(value: &SortKeyValue) -> Result<Vec<u8>, SortKeyError> {
         SortKeyValue::Timestamp(v) => storekey::encode_vec(v),
         SortKeyValue::Timestamptz(v) => storekey::encode_vec(v),
         SortKeyValue::Uuid(v) => storekey::encode_vec(v),
+        // The raw UTF-8: segment bounds come from Parquet string statistics, which are those same
+        // bytes, so a probe compares directly against them. Not terminator-escaped on purpose.
+        SortKeyValue::Text(v) => return Ok(v.as_bytes().to_vec()),
+        SortKeyValue::Numeric(v) => return encode_numeric_key(v),
     }
     .map_err(|error| SortKeyError::Encode(error.to_string()))?;
     Ok(encoded)
@@ -44,6 +48,116 @@ pub fn decode_sort_key(ty: SortKeyType, bytes: &[u8]) -> Result<SortKeyValue, So
         SortKeyType::Timestamp => Ok(SortKeyValue::Timestamp(decode_one(bytes)?)),
         SortKeyType::Timestamptz => Ok(SortKeyValue::Timestamptz(decode_one(bytes)?)),
         SortKeyType::Uuid => Ok(SortKeyValue::Uuid(decode_one(bytes)?)),
+        SortKeyType::Text => String::from_utf8(bytes.to_vec())
+            .map(SortKeyValue::Text)
+            .map_err(|error| SortKeyError::Decode(error.to_string())),
+        // The encoding is one-way (it normalizes scale); bounds are only ever compared as bytes.
+        SortKeyType::Numeric => Err(SortKeyError::Decode(
+            "numeric sort keys cannot be decoded".to_string(),
+        )),
+    }
+}
+
+/// Encodes a decimal as `numeric_out` prints it into bytes whose order is the numeric order.
+///
+/// Layout, first byte: `0x00` -Infinity, `0x10` negative, `0x20` zero, `0x30` positive, `0x40`
+/// +Infinity, `0x50` NaN (PostgreSQL sorts NaN above everything). A finite non-zero value is
+/// `0.d1 d2 ... dn x 10^E` with `d1 != 0` and no trailing zero digit, so `1`, `1.0` and `1.00` are one
+/// key; its body is `E` as a big-endian `i32` with the sign bit flipped, then each digit as `d + 1`,
+/// then `0x00` (so a shorter digit string sorts first). A negative value stores the bitwise complement
+/// of that body, which reverses the order. Negative zero is zero.
+///
+/// # Errors
+///
+/// Returns [`SortKeyError::InvalidJson`] when `text` is not a decimal number.
+pub fn encode_numeric_key(text: &str) -> Result<Vec<u8>, SortKeyError> {
+    let trimmed = text.trim();
+    match trimmed {
+        "NaN" => return Ok(vec![0x50]),
+        "Infinity" | "+Infinity" => return Ok(vec![0x40]),
+        "-Infinity" => return Ok(vec![0x00]),
+        _ => {}
+    }
+    let (negative, unsigned) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if (int_part.is_empty() && frac_part.is_empty())
+        || !int_part.bytes().chain(frac_part.bytes()).all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid_json("numeric", format!("not a decimal number: `{text}`")));
+    }
+    let mut digits: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).map(|byte| byte - b'0').collect();
+    let leading_zeros = digits.iter().take_while(|digit| **digit == 0).count();
+    if leading_zeros == digits.len() {
+        return Ok(vec![0x20]);
+    }
+    digits.drain(..leading_zeros);
+    while digits.last() == Some(&0) {
+        digits.pop();
+    }
+    let exponent = i32::try_from(int_part.len())
+        .map_err(|error| invalid_json("numeric", error.to_string()))?
+        - i32::try_from(leading_zeros).map_err(|error| invalid_json("numeric", error.to_string()))?;
+    let mut body = Vec::with_capacity(digits.len() + 5);
+    body.extend_from_slice(&(exponent as u32 ^ 0x8000_0000).to_be_bytes());
+    body.extend(digits.iter().map(|digit| digit + 1));
+    body.push(0x00);
+    let mut key = Vec::with_capacity(body.len() + 1);
+    if negative {
+        key.push(0x10);
+        key.extend(body.iter().map(|byte| !byte));
+    } else {
+        key.push(0x30);
+        key.extend(body);
+    }
+    Ok(key)
+}
+
+#[cfg(test)]
+mod numeric_key_tests {
+    use super::encode_numeric_key;
+
+    fn key(text: &str) -> Vec<u8> {
+        encode_numeric_key(text).unwrap_or_else(|error| panic!("{text}: {error}"))
+    }
+
+    #[test]
+    fn byte_order_is_numeric_order() {
+        // strictly increasing numeric values
+        let ascending = [
+            "-Infinity", "-100000000000000000000.5", "-1000.5", "-1000", "-12.5", "-12.49", "-1", "-0.5",
+            "-0.0500", "-0.001", "-0.000000000000000001", "0", "0.000000000000000001", "0.001", "0.05",
+            "0.5", "1", "1.0001", "1.5", "2", "9.99", "10", "12.49", "12.5", "100", "1000", "1000.5",
+            "100000000000000000000.5", "Infinity", "NaN",
+        ];
+        for pair in ascending.windows(2) {
+            assert!(key(pair[0]) < key(pair[1]), "{} should sort before {}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn equal_values_share_one_key() {
+        for group in [
+            &["1", "1.0", "1.00", "+1", "001", "01.000"][..],
+            &["0", "0.0", "-0", "-0.000", "000"][..],
+            &["-2.5", "-2.50", "-002.500"][..],
+            &["0.5", ".5", "0.50", "00.5000"][..],
+            &["100", "100.000", "0100"][..],
+        ] {
+            let first = key(group[0]);
+            for text in group {
+                assert_eq!(key(text), first, "{text} should equal {}", group[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_non_numbers() {
+        for text in ["", "abc", "1e5", "1.2.3", "--1", "1,5", " "] {
+            assert!(encode_numeric_key(text).is_err(), "{text:?}");
+        }
     }
 }
 
@@ -77,7 +191,9 @@ pub fn encode_sort_key_pg_text(ty: SortKeyType, text: &str) -> Result<Vec<u8>, S
         SortKeyType::Date
         | SortKeyType::Timestamp
         | SortKeyType::Timestamptz
-        | SortKeyType::Uuid => Value::String(text.to_string()),
+        | SortKeyType::Uuid
+        | SortKeyType::Text
+        | SortKeyType::Numeric => Value::String(text.to_string()),
     };
     encode_sort_key_json(ty, &value)
 }
@@ -103,6 +219,8 @@ fn ty_name(ty: SortKeyType) -> &'static str {
         SortKeyType::Timestamp => "timestamp",
         SortKeyType::Timestamptz => "timestamptz",
         SortKeyType::Uuid => "uuid",
+        SortKeyType::Text => "text",
+        SortKeyType::Numeric => "numeric",
     }
 }
 
@@ -129,6 +247,17 @@ fn parse_json_value(ty: SortKeyType, value: &Value) -> Result<SortKeyValue, Sort
                 Uuid::parse_str(text).map_err(|error| invalid_json("uuid", error.to_string()))?;
             Ok(SortKeyValue::Uuid(uuid))
         }
+        SortKeyType::Text => Ok(SortKeyValue::Text(
+            value
+                .as_str()
+                .ok_or_else(|| invalid_json("text", format!("expected string, got {value}")))?
+                .to_string(),
+        )),
+        SortKeyType::Numeric => Ok(SortKeyValue::Numeric(match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            other => return Err(invalid_json("numeric", format!("expected number or string, got {other}"))),
+        })),
     }
 }
 

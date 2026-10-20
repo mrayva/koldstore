@@ -60,7 +60,7 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
 /// Later each scope_id will own its own manifest.json + folder; listing will
 /// filter by `scope_key` first and min/max remains a secondary prune.
 #[tokio::test]
-async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<()> {
+async fn text_scope_column_equality_prunes_without_losing_rows() -> Result<()> {
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "scope_stats_prune").await?;
@@ -140,7 +140,8 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
             "expected >=2 cold segments after segregated flushes, got {segments}"
         );
 
-        // Sort Key V1 deliberately does not support text, so no index rows are expected.
+        // A text column has bounds-only Sort Key rows (UTF-8 min/max): equality and value lists prune on them,
+        // ranges and ordering never do.
         let stats_rows: i64 = db
             .client
             .query_one(
@@ -160,7 +161,10 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
             )
             .await?
             .get(0);
-        anyhow::ensure!(stats_rows == 0, "text user_id should not have index rows");
+        anyhow::ensure!(
+            stats_rows > 0,
+            "text user_id should have bounds-only index rows, got {stats_rows}"
+        );
 
         db.client
             .batch_execute("SET koldstore.user_id = 'user-a'")
@@ -183,14 +187,13 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
         );
         let opened = explain_counter(&plan, "Parquet Segments Opened")?;
         let considered = explain_counter(&plan, "Candidate Segments")?;
-        // The ordered progressive strategy late-materializes: it opens each candidate once to
-        // compete on the order key and again for the body columns, and `Parquet Segments Opened`
-        // counts both. "Nothing was pruned" therefore means every candidate was opened for the
-        // compete phase (and nothing beyond compete + body opens happened).
-        let compete = explain_counter(&plan, "Cold Compete Opens").unwrap_or(opened);
+        let pruned = explain_counter(&plan, "Segments Pruned by Catalog Index")?;
+        // user-b's segments hold only user-b keys, so the user-a equality prunes them by their text bounds.
+        // (The ordered progressive strategy late-materializes: it may open a candidate once to compete and
+        // once for the body, so `opened` can be up to twice the surviving candidates.)
         anyhow::ensure!(
-            compete == considered && opened >= considered && opened <= 2 * considered,
-            "unsupported text pruning should conservatively open all candidates; opened={opened} compete={compete} considered={considered}\n{plan}"
+            pruned > 0 && opened <= 2 * (considered - pruned),
+            "text scope equality should prune the other user's segments; opened={opened} considered={considered} pruned={pruned}\n{plan}"
         );
 
         let visible: i64 = db

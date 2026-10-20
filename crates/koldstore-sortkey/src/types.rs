@@ -80,10 +80,20 @@ pub enum SortKeyType {
     Timestamptz,
     /// `uuid` / OID 2950.
     Uuid,
+    /// `text` / OID 25. **Bounds only**: the bytes are the string's UTF-8, so equality is exact
+    /// but byte order is not collation order. Never an order column and never usable for range
+    /// pruning; see [`SortKeyType::from_type_oid_for_bounds`].
+    Text,
+    /// `numeric` / OID 1700. **Bounds only** (see [`SortKeyType::from_type_oid_for_bounds`]): the key is the
+    /// canonical decimal order encoding of [`crate::encode_numeric_key`], so equal values with different
+    /// scales (`1.0`, `1.00`) share one key and byte order is numeric order.
+    Numeric,
 }
 
 impl SortKeyType {
-    /// Maps a PostgreSQL type OID to a Sort Key V1 type.
+    /// Maps a PostgreSQL type OID to a Sort Key V1 type that is **order-capable**: its byte order is
+    /// the type's own order, so it may be a segment order column, drive ordered merges and be pruned
+    /// by ranges. Does not include [`Self::Text`].
     #[must_use]
     pub const fn from_type_oid(type_oid: u32) -> Option<Self> {
         match type_oid {
@@ -99,6 +109,31 @@ impl SortKeyType {
         }
     }
 
+    /// Like [`Self::from_type_oid`] but also accepts the bounds-only types ([`Self::Text`]), whose
+    /// segment min/max can prune **equality** lookups (`=`, `IN`) but not ranges or ordering.
+    #[must_use]
+    pub const fn from_type_oid_for_bounds(type_oid: u32) -> Option<Self> {
+        match type_oid {
+            25 => Some(Self::Text),
+            1700 => Some(Self::Numeric),
+            other => Self::from_type_oid(other),
+        }
+    }
+
+    /// Returns true when byte order equals the type's own order (everything except [`Self::Text`]),
+    /// so range predicates may prune on it.
+    #[must_use]
+    pub const fn is_order_preserving(self) -> bool {
+        !matches!(self, Self::Text)
+    }
+
+    /// Returns true when the type may be a segment order column / drive ordered merges. Stricter than
+    /// [`Self::is_order_preserving`]: the bounds-only types are never order columns.
+    #[must_use]
+    pub const fn is_order_column_type(self) -> bool {
+        !matches!(self, Self::Text | Self::Numeric)
+    }
+
     /// Returns the canonical PostgreSQL type OID for this sort-key type.
     #[must_use]
     pub const fn type_oid(self) -> u32 {
@@ -111,13 +146,15 @@ impl SortKeyType {
             Self::Timestamp => 1114,
             Self::Timestamptz => 1184,
             Self::Uuid => 2950,
+            Self::Text => 25,
+            Self::Numeric => 1700,
         }
     }
 
     /// Returns true when this type may be used as `segment_order_column_id`.
     #[must_use]
     pub const fn is_order_column_supported(self) -> bool {
-        true
+        self.is_order_column_type()
     }
 }
 
@@ -140,6 +177,10 @@ pub enum SortKeyValue {
     Timestamptz(i64),
     /// UUID.
     Uuid(Uuid),
+    /// Text (bounds only; see [`SortKeyType::Text`]).
+    Text(String),
+    /// `numeric` as the text `numeric_out` prints (bounds only; see [`SortKeyType::Numeric`]).
+    Numeric(String),
 }
 
 impl SortKeyValue {
@@ -155,6 +196,8 @@ impl SortKeyValue {
             Self::Timestamp(_) => SortKeyType::Timestamp,
             Self::Timestamptz(_) => SortKeyType::Timestamptz,
             Self::Uuid(_) => SortKeyType::Uuid,
+            Self::Text(_) => SortKeyType::Text,
+            Self::Numeric(_) => SortKeyType::Numeric,
         }
     }
 
@@ -173,6 +216,7 @@ impl SortKeyValue {
             Self::Timestamp(value) => serde_json::Value::Number((*value).into()),
             Self::Timestamptz(value) => serde_json::Value::Number((*value).into()),
             Self::Uuid(value) => serde_json::Value::String(value.to_string()),
+            Self::Text(value) | Self::Numeric(value) => serde_json::Value::String(value.clone()),
         }
     }
 }

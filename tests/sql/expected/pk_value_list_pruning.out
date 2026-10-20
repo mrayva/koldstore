@@ -1,0 +1,206 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ big_managed
+-------------
+ t
+(1 row)
+
+ big_caught_up
+---------------
+ t
+(1 row)
+
+ big_flushed
+-------------
+ t
+(1 row)
+
+ big_many_segments
+-------------------
+ t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+RESET
+ big_fenced_0
+--------------
+ t
+(1 row)
+
+ big_reflushed_0
+-----------------
+ t
+(1 row)
+
+ big_fenced_00
+---------------
+ t
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=70, limit=70). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+ id
+-----
+   7
+ 150
+(2 rows)
+
+ id
+-----
+   7
+ 150
+ 300
+(3 rows)
+
+ id
+-----
+   7
+ 150
+ 301
+(3 rows)
+
+ id
+-----
+   7
+ 150
+(2 rows)
+
+ id
+-----
+   7
+ 150
+(2 rows)
+
+ id
+----
+  7
+(1 row)
+
+ id
+-----
+   7
+ 150
+(2 rows)
+
+ id
+----
+(0 rows)
+
+ id
+-----
+ 150
+ 300
+(2 rows)
+
+PREPARE
+ id
+-----
+   8
+ 151
+(2 rows)
+
+ id
+-----
+   8
+ 151
+ 299
+(3 rows)
+
+DEALLOCATE
+RESET
+ big_list_mismatches
+---------------------
+                   0
+(1 row)
+
+ long_list_mismatches
+----------------------
+                    0
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+DELETE 1
+DELETE 1
+RESET
+ big_fenced
+------------
+ t
+(1 row)
+
+ big_after_dml_mismatches
+--------------------------
+                        0
+(1 row)
+
+CREATE TABLE
+INSERT 0 200
+SELECT 200
+CREATE TABLE
+INSERT 0 200
+SELECT 200
+ uuid_managed | ts_managed
+--------------+------------
+ t            | t
+(1 row)
+
+ others_caught_up
+------------------
+ t
+(1 row)
+
+ uuid_flushed | ts_flushed
+--------------+------------
+ t            | t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+RESET
+ others_fenced_0
+-----------------
+ t
+(1 row)
+
+ uuid_reflushed | ts_reflushed
+----------------+--------------
+ t              | t
+(1 row)
+
+ others_fenced_00
+------------------
+ t
+(1 row)
+
+SET
+  n
+-----
+   7
+ 150
+(2 rows)
+
+  n
+-----
+   7
+ 150
+(2 rows)
+
+RESET
+ uuid_list_mismatches
+----------------------
+                    0
+(1 row)
+
+ ts_list_mismatches
+--------------------
+                  0
+(1 row)
+

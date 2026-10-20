@@ -1,0 +1,173 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 300
+INSERT 0 3
+SELECT 303
+ nk_managed
+------------
+ t
+(1 row)
+
+ nk_caught_up
+--------------
+ t
+(1 row)
+
+ nk_flushed
+------------
+ t
+(1 row)
+
+ nk_many_segments
+------------------
+ t
+(1 row)
+
+ nk_bounded_segments
+---------------------
+                  16
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=70, limit=70). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+  x
+------
+ 1.25
+(1 row)
+
+  x
+------
+ 1.25
+(1 row)
+
+ x
+---
+(0 rows)
+
+ x
+---
+(0 rows)
+
+  x
+------
+ 0.00
+(1 row)
+
+      x
+-------------
+ 99999999.99
+(1 row)
+
+  x
+------
+ 5.00
+(1 row)
+
+   x
+--------
+   1.25
+  37.50
+ 100.00
+(3 rows)
+
+   x
+-------
+ 10.00
+ 11.25
+ 12.50
+ 13.75
+ 15.00
+ 16.25
+ 17.50
+ 18.75
+ 20.00
+(9 rows)
+
+   x
+--------
+ 181.25
+ 182.50
+ 183.75
+ 185.00
+ 186.25
+ 187.50
+(6 rows)
+
+INSERT 0 1
+INSERT 0 1
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."nk" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+psql:<PATH>: ERROR:  koldstore: refusing INSERT on managed table "sqlreg"."nk" -- this primary key already exists (hot or cold); use koldstore.update_row() to change it, or koldstore.hydrate_pk() to materialize it before an ON CONFLICT upsert (upstream issue #122)
+RESET
+ nk_fenced
+-----------
+ t
+(1 row)
+
+ nk_mismatches
+---------------
+             0
+(1 row)
+
+CREATE TABLE
+INSERT 0 120
+INSERT 0 5
+SELECT 125
+ nu_managed
+------------
+ t
+(1 row)
+
+ nu_caught_up
+--------------
+ t
+(1 row)
+
+ nu_flushed
+------------
+ t
+(1 row)
+
+ nu_mismatches
+---------------
+             0
+(1 row)
+
+SET
+           x
+------------------------
+ 0.12500000000000000000
+(1 row)
+
+           x
+------------------------
+ 0.12500000000000000000
+(1 row)
+
+  x
+-----
+ NaN
+(1 row)
+
+SET
+            x
+-------------------------
+ -0.25000000000000000000
+  0.12500000000000000000
+(2 rows)
+
+           x
+------------------------
+ 1.00000000000000000000
+     1.1250000000000000
+     1.2500000000000000
+     1.3750000000000000
+     1.5000000000000000
+(5 rows)
+
+RESET
+DELETE 8
+ nk_unindexed_mismatches
+-------------------------
+                       0
+(1 row)
+

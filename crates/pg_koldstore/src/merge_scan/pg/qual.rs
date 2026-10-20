@@ -8,7 +8,7 @@ use koldstore_merge::scan::plan::SegmentPrunePredicate;
 use pgrx::pg_sys;
 
 use super::literals::{
-    list_node_pointers, literal_sort_key_value, typed_literal_sql, unwrap_relabel,
+    array_sort_key_values, list_node_pointers, literal_sort_key_value, typed_literal_sql, unwrap_relabel,
 };
 
 /// One base-relation attribute required by output projection or executor quals.
@@ -295,8 +295,16 @@ unsafe fn segment_prune_node_predicates(
         pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, catalog, params)
             .into_iter()
             .collect(),
+        pg_sys::NodeTag::T_ScalarArrayOpExpr => segment_prune_array_expr(expr, catalog, params)
+            .into_iter()
+            .collect(),
         pg_sys::NodeTag::T_BoolExpr => {
             let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            if (*bool_expr).boolop == pg_sys::BoolExprType::OR_EXPR {
+                return segment_prune_or_equalities(bool_expr, catalog, params)
+                    .into_iter()
+                    .collect();
+            }
             if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
                 return Vec::new();
             }
@@ -309,6 +317,70 @@ unsafe fn segment_prune_node_predicates(
         }
         _ => Vec::new(),
     }
+}
+
+/// `col = ANY(array)` / `col IN (...)` over a constant or bound array.
+unsafe fn segment_prune_array_expr(
+    expr: *mut pg_sys::Expr,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<SegmentPrunePredicate> {
+    let saop = expr.cast::<pg_sys::ScalarArrayOpExpr>();
+    if !(*saop).useOr {
+        return None; // `= ALL(...)` is a conjunction, not a value list
+    }
+    let opname = cstr_to_str(pg_sys::get_opname((*saop).opno))?;
+    if opname != "=" || !operator_is_pg_catalog((*saop).opno) {
+        return None;
+    }
+    let args = list_node_pointers((*saop).args);
+    if args.len() != 2 {
+        return None;
+    }
+    let column = var_column(args[0].cast::<pg_sys::Expr>(), catalog)?;
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())?;
+    if !sort_type.is_order_preserving() && !collation_is_deterministic((*saop).inputcollid) {
+        return None;
+    }
+    let values = array_sort_key_values(args[1].cast::<pg_sys::Expr>(), column, params)?;
+    value_list_predicate(column, values)
+}
+
+/// `col = a OR col = b OR ...` on one column (the planner may already have turned it into `= ANY`).
+unsafe fn segment_prune_or_equalities(
+    bool_expr: *mut pg_sys::BoolExpr,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<SegmentPrunePredicate> {
+    let mut column_id = None;
+    let mut values = Vec::new();
+    for node in list_node_pointers((*bool_expr).args) {
+        let node = node.cast::<pg_sys::Expr>();
+        if node.is_null() || (*node).type_ != pg_sys::NodeTag::T_OpExpr {
+            return None; // any other disjunct can match outside the listed values
+        }
+        let predicate = segment_prune_op_expr(node, catalog, params)?;
+        if !predicate.is_equality() || column_id.is_some_and(|id| id != predicate.column_id) {
+            return None;
+        }
+        column_id = Some(predicate.column_id);
+        values.extend(predicate.min);
+    }
+    let column = catalog.column_by_attnum(column_id?)?;
+    value_list_predicate(column, values)
+}
+
+fn value_list_predicate(
+    column: &koldstore_migrate::order::CatalogColumn,
+    values: Vec<koldstore_sortkey::SortKeyValue>,
+) -> Option<SegmentPrunePredicate> {
+    let column_id = column.column_id.get();
+    SegmentPrunePredicate::any_of(column_id, &column.name, values.clone()).or_else(|| {
+        // zero or one distinct value: nothing to union; one value is a plain equality
+        let mut distinct = values;
+        distinct.dedup();
+        (distinct.len() == 1).then(|| SegmentPrunePredicate::equality(column_id, &column.name, distinct.remove(0)))
+    })
 }
 
 unsafe fn segment_prune_op_expr(
@@ -328,12 +400,35 @@ unsafe fn segment_prune_op_expr(
     }
 
     if let Some((column, literal)) = var_and_sort_key_literal(args[0], args[1], catalog, params) {
+        if !text_prune_allowed(&literal, opname, (*op_expr).inputcollid) {
+            return None;
+        }
         return prune_predicate_from_op(column, literal, opname, false);
     }
     if let Some((column, literal)) = var_and_sort_key_literal(args[1], args[0], catalog, params) {
+        if !text_prune_allowed(&literal, opname, (*op_expr).inputcollid) {
+            return None;
+        }
         return prune_predicate_from_op(column, literal, opname, true);
     }
     None
+}
+
+/// A text key's segment bounds are UTF-8 byte order, which is not collation order: only equality can
+/// prune, and only when equal means byte-equal (a deterministic collation). Every other type is
+/// unaffected.
+unsafe fn text_prune_allowed(
+    literal: &koldstore_sortkey::SortKeyValue,
+    opname: &str,
+    collation: pg_sys::Oid,
+) -> bool {
+    literal.sort_key_type().is_order_preserving()
+        || (opname == "=" && collation_is_deterministic(collation))
+}
+
+/// `true` for the default collation and any collation whose equality is bytewise.
+unsafe fn collation_is_deterministic(collation: pg_sys::Oid) -> bool {
+    collation == pg_sys::InvalidOid || pg_sys::get_collation_isdeterministic(collation)
 }
 
 fn prune_predicate_from_op(
@@ -373,7 +468,7 @@ unsafe fn var_and_sort_key_literal(
     koldstore_sortkey::SortKeyValue,
 )> {
     let column = var_column(column_expr.cast::<pg_sys::Expr>(), catalog)?;
-    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())?;
     let literal = literal_sort_key_value(literal_expr.cast::<pg_sys::Expr>(), column, params)?;
     if literal.sort_key_type() != sort_type {
         return None;

@@ -1,0 +1,100 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+CREATE INDEX
+SELECT 400
+ ev_managed
+------------
+ t
+(1 row)
+
+ ev_caught_up
+--------------
+ t
+(1 row)
+
+ ev_flushed
+------------
+ t
+(1 row)
+
+ ev_many_segments
+------------------
+ t
+(1 row)
+
+ ts_range_prunes
+-----------------
+ t
+(1 row)
+
+ ts_equality_prunes
+--------------------
+ t
+(1 row)
+
+ ts_open_range_prunes
+----------------------
+ t
+(1 row)
+
+ tenant_reads_all
+------------------
+ t
+(1 row)
+
+ ev_mismatches_before
+----------------------
+                    0
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+RESET
+ ev_fenced
+-----------
+ t
+(1 row)
+
+ ev_mismatches_hot_update
+--------------------------
+                        0
+(1 row)
+
+ ev_reflushed
+--------------
+ t
+(1 row)
+
+ ev_fenced_2
+-------------
+ t
+(1 row)
+
+ ev_mismatches_after_reflush
+-----------------------------
+                           0
+(1 row)
+
+ overlapping_reads_all
+-----------------------
+ t
+(1 row)
+
+SET
+ id  |           ts
+-----+------------------------
+  77 | <TS>
+ 300 | <TS>
+(2 rows)
+
+ exact_total | exact_distinct
+-------------+----------------
+         400 |            400
+(1 row)
+
+RESET

@@ -58,6 +58,27 @@ async fn merge_scan_followup_query_survives_seen_key_error_and_unbounded_count()
             "expected hot prune to hot_row_limit after force flush, hot={hot}"
         );
 
+        // A table whose segment key ranges are disjoint scans without retaining keys, so the cap would
+        // never trip. Re-flush one updated row: its key then lives in two segments, the ranges overlap,
+        // and the exact (key-retaining, capped) path is the one under test.
+        db.client
+            .batch_execute("SET koldstore.hydrate_on_write = on")
+            .await
+            .context("enable hydrate-on-write")?;
+        db.client
+            .execute(
+                &format!("UPDATE {} SET category = 'edited' WHERE id = 7", table.relation),
+                &[],
+            )
+            .await
+            .context("update a cold row")?;
+        db.client
+            .batch_execute("RESET koldstore.hydrate_on_write")
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+        db.flush_table_with_force(&table.relation, true).await?;
+        common::fence_async_mirror(&db.client).await?;
+
         // --- Path A: fail-closed seen-key ERROR, then same-session follow-ups ---
         db.client
             .batch_execute("SET koldstore.max_merge_seen_keys = 50")

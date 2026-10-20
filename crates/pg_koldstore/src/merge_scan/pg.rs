@@ -1617,16 +1617,45 @@ unsafe fn hot_child_matches_scan_tupdesc(
         return false;
     }
     let scan_slot = (*node).ss.ss_ScanTupleSlot;
-    let child_slot = (*child).ps_ResultTupleSlot;
-    if scan_slot.is_null() || child_slot.is_null() {
+    if scan_slot.is_null() {
         return false;
     }
+    // A scan child that needs no projection (physical target list) has no result slot of its own: it
+    // returns its scan slot, and the layout it produces is `ps_ResultTupleDesc`.
+    let child_slot = (*child).ps_ResultTupleSlot;
+    let child_desc = if child_slot.is_null() {
+        (*child).ps_ResultTupleDesc
+    } else {
+        (*child_slot).tts_tupleDescriptor
+    };
     let scan_desc = (*scan_slot).tts_tupleDescriptor;
-    let child_desc = (*child_slot).tts_tupleDescriptor;
     if scan_desc.is_null() || child_desc.is_null() {
         return false;
     }
-    scan_desc == child_desc
+    tupdesc_layouts_match(scan_desc, child_desc)
+}
+
+/// True when two tuple descriptors describe the same column layout: the same descriptor, or the same
+/// number of columns with identical types and dropped flags.
+///
+/// A widened (physical-tlist) child scan produces the relation's own layout but through a descriptor
+/// object of its own, so comparing descriptor *pointers* wrongly treated it as unwidened. Its raw
+/// tuple was then passed through as the custom scan's output, which is only right when the query
+/// selects every column in table order: any narrower projection (`SELECT id ...`) returned a tuple of
+/// the wrong width.
+unsafe fn tupdesc_layouts_match(left: pg_sys::TupleDesc, right: pg_sys::TupleDesc) -> bool {
+    if left == right {
+        return true;
+    }
+    if (*left).natts != (*right).natts {
+        return false;
+    }
+    // `from_pg_unchecked` borrows the descriptor without taking a reference count.
+    let left = pgrx::PgTupleDesc::from_pg_unchecked(left);
+    let right = pgrx::PgTupleDesc::from_pg_unchecked(right);
+    left.iter().zip(right.iter()).all(|(l, r)| {
+        l.atttypid == r.atttypid && l.attisdropped == r.attisdropped && l.attlen == r.attlen && l.attbyval == r.attbyval
+    })
 }
 
 pub(super) unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {

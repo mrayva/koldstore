@@ -345,6 +345,42 @@ without an external `Sort` when the top-N is covered by hot.
 `koldstore.max_merge_seen_keys` caps this set and fails closed when exceeded
 (0 disables the cap). Parent LIMIT can stop before older cold groups are opened.
 
+Cold keys need not be retained at all when no key can be stored in two active
+segments. The planner checks that once per manifest generation: the single-column
+primary key's `min`/`max` in `cold_segment_index` must be pairwise disjoint across
+every active segment (and the table unscoped). Then each key has exactly one cold
+version, so cold rows are checked against the hot rows and tombstones already in the
+set but are never added to it, and a scan over any number of cold rows needs no
+memory for them (an append-style table with ~3M cold rows: 258 MB and the default
+cap error before, none after). A re-flushed update puts a key into two segments;
+the ranges then overlap and the exact, key-retaining path takes over again.
+
+**Pruning columns.** Cold segments are pruned only by columns whose values never
+change across versions of a row (primary key, scope, order column), because
+pruning a segment by a column that *did* change could hide a row's newer version
+and let an older one reappear. The same disjointness check lifts that limit: when
+every key has one cold version, any column that has segment statistics (a column
+with a regular index, or one listed in `pruning_columns`) prunes too. Key columns
+prune on equality, `IN` / `= ANY` / `OR` value lists (one catalog lookup per value
+for a single-column key up to 64 values, the `[min, max]` range beyond that) and,
+where byte order is the type's order, on ranges. `text` keys have UTF-8 byte
+bounds, so they prune on equality and value lists only, and only under a
+deterministic collation (a primary key cannot have any other); `numeric` keys use
+an order-preserving decimal encoding in which `1.5`, `1.50` and `1.500` are one
+key, with bounds computed from the values at flush time.
+
+A segment with no index row for the pruning column at all (flushed before the
+column could be indexed) is always a candidate: it cannot be excluded by bounds
+it does not have.
+
+**Newer versions and the hot scan.** The native hot child scan carries the whole
+query filter, so a hot row whose updated value no longer matches is never read
+and used to leave the older cold copy (which does match) unmasked. When the query
+filters on a column other than the key or scope, the merge now also masks cold
+rows by every key the change-log mirror lists as inserted or updated since the
+last flush (flush prunes a hot row and its mirror row in one statement, so a
+mirror key never outlives its hot row).
+
 `OrderedProgressive` loads catalog composite bounds from
 `koldstore.cold_segment_order_index` without opening Parquet. After each hot
 page it compares actual leading Sort Key encodings to the cold frontier: when

@@ -815,6 +815,34 @@ WITH matching_index AS (
       AND csi.codec_version = $5::smallint
       AND {unknown_predicate}
       {extra_predicate}
+
+    UNION ALL
+
+    -- Active segments with NO index row for this column at all (written before the column could
+    -- be indexed, e.g. the primary key of a text-keyed table flushed by an older release): they
+    -- cannot be pruned, and must not vanish from the candidates just because they are unlisted.
+    SELECT
+        cs0.segment_id,
+        cs0.table_oid,
+        cs0.scope_key,
+        $3::smallint AS column_id,
+        array_fill(NULL::bytea, ARRAY[GREATEST(cs0.row_group_count, 0)]) AS row_group_min_values,
+        array_fill(NULL::bytea, ARRAY[GREATEST(cs0.row_group_count, 0)]) AS row_group_max_values,
+        array_fill(NULL::bigint, ARRAY[GREATEST(cs0.row_group_count, 0)]) AS row_group_null_counts
+    FROM koldstore.cold_segments cs0
+    WHERE cs0.table_oid = $1::oid
+      AND cs0.scope_key = $2::text
+      AND cs0.status = 'active'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM koldstore.cold_segment_index x
+          WHERE x.segment_id = cs0.segment_id
+            AND x.table_oid = cs0.table_oid
+            AND x.scope_key = cs0.scope_key
+            AND x.column_id = $3::smallint
+            AND x.type_oid = $4::oid
+            AND x.codec_version = $5::smallint
+      )
 ),
 table_prefix AS (
     SELECT {SQL_TABLE_PREFIX} AS prefix

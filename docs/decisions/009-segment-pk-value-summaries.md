@@ -101,9 +101,9 @@ returns only the segments that may contain the key.
   came back unsorted (it now falls back to a normal sort). Key identity for `numeric` is the JSON number `jsonb`
   prints, with whole numbers normalized (`125`, `125.0` and `125.00` are one key), so a delete's tombstone masks the
   cold copy.
-* **Open (limits, not bugs):** `boolean` and `numeric` keys have no value summary (a boolean has two values; numeric
-  has no sort-key encoding), so point lookups on them rely on min/max bounds and Parquet statistics alone. `real` and
-  `double precision` keys have no value summary either, and a float cannot be the order column.
+* **Open (limits, not bugs):** `boolean`, `numeric`, `text`, `real` and `double precision` keys have no value summary,
+  so point lookups on them rely on min/max bounds (and Parquet statistics where they exist) alone. A float cannot be
+  the order column, nor can `text` or `numeric` (see "Bounds-only key types" below).
 * **Fixed (2026-10-20): numeric digits through hydration.** Hydrated rows travel as `jsonb` read into `serde_json`,
   which parsed a JSON number as `f64`: `62.50` came back as `62.5` and a 30-digit value was rounded. `serde_json`'s
   `arbitrary_precision` feature keeps the digits verbatim (`numeric_fidelity` SQL case).
@@ -136,3 +136,37 @@ returns only the segments that may contain the key.
   own, so running it against segments written after this change loses rows on composite-key lookups. Before reverting
   to an older build, clear them: `UPDATE koldstore.cold_segment_index SET value_summary = NULL;` (they can be rebuilt with
   `rebuild_segment_summaries()` afterwards).
+
+## Scale follow-ups (2026-10-20)
+
+A 3M-row S3 run (`docs/operations/s3-scale-test.md`) exposed four scale limits, all fixed:
+
+* **INSERT guard.** The existence probe joined the managed table against a `jsonb_populate_record` CTE, hiding the key
+  from the planner: every INSERT read the whole cold tier. It is now `t.col = ($1 ->> 'col')::type`, which folds to a
+  constant when bound; `date` / `timestamp` / `timestamptz` text input is `STABLE` and does not fold, so those keys are
+  parsed by PostgreSQL in a first query and bound as typed parameters.
+* **Value lists.** `IN`, `= ANY(array)` and an `OR` chain of equalities on one key column prune per value
+  (`SegmentPrunePredicate::any_of`: the list plus its `[min, max]`, so range-only consumers stay correct); the candidate
+  segments are the union of the per-value lookups for a single-column key up to 64 values.
+* **Disjoint segments.** When the single-column key's per-segment ranges are pairwise disjoint (checked once per manifest
+  generation) every key has one cold version: cold identities are not retained (`NewestFirstWinnerResolver::
+  without_cold_identity_retention`), and any column with segment statistics may prune (see
+  `docs/architecture/scanning-table.md`).
+* **Bounds-only key types.** `text` (raw UTF-8, the same bytes as Parquet string statistics; truncated long-value
+  statistics are valid bounds) and `numeric` (a one-way decimal encoding, see `koldstore_sortkey::encode_numeric_key`)
+  are `SortKeyType` variants that `SortKeyType::from_type_oid` does *not* return: that function is the order-capable
+  set that order-column validation, ordered merges and mirror order keys use, and byte order is not collation order for
+  text. `from_type_oid_for_bounds` includes them for pruning only; a text predicate prunes on equality only (never a
+  range) and only under a deterministic collation (`manage_table` already refuses a nondeterministic key collation).
+  Numeric bounds cannot come from Parquet statistics (numeric is stored as text), so flush computes them
+  (`NumericBoundsState`). The candidate query gained a third arm that keeps every active segment that has no index
+  row for the column, so segments flushed before a type had bounds are never excluded.
+
+Three existing bugs surfaced and were fixed along the way:
+
+* a stale cold copy returned after a hydrate-on-write update when the query's filter excluded the new value (above);
+* a narrow projection (`SELECT id ...`) through the hot-only / delegated path returned a tuple of the wrong width
+  (`unexpected field count in "D" message`, `unsupported format code`): the check that a native child's layout matches
+  the scan compared descriptor pointers and, for a scan child without a result slot, read a null slot;
+* not fixed, only noted: hydrate-on-write aliases the table as `t` in `to_jsonb(t)`, which resolves to a *column* named
+  `t` instead of the whole row, so a managed table with a column called `t` cannot hydrate.

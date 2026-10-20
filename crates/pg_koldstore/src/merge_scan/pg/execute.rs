@@ -85,6 +85,8 @@ pub(super) struct MergeRowStream {
 
 #[derive(Debug)]
 struct DeferredOverlayLoad {
+    /// Also mask keys inserted/updated since the last flush (see `load_mirror_tombstones_for_pks`).
+    include_live_keys: bool,
     mirror_relation: koldstore_common::TableName,
     primary_key_columns: Vec<koldstore_common::ColumnRef>,
 }
@@ -122,12 +124,14 @@ impl MergeRowStream {
         cold: ColdRowStream,
         mirror_relation: koldstore_common::TableName,
         primary_key_columns: Vec<koldstore_common::ColumnRef>,
+        include_live_keys: bool,
     ) -> Self {
         Self::new_inner(
             hot,
             cold,
             MirrorOverlay::default(),
             Some(DeferredOverlayLoad {
+                include_live_keys,
                 mirror_relation,
                 primary_key_columns,
             }),
@@ -140,6 +144,7 @@ impl MergeRowStream {
         cold: ColdRowStream,
         mirror_relation: koldstore_common::TableName,
         primary_key_columns: Vec<koldstore_common::ColumnRef>,
+        include_live_keys: bool,
         ordered: OrderedProgressiveCtrl,
     ) -> Self {
         Self::new_inner(
@@ -147,6 +152,7 @@ impl MergeRowStream {
             cold,
             MirrorOverlay::default(),
             Some(DeferredOverlayLoad {
+                include_live_keys,
                 mirror_relation,
                 primary_key_columns,
             }),
@@ -162,12 +168,16 @@ impl MergeRowStream {
         ordered: Option<OrderedProgressiveCtrl>,
     ) -> Self {
         let max_seen = crate::guc::max_merge_seen_keys() as usize;
+        let mut resolver = NewestFirstWinnerResolver::default().with_max_seen_keys(Some(max_seen));
+        if cold.pk_ranges_disjoint() {
+            resolver = resolver.without_cold_identity_retention();
+        }
         Self {
             hot,
             cold,
             overlay,
             deferred_overlay,
-            resolver: NewestFirstWinnerResolver::default().with_max_seen_keys(Some(max_seen)),
+            resolver,
             hot_winners: VecDeque::new(),
             cold_winners: VecDeque::new(),
             hot_phase_done: false,
@@ -517,6 +527,7 @@ impl MergeRowStream {
             &deferred.mirror_relation,
             &deferred.primary_key_columns,
             &unseen,
+            deferred.include_live_keys,
         )?;
         if let Some(execution) = execution {
             execution.mirror_rows = execution.mirror_rows.saturating_add(batch.len());
@@ -885,11 +896,13 @@ fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
     };
     profiler.record_hot_buffer(0);
     // Defer mirror/cold until hot is exhausted under parent LIMIT.
+    let include_live_keys = native_hot_child_may_drop_versions(&hot, inputs);
     let stream = MergeRowStream::new_ordered_deferred_overlay(
         hot,
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
+        include_live_keys,
     );
     (
         ScanEmitMode::stream(stream, inputs.projection.clone()),
@@ -968,11 +981,13 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
                 pgrx::error!("{CUSTOM_PATH_NAME} cold frontier failed: {error}")
             });
     profiler.record_hot_buffer(0);
+    let include_live_keys = native_hot_child_may_drop_versions(&hot, inputs);
     let stream = MergeRowStream::new_ordered_progressive(
         hot,
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
+        include_live_keys,
         OrderedProgressiveCtrl {
             direction,
             cold_bound,
@@ -990,6 +1005,46 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         EmitPath::OrderedMergeNative,
         0,
     )
+}
+
+/// True when the hot rows come from the planner's native child scan and the query filters on a column
+/// other than the primary key or scope column.
+///
+/// That child scan carries the query's whole filter, so a hot row whose current value no longer
+/// satisfies it is never read and cannot mask the older cold copy that does. The merge then masks cold
+/// rows by every key the mirror lists as changed since the last flush as well (see
+/// `load_mirror_tombstones_for_pks`). The SPI hot reader filters on key columns only and needs none of
+/// this.
+fn native_hot_child_may_drop_versions(hot: &HotMergeSource, inputs: &ScanSourceInputs<'_>) -> bool {
+    matches!(hot, HotMergeSource::NativeChild(_))
+        && unsafe { qual_references_non_key_columns(inputs) }
+}
+
+unsafe fn qual_references_non_key_columns(inputs: &ScanSourceInputs<'_>) -> bool {
+    if inputs.qual.is_null() {
+        return false;
+    }
+    let mut attributes: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+    pg_sys::pull_varattnos(inputs.qual.cast::<pg_sys::Node>(), inputs.scanrelid, &mut attributes);
+    let key_attnums: Vec<i32> = inputs
+        .snapshot
+        .primary_key_columns
+        .iter()
+        .map(|column| i32::from(column.column_id.get()))
+        .chain(inputs.snapshot.scope_column_id.map(|id| i32::from(id.get())))
+        .collect();
+    let mut member = -1;
+    loop {
+        member = pg_sys::bms_next_member(attributes, member);
+        if member < 0 {
+            return false;
+        }
+        let attnum = member + pg_sys::FirstLowInvalidHeapAttributeNumber;
+        // a whole-row reference or a system column: assume it may depend on any column
+        if attnum <= 0 || !key_attnums.contains(&attnum) {
+            return true;
+        }
+    }
 }
 
 fn open_native_hot_cursor(inputs: &ScanSourceInputs<'_>) -> Result<NativeHotCursor, String> {

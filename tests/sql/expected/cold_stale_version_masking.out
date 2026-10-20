@@ -1,0 +1,98 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 300
+CREATE INDEX
+SELECT 300
+ sv_managed
+------------
+ t
+(1 row)
+
+ sv_caught_up
+--------------
+ t
+(1 row)
+
+ sv_flushed
+------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+RESET
+ sv_fenced
+-----------
+ t
+(1 row)
+
+ id
+----
+ 49
+ 62
+ 75
+ 88
+(4 rows)
+
+ id
+----
+(0 rows)
+
+ tenant_10
+-----------
+        20
+(1 row)
+
+ tenant_99
+-----------
+         3
+(1 row)
+
+ id | label
+----+-------
+ 76 | l1
+ 78 | l3
+(2 rows)
+
+ ts_near_150
+-------------
+          11
+(1 row)
+
+ sv_mismatches_hot_update
+--------------------------
+                        0
+(1 row)
+
+ agg_matches_control
+---------------------
+ t
+(1 row)
+
+ desc_limit_matches_control
+----------------------------
+ t
+(1 row)
+
+ sv_reflushed
+--------------
+ t
+(1 row)
+
+ sv_fenced_2
+-------------
+ t
+(1 row)
+
+SET
+ sv_mismatches_after_reflush
+-----------------------------
+                           0
+(1 row)
+
+RESET

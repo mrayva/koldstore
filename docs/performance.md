@@ -76,7 +76,7 @@ by the total number of rows moved cold.
 | SPI mirror page | ≤ **4096** decoded rows | Per page |
 | Arrow row group | **1024** rows (writer default) | After each row group flush |
 | Async apply staging | ≤ **8192** rows per batch | Per batch |
-| Merge-scan seen-key set | Up to `koldstore.max_merge_seen_keys` (default 1M) | Per scan (fail-closed when exceeded) |
+| Merge-scan seen-key set | Up to `koldstore.max_merge_seen_keys` (default 1M); none for cold keys when the segments' key ranges are disjoint | Per scan (fail-closed when exceeded) |
 
 Docker/`ps` RSS that looks like “~200 MiB and not freeing” after a flush workload
 is usually **`shared_buffers` still mapped**, plus a small private anon heap —

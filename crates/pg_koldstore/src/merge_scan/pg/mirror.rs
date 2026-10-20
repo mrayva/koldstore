@@ -75,11 +75,21 @@ WHERE {where_clause}
     })?
 }
 
-/// Loads tombstones for a batch of cold candidate PKs only (no full-table scan).
+/// Loads the mirror keys that mask older cold versions, for a batch of cold candidate PKs only (no
+/// full-table scan).
+///
+/// Always the tombstones (`op = 3`). With `include_live_keys` also the keys inserted or updated since
+/// the last flush (`op` 1 / 2): the mirror keeps one row per key, so any key listed there has its
+/// current state in the hot heap (or is deleted) and an older cold version must never be returned.
+/// That matters when the hot scan can drop the newer version -- a native hot child scan carries the
+/// query's own filter, so a row whose updated value no longer matches is never read, and without this
+/// the stale cold copy (which does match) would reappear. Flush prunes the hot row and its mirror row
+/// in one statement, so a mirror key never outlives its hot row.
 pub(super) fn load_mirror_tombstones_for_pks(
     mirror_relation: &TableName,
     primary_key_columns: &[ColumnRef],
     candidate_pks: &[LogicalPk],
+    include_live_keys: bool,
 ) -> Result<MirrorOverlay, String> {
     if candidate_pks.is_empty() {
         return Ok(MirrorOverlay::default());
@@ -107,13 +117,14 @@ pub(super) fn load_mirror_tombstones_for_pks(
         r#"
 SELECT jsonb_build_object({pk_json})::text AS pk_json
 FROM {mirror} AS mirror
-WHERE mirror."op" = 3
+WHERE mirror."op" {ops}
   AND jsonb_build_object({pk_json}) IN (
         SELECT value FROM jsonb_array_elements($1::jsonb) AS t(value)
       )
 "#,
         pk_json = pk_json,
         mirror = mirror_relation.quoted(),
+        ops = if include_live_keys { "IN (1, 2, 3)" } else { "= 3" },
     );
     let candidates_text = candidates.to_string();
     crate::catalog::owner::with_extension_owner(|| {

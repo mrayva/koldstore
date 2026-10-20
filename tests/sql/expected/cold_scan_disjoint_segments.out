@@ -1,0 +1,105 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ ds_managed
+------------
+ t
+(1 row)
+
+ ds_caught_up
+--------------
+ t
+(1 row)
+
+ ds_flushed
+------------
+ t
+(1 row)
+
+ ds_many_segments
+------------------
+ t
+(1 row)
+
+SET
+ ds_count_under_cap
+--------------------
+                400
+(1 row)
+
+ ds_filtered_count_under_cap
+-----------------------------
+                          57
+(1 row)
+
+ ds_sum_under_cap
+------------------
+            80200
+(1 row)
+
+ ds_distinct_under_cap
+-----------------------
+                   400
+(1 row)
+
+RESET
+ ds_content_equal
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+DELETE 5
+DELETE 5
+INSERT 0 1
+INSERT 0 1
+RESET
+ ds_fenced
+-----------
+ t
+(1 row)
+
+SET
+ ds_count_after_dml_under_cap
+------------------------------
+                          396
+(1 row)
+
+RESET
+ ds_content_equal_after_dml
+----------------------------
+ t
+(1 row)
+
+ ds_reflushed
+--------------
+ t
+(1 row)
+
+ ds_fenced_2
+-------------
+ t
+(1 row)
+
+SET
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=50, limit=50). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+SET
+ ds_count_exact | ds_distinct_exact
+----------------+-------------------
+            396 |               396
+(1 row)
+
+ edited_value
+--------------
+ edited
+(1 row)
+
+RESET
+ ds_content_equal_after_reflush
+--------------------------------
+ t
+(1 row)
+

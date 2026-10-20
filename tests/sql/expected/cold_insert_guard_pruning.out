@@ -21,6 +21,24 @@ INSERT 0 200
 (1 row)
 
 SET
+UPDATE 1
+RESET
+ big_fenced
+------------
+ t
+(1 row)
+
+ big_reflushed
+---------------
+ t
+(1 row)
+
+ big_fenced_2
+--------------
+ t
+(1 row)
+
+SET
 psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=30, limit=30). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
 INSERT 0 1
 INSERT 0 1
@@ -53,6 +71,25 @@ DO
  txt_flushed | cmp_flushed | uuid_flushed | ts_flushed | num_flushed
 -------------+-------------+--------------+------------+-------------
  t           | t           | t            | t          | t
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+RESET
+ others_fenced
+---------------
+ t
+(1 row)
+
+ uuid_reflushed | ts_reflushed
+----------------+--------------
+ t              | t
+(1 row)
+
+ others_fenced_2
+-----------------
+ t
 (1 row)
 
 INSERT 0 1

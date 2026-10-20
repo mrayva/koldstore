@@ -32,32 +32,33 @@ payload text` (128 hex characters), 3,000,000 rows (636 MB in the heap). `hot_ro
 While storage is down, any query that has to read a cold segment fails with the S3 error after the client's
 retries; hot data and writes are unaffected.
 
-## Defects found
+## Defects found and what became of them
 
-1. **INSERT into a table with many cold rows scanned the entire cold tier (fixed).** The write guard asks "does
-   this key already exist, hot or cold?" once per inserted row. It joined the managed table against a
-   `jsonb_populate_record` CTE, which hides the key from the planner, so no cold segment could be pruned: a
-   single-row INSERT read all 300 segments (6 s, then an error at the default
-   `koldstore.max_merge_seen_keys`; 100 rows ran for over ten minutes before I cancelled it). The lookup is now a
-   constant equality (`t.id = ($1 ->> 'id')::bigint`; date/timestamp/timestamptz keys are parsed by PostgreSQL in a
-   first query and bound as typed parameters, because their text input is `STABLE` and is not folded). Result: 9-20 ms
-   per statement. SQL case `cold_insert_guard_pruning`.
-2. **A multi-value key lookup is a full cold scan.** `id IN (a, b)`, `id = ANY(array[...])` and `id = a OR id = b`
-   all took ~12 s (every segment read); a single value or `IN (a)` takes ~10 ms. Batched key lookups are the common
-   ORM shape, so this is the next thing to fix: prune each segment against the union of the listed values.
-3. **Large scans hit the identity cap or need unbounded memory.** A merged read keeps every key it has seen so an
-   older version in another segment can be masked. At the default `koldstore.max_merge_seen_keys = 1000000`, a plain
-   `count(*)` over 3M cold rows, a filter on a non-key column, or an `IN` list errors out (the message says how to
-   raise it); with the cap off it needs ~86 bytes per key (258 MB for 3M, ~8.6 GB for 100M). When the cold segments'
-   key ranges do not overlap each other (an append-style table), the keys need not be retained at all.
-4. **text and numeric primary keys cannot prune cold segments.** The catalog keeps segment bounds and value
-   summaries only for integer, uuid, date and timestamp keys; a text or numeric key has no Sort Key encoding, and
-   composite keys prune only when every part does. For those key types every lookup, and every INSERT guard, reads
-   all cold segments, so they do not scale the way integer keys do. (Correctness is unaffected; see
-   `cold_insert_guard_pruning`.)
-5. **Non-key predicates read everything.** `WHERE tenant = 7` or a `ts` range scanned all 3M cold rows
-   (~12-14 s here) because only key columns carry segment bounds by default; `pruning_columns` adds bounds for others.
-   Cold decode ran at about 20 MB/s of object data per scan.
+All five limits below were fixed afterwards (see ADR-009, "Scale follow-ups", and
+`docs/architecture/scanning-table.md`); the numbers in the table above are from before the fixes.
+
+1. **INSERT into a table with many cold rows scanned the entire cold tier.** The write guard asks "does this key
+   already exist, hot or cold?" once per inserted row. It joined the managed table against a `jsonb_populate_record`
+   CTE, which hides the key from the planner, so no cold segment could be pruned: a single-row INSERT read all 300
+   segments (6 s, then an error at the default `koldstore.max_merge_seen_keys`; 100 rows ran for over ten minutes
+   before I cancelled it). The lookup is now a constant equality, so it prunes: 9-20 ms per statement, 100 rows in
+   24 ms (SQL case `cold_insert_guard_pruning`).
+2. **A multi-value key lookup was a full cold scan.** `id IN (a, b)`, `= ANY(array[...])` and `id = a OR id = b` all
+   took ~12 s; each listed value now selects its own segments and the union is read (`pk_value_list_pruning`).
+3. **Large scans hit the identity cap or needed unbounded memory.** At the default 1,000,000, a plain `count(*)`
+   over 3M cold rows errored; with the cap off it needed ~86 bytes per key (258 MB for 3M, ~8.6 GB for 100M). When
+   the segments' key ranges are disjoint, cold keys are no longer retained at all (`cold_scan_disjoint_segments`).
+4. **text and numeric primary keys could not prune cold segments** (no Sort Key encoding), so every lookup and INSERT
+   guard on them read all segments. Both now have segment bounds (`text_primary_key_pruning`,
+   `numeric_primary_key_pruning`).
+5. **Non-key predicates read everything** (`WHERE tenant = 7`, a `ts` range), because pruning by a column that can
+   change could resurrect an older version. When every key has one cold version (disjoint segments), any column with
+   segment statistics -- a regular index or `pruning_columns` -- prunes; a `ts` range over 3M rows then opens 2 of 15
+   segments in the small case (`non_key_segment_pruning`).
+
+Three further bugs found while verifying were fixed too: a stale cold copy reappearing after a hydrate-on-write
+update when the filter excluded the new value (`cold_stale_version_masking`); a narrow projection through the
+hot-only path returning a tuple of the wrong width; and an INSERT guard / hydrate quirk noted in ADR-009.
 
 ## Reproducing
 

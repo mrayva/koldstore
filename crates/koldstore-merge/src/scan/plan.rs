@@ -94,6 +94,11 @@ pub struct SegmentPrunePredicate {
     pub min: Option<koldstore_sortkey::SortKeyValue>,
     /// Inclusive upper bound, when present.
     pub max: Option<koldstore_sortkey::SortKeyValue>,
+    /// For `col IN (...)` / `col = ANY(...)` / `col = a OR col = b`: the listed values. `min` / `max`
+    /// then hold the smallest and largest of them, so any consumer that only understands ranges still
+    /// prunes correctly (every matching row lies inside `[min, max]`); a consumer that understands the
+    /// list can keep only the segments that may hold one of the values. Empty for every other predicate.
+    pub any_of: Vec<koldstore_sortkey::SortKeyValue>,
 }
 
 impl SegmentPrunePredicate {
@@ -118,6 +123,7 @@ impl SegmentPrunePredicate {
             column: column.into(),
             min: Some(value.clone()),
             max: Some(value),
+            any_of: Vec::new(),
         }
     }
 
@@ -134,6 +140,7 @@ impl SegmentPrunePredicate {
             column: column.into(),
             min: Some(min),
             max: Some(max),
+            any_of: Vec::new(),
         }
     }
 
@@ -149,6 +156,7 @@ impl SegmentPrunePredicate {
             column: column.into(),
             min: Some(min),
             max: None,
+            any_of: Vec::new(),
         }
     }
 
@@ -164,7 +172,37 @@ impl SegmentPrunePredicate {
             column: column.into(),
             min: None,
             max: Some(max),
+            any_of: Vec::new(),
         }
+    }
+
+    /// Builds the predicate of a value list (`IN`, `= ANY`, a chain of `OR`ed equalities). Returns
+    /// `None` for fewer than two distinct values (a single value is a plain equality) or when a value
+    /// cannot be encoded.
+    #[must_use]
+    pub fn any_of(
+        column_id: i16,
+        column: impl Into<String>,
+        values: Vec<koldstore_sortkey::SortKeyValue>,
+    ) -> Option<Self> {
+        let mut keyed = Vec::with_capacity(values.len());
+        for value in values {
+            keyed.push((koldstore_sortkey::encode_sort_key(&value).ok()?, value));
+        }
+        keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        keyed.dedup_by(|left, right| left.0 == right.0);
+        if keyed.len() < 2 {
+            return None;
+        }
+        let min = keyed.first().map(|(_, value)| value.clone());
+        let max = keyed.last().map(|(_, value)| value.clone());
+        Some(Self {
+            column_id,
+            column: column.into(),
+            min,
+            max,
+            any_of: keyed.into_iter().map(|(_, value)| value).collect(),
+        })
     }
 }
 
