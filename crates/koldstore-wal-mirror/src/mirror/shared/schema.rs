@@ -286,6 +286,7 @@ fn render_type(column: &PrimaryKeyColumnShape) -> String {
             format!("numeric({precision},{scale})")
         }
         ("character varying", _) => "varchar".to_string(),
+        ("double precision", _) => "float8".to_string(),
         ("timestamp with time zone", _) => "timestamptz".to_string(),
         ("timestamp without time zone", _) => "timestamp".to_string(),
         ("time with time zone", _) => "timetz".to_string(),
@@ -305,6 +306,26 @@ mod modifier_tests {
         assert_eq!(render_type_with_modifier("numeric(10)").as_deref(), Some("numeric(10)"));
         assert_eq!(render_type_with_modifier("character varying(20)").as_deref(), Some("varchar(20)"));
         assert_eq!(render_type_with_modifier("character(3)").as_deref(), Some("character(3)"));
+    }
+
+    #[test]
+    fn double_precision_is_rendered_as_the_float8_keyword() {
+        use super::render_type;
+        use koldstore_common::{
+            ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+        };
+        let column = PrimaryKeyColumnShape::new(
+            ColumnId::from_attnum(1),
+            PkColumn::new("k").unwrap(),
+            PkOrdinal::new(1).unwrap(),
+            PgTypeOid::new(701).unwrap(),
+            PgTypeName::new("double precision").unwrap(),
+            PgTypmod::new(-1),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(render_type(&column), "float8");
     }
 
     #[test]

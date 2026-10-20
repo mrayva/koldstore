@@ -427,6 +427,8 @@ pub fn sql_param_cast(param_index: usize, param_type: SqlParamType) -> String {
         SqlParamType::TimestampWithTimeZone => "timestamp with time zone",
         SqlParamType::Timestamp => "timestamp without time zone",
         SqlParamType::Date => "date",
+        SqlParamType::Float4 => "real",
+        SqlParamType::Float8 => "double precision",
         SqlParamType::Text => "text",
         SqlParamType::Numeric => "numeric",
         SqlParamType::Jsonb => "jsonb",

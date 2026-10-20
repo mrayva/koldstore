@@ -23,9 +23,8 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         PgType::Date => Ok(SqlParamType::Date),
         PgType::Timestamp => Ok(SqlParamType::Timestamp),
         PgType::Timestamptz => Ok(SqlParamType::TimestampWithTimeZone),
-        PgType::Float4 | PgType::Float8 => Err(format!(
-            "ordered flush keyset does not support primary-key type {pg_type:?}"
-        )),
+        PgType::Float4 => Ok(SqlParamType::Float4),
+        PgType::Float8 => Ok(SqlParamType::Float8),
     }
 }
 
@@ -36,6 +35,8 @@ enum OwnedBind {
     Int64(i64),
     Text(String),
     Bytes(Vec<u8>),
+    Float4(f32),
+    Float8(f64),
     Uuid(pgrx::Uuid),
     /// `date` as days since the PostgreSQL epoch.
     Date(i32),
@@ -144,6 +145,8 @@ fn owned_binds_to_datums(binds: &[OwnedBind]) -> Vec<DatumWithOid<'_>> {
             OwnedBind::Int64(n) => DatumWithOid::from(*n),
             OwnedBind::Text(text) => DatumWithOid::from(text.as_str()),
             OwnedBind::Bytes(bytes) => DatumWithOid::from(bytes.as_slice()),
+            OwnedBind::Float4(value) => DatumWithOid::from(*value),
+            OwnedBind::Float8(value) => DatumWithOid::from(*value),
             OwnedBind::Uuid(uuid) => DatumWithOid::from(*uuid),
             // `saturating_from_raw` keeps PostgreSQL's `infinity` sentinels as infinities.
             OwnedBind::Date(days) => DatumWithOid::from(pgrx::datum::Date::saturating_from_raw(*days)),
@@ -217,6 +220,26 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             let uuid = uuid::Uuid::parse_str(text)
                 .map_err(|error| format!("invalid uuid keyset value: {error}"))?;
             Ok(OwnedBind::Uuid(crate::spi::uuid_to_pgrx(uuid)))
+        }
+        (PgType::Float4, CellValue::Float32(value)) => Ok(OwnedBind::Float4(*value)),
+        (PgType::Float8, CellValue::Float64(value)) => Ok(OwnedBind::Float8(*value)),
+        (PgType::Float8, CellValue::Float32(value)) => Ok(OwnedBind::Float8(f64::from(*value))),
+        (PgType::Float4, CellValue::Float64(value)) => Ok(OwnedBind::Float4(*value as f32)),
+        // A key that arrived as JSON text (`"NaN"`, `"Infinity"`) rather than a number.
+        (PgType::Float4 | PgType::Float8, CellValue::Utf8(text)) => {
+            let value: f64 = match text.to_ascii_lowercase().as_str() {
+                "nan" => f64::NAN,
+                "infinity" | "inf" => f64::INFINITY,
+                "-infinity" | "-inf" => f64::NEG_INFINITY,
+                other => other
+                    .parse()
+                    .map_err(|_| format!("invalid float keyset value `{text}`"))?,
+            };
+            Ok(if pg_type == PgType::Float4 {
+                OwnedBind::Float4(value as f32)
+            } else {
+                OwnedBind::Float8(value)
+            })
         }
         (PgType::Date, CellValue::DateDays(days)) => Ok(OwnedBind::Date(*days)),
         (PgType::Timestamp, CellValue::TimestampMicros(micros)) => Ok(OwnedBind::Timestamp(*micros)),

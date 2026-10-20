@@ -48,6 +48,10 @@ pub enum SqlParamType {
     Numeric,
     /// PostgreSQL `date`.
     Date,
+    /// PostgreSQL `real`.
+    Float4,
+    /// PostgreSQL `double precision`.
+    Float8,
     Text,
     Jsonb,
     Bytea,

@@ -101,11 +101,20 @@ returns only the segments that may contain the key.
   came back unsorted (it now falls back to a normal sort). Key identity for `numeric` is the JSON number `jsonb`
   prints, with whole numbers normalized (`125`, `125.0` and `125.00` are one key), so a delete's tombstone masks the
   cold copy.
-* **Open (limits, not bugs):** an unconstrained `numeric` column does not keep its display scale when a cold row is
-  hydrated (`62.50` comes back as `62.5`; the value is equal, and `numeric(p,s)` columns restore the scale) because
-  the row travels as JSON. `boolean` and `numeric` keys have no value summary (a boolean has two values; numeric has no sort-key encoding), so
-  point lookups on them rely on min/max bounds and Parquet statistics alone. `float4`/`float8` keys are still
-  rejected for ordered flush.
+* **Open (limits, not bugs):** `boolean` and `numeric` keys have no value summary (a boolean has two values; numeric
+  has no sort-key encoding), so point lookups on them rely on min/max bounds and Parquet statistics alone. `real` and
+  `double precision` keys have no value summary either, and a float cannot be the order column.
+* **Fixed (2026-10-20): numeric digits through hydration.** Hydrated rows travel as `jsonb` read into `serde_json`,
+  which parsed a JSON number as `f64`: `62.50` came back as `62.5` and a 30-digit value was rounded. `serde_json`'s
+  `arbitrary_precision` feature keeps the digits verbatim (`numeric_fidelity` SQL case).
+* **Fixed (2026-10-20): `real` / `double precision` primary keys.** They could not be managed (`double precision`
+  was written into the change-log mirror DDL as a quoted identifier; it is now `float8`) and an ordered flush failed
+  ("keyset does not support primary-key type") because the flush keyset had no float bind. A float key is compared
+  between heap, mirror and cold rows through its `to_jsonb` text, which `CellValue::to_json` now reproduces exactly:
+  the shortest round-trip digits as a plain decimal (`real` 0.1 is `0.1`, not the widened `0.10000000149011612`),
+  `-0` as `0`, and `"NaN"` / `"Infinity"` / `"-Infinity"` as strings. The native hot cursor reads float datums by
+  value (`float_primary_keys` SQL case: multi-segment ordered flush with ties on the order column, NaN and the
+  infinities, tiny/huge magnitudes, hydrate-on-write updates and deletes, re-flush).
 * **Fixed:** `uuid` and `boolean` were rejected as the order column (`migration_order_by`) by the migration
   validation although both have a Sort Key V1 encoding and everything downstream (mirror `order_key`, ordered flush,
   the cold order index, the ordered merge) already handled them. Both are accepted now: a time-ordered (v7) uuid is a

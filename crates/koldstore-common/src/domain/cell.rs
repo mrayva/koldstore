@@ -111,12 +111,8 @@ impl CellValue {
                 .map_or_else(|_| Value::Number((*value).into()), Value::String),
             Self::TimestamptzMicros(value) => crate::temporal::format_timestamptz_json_utc(*value)
                 .map_or_else(|_| Value::Number((*value).into()), Value::String),
-            Self::Float32(value) => Number::from_f64(f64::from(*value))
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-            Self::Float64(value) => Number::from_f64(*value)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
+            Self::Float32(value) => float_json(f64::from(*value), &format!("{value:e}")),
+            Self::Float64(value) => float_json(*value, &format!("{value:e}")),
             Self::Utf8(value) => Value::String(value.clone()),
         }
     }
@@ -342,5 +338,82 @@ mod tests {
     #[test]
     fn null_json_becomes_empty_image() {
         assert!(RowImage::from_json(&Value::Null).unwrap().is_empty());
+    }
+}
+
+/// JSON for a float exactly as PostgreSQL's `to_jsonb(float)` renders it.
+///
+/// `to_jsonb` takes the float's shortest round-trip decimal text (`0.1::real` is `0.1`, not the
+/// widened `0.10000000149011612`), reads it as a `numeric` and prints that without an exponent
+/// (`1e20` is `100000000000000000000`, `1e-7` is `0.0000001`, `-0` is `0`); `NaN` and the infinities
+/// are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`. A float primary key is compared between
+/// heap, change-log mirror and cold rows through this value, so the text must match digit for digit.
+///
+/// `exp_form` is Rust's `{:e}` rendering of the same value at its own width (`f32` or `f64`), which
+/// is the shortest round-trip form.
+fn float_json(value: f64, exp_form: &str) -> Value {
+    if value.is_nan() {
+        return Value::String("NaN".to_string());
+    }
+    if value.is_infinite() {
+        return Value::String(if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string());
+    }
+    let text = plain_decimal_from_exp_form(exp_form);
+    text.parse::<Number>().map_or(Value::Null, Value::Number)
+}
+
+/// Expands Rust's shortest `{:e}` text (`-1.5e-7`) to a plain decimal (`-0.00000015`).
+fn plain_decimal_from_exp_form(exp_form: &str) -> String {
+    let (mantissa, exponent) = exp_form.split_once('e').unwrap_or((exp_form, "0"));
+    let exponent: i64 = exponent.parse().unwrap_or(0);
+    let (negative, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or((false, mantissa), |rest| (true, rest));
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if digits.chars().all(|digit| digit == '0') {
+        return "0".to_string(); // also folds -0.0 into 0, as numeric does
+    }
+    let integer_len = i64::try_from(mantissa.split('.').next().map_or(1, str::len)).unwrap_or(1);
+    let point = integer_len + exponent; // digits before the decimal point
+    let digit_count = i64::try_from(digits.len()).unwrap_or(0);
+    let body = if point <= 0 {
+        format!("0.{}{digits}", "0".repeat(usize::try_from(-point).unwrap_or(0)))
+    } else if point >= digit_count {
+        format!("{digits}{}", "0".repeat(usize::try_from(point - digit_count).unwrap_or(0)))
+    } else {
+        let split = usize::try_from(point).unwrap_or(0);
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+#[cfg(test)]
+mod float_json_tests {
+    use super::*;
+
+    fn text(cell: &CellValue) -> String {
+        cell.to_json().to_string()
+    }
+
+    #[test]
+    fn floats_render_like_postgres_to_jsonb() {
+        assert_eq!(text(&CellValue::Float64(0.5)), "0.5");
+        assert_eq!(text(&CellValue::Float64(0.1)), "0.1");
+        assert_eq!(text(&CellValue::Float32(0.1)), "0.1"); // not 0.10000000149011612
+        assert_eq!(text(&CellValue::Float32(0.25)), "0.25");
+        assert_eq!(text(&CellValue::Float64(1e20)), "100000000000000000000");
+        assert_eq!(text(&CellValue::Float64(1e-7)), "0.0000001");
+        assert_eq!(text(&CellValue::Float64(-1.5e-7)), "-0.00000015");
+        assert_eq!(text(&CellValue::Float64(12345.678)), "12345.678");
+        assert_eq!(text(&CellValue::Float64(3.0)), "3");
+        assert_eq!(text(&CellValue::Float64(-0.0)), "0");
+        assert_eq!(text(&CellValue::Float64(0.0)), "0");
+        assert_eq!(text(&CellValue::Float64(f64::NAN)), "\"NaN\"");
+        assert_eq!(text(&CellValue::Float64(f64::INFINITY)), "\"Infinity\"");
+        assert_eq!(text(&CellValue::Float32(f32::NEG_INFINITY)), "\"-Infinity\"");
     }
 }

@@ -1,0 +1,133 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 90
+INSERT 0 11
+SELECT 101
+ fk8_managed
+-------------
+ t
+(1 row)
+
+ fk8_caught_up
+---------------
+ t
+(1 row)
+
+ fk8_flushed
+-------------
+ t
+(1 row)
+
+ fk8_mostly_cold
+-----------------
+ t
+(1 row)
+
+ fk8_several_segments
+----------------------
+ t
+(1 row)
+
+ fk8_rows_identical_after_flush
+--------------------------------
+ t
+(1 row)
+
+ fk8_predicate_mismatches
+--------------------------
+                        0
+(1 row)
+
+SET
+UPDATE 6
+UPDATE 6
+DELETE 3
+DELETE 3
+INSERT 0 2
+INSERT 0 2
+RESET
+ fk8_fenced
+------------
+ t
+(1 row)
+
+ fk8_identical_after_dml
+-------------------------
+ t
+(1 row)
+
+ fk8_caught_up_2
+-----------------
+ t
+(1 row)
+
+ fk8_flushed_2
+---------------
+ t
+(1 row)
+
+ fk8_identical_after_reflush
+-----------------------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 60
+INSERT 0 4
+SELECT 64
+ fk4_managed
+-------------
+ t
+(1 row)
+
+ fk4_caught_up
+---------------
+ t
+(1 row)
+
+ fk4_flushed
+-------------
+ t
+(1 row)
+
+ fk4_mostly_cold
+-----------------
+ t
+(1 row)
+
+ fk4_rows_identical_after_flush
+--------------------------------
+ t
+(1 row)
+
+ fk4_predicate_mismatches
+--------------------------
+                        0
+(1 row)
+
+SET
+UPDATE 3
+DELETE 2
+DELETE 2
+RESET
+ fk4_fenced
+------------
+ t
+(1 row)
+
+ fk4_identical_after_dml
+-------------------------
+ t
+(1 row)
+
+ fk4_flushed_2
+---------------
+ t
+(1 row)
+
+ fk4_identical_after_reflush
+-----------------------------
+ t
+(1 row)
+

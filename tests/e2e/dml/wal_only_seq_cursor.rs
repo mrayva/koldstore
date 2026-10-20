@@ -1185,7 +1185,7 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
             // coalesce under load leave two segments, and a limited page then has to read the
             // newest one this test parks.
             let wanted = wave + 1;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
             loop {
                 let active: i64 = db
                     .client

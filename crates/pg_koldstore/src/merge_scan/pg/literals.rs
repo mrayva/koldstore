@@ -216,6 +216,10 @@ unsafe fn datum_cell_value(
             Some(CellValue::Int32(narrowed))
         }
         PgType::Int8 => Some(CellValue::Int64(datum.value() as i64)),
+        // `float4` / `float8` datums hold the IEEE bits by value (a 64-bit build; the extension
+        // supports no other).
+        PgType::Float4 => Some(CellValue::Float32(f32::from_bits(datum.value() as u32))),
+        PgType::Float8 => Some(CellValue::Float64(f64::from_bits(datum.value() as u64))),
         // TimestampTzADT is microseconds since the PostgreSQL epoch — the same
         // unit Sort Key V1 persists for timestamptz bounds.
         PgType::Timestamptz => Some(CellValue::TimestamptzMicros(datum.value() as i64)),
