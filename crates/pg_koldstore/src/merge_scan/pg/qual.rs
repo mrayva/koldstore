@@ -268,6 +268,114 @@ unsafe fn point_var_attnum(
     }
 }
 
+/// The scope a user-scoped scan is restricted to by the session: a top-level conjunct
+/// `scope_column = current_setting('koldstore.user_id'[, true])`, which is what the generated
+/// row-level-security policy contributes. The value is read when the scan starts, so this is only
+/// for executor-time use: a planner (or a cached generic plan) must not bake it in.
+///
+/// # Safety
+///
+/// `qual` must be a planner-owned expression list for `scanrelid`.
+pub(super) unsafe fn session_scope_equality(
+    scanrelid: pg_sys::Index,
+    qual: *mut pg_sys::List,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    scope_column_id: koldstore_common::ColumnId,
+) -> Option<String> {
+    let catalog = QualCatalog { scanrelid, catalog };
+    list_node_pointers(qual)
+        .into_iter()
+        .find_map(|node| session_scope_in_node(node.cast::<pg_sys::Expr>(), catalog, scope_column_id))
+}
+
+unsafe fn session_scope_in_node(
+    expr: *mut pg_sys::Expr,
+    catalog: QualCatalog<'_>,
+    scope_column_id: koldstore_common::ColumnId,
+) -> Option<String> {
+    if expr.is_null() {
+        return None;
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_BoolExpr => {
+            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
+                return None;
+            }
+            list_node_pointers((*bool_expr).args)
+                .into_iter()
+                .find_map(|node| session_scope_in_node(node.cast::<pg_sys::Expr>(), catalog, scope_column_id))
+        }
+        pg_sys::NodeTag::T_OpExpr => {
+            let op_expr = expr.cast::<pg_sys::OpExpr>();
+            if cstr_to_str(pg_sys::get_opname((*op_expr).opno))? != "=" || !operator_is_pg_catalog((*op_expr).opno) {
+                return None;
+            }
+            // Equal must mean byte-equal for a segment's scope to be compared by text.
+            if !collation_is_deterministic((*op_expr).inputcollid) {
+                return None;
+            }
+            let args = list_node_pointers((*op_expr).args);
+            if args.len() != 2 {
+                return None;
+            }
+            let (left, right) = (
+                unwrap_relabel(args[0].cast::<pg_sys::Expr>()),
+                unwrap_relabel(args[1].cast::<pg_sys::Expr>()),
+            );
+            let (var, func) = if !left.is_null() && (*left).type_ == pg_sys::NodeTag::T_Var {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            if var.is_null() || func.is_null() || (*var).type_ != pg_sys::NodeTag::T_Var {
+                return None;
+            }
+            let column = var_column(var, catalog)?;
+            if column.column_id != scope_column_id {
+                return None;
+            }
+            current_setting_user_id(func)
+        }
+        _ => None,
+    }
+}
+
+/// The current value of `koldstore.user_id` when `expr` is `current_setting('koldstore.user_id'[, true])`.
+unsafe fn current_setting_user_id(expr: *mut pg_sys::Expr) -> Option<String> {
+    if (*expr).type_ != pg_sys::NodeTag::T_FuncExpr {
+        return None;
+    }
+    let func = expr.cast::<pg_sys::FuncExpr>();
+    if cstr_to_str(pg_sys::get_func_name((*func).funcid))? != "current_setting" {
+        return None;
+    }
+    let args = list_node_pointers((*func).args);
+    let name_expr = unwrap_relabel(args.first()?.cast::<pg_sys::Expr>());
+    if name_expr.is_null() || (*name_expr).type_ != pg_sys::NodeTag::T_Const {
+        return None;
+    }
+    let constant = name_expr.cast::<pg_sys::Const>();
+    if (*constant).constisnull {
+        return None;
+    }
+    let name = <String as pgrx::FromDatum>::from_polymorphic_datum(
+        (*constant).constvalue,
+        false,
+        (*constant).consttype,
+    )?;
+    if !name.eq_ignore_ascii_case("koldstore.user_id") {
+        return None;
+    }
+    let name = std::ffi::CString::new(name).ok()?;
+    let value = pg_sys::GetConfigOption(name.as_ptr(), true, false);
+    if value.is_null() {
+        return None;
+    }
+    let value = CStr::from_ptr(value).to_str().ok()?.to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 pub(super) unsafe fn segment_prune_predicates(
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,

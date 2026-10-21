@@ -596,6 +596,7 @@ fn list_active_segments(
                         min_seq: to_seq(min_seq)?,
                         max_seq: to_seq(max_seq)?,
                         selected_row_groups: None,
+                        scope_id: scope_id.clone(),
                     },
                     row_count,
                     bounds,

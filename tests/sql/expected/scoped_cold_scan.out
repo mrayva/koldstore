@@ -1,0 +1,228 @@
+DO
+CREATE ROLE
+GRANT
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 240
+SELECT 240
+ ss_managed
+------------
+ t
+(1 row)
+
+ALTER TABLE
+GRANT
+ ss_caught_up
+--------------
+ t
+(1 row)
+
+ ss_flushed
+------------
+ t
+(1 row)
+
+ ss_segments
+-------------
+          12
+(1 row)
+
+ ss_eq_opened
+--------------
+            3
+(1 row)
+
+ ss_in_opened
+--------------
+            6
+(1 row)
+
+ ss_or_opened
+--------------
+            6
+(1 row)
+
+ ss_unknown_scope_opened
+-------------------------
+                       0
+(1 row)
+
+ ss_scope_and_key_opened
+-------------------------
+                       1
+(1 row)
+
+ ss_unscoped_opened
+--------------------
+                 12
+(1 row)
+
+ ss_b_rows
+-----------
+        60
+(1 row)
+
+ ss_ctl_b_rows
+---------------
+            60
+(1 row)
+
+ ss_ad_rows
+------------
+        120
+(1 row)
+
+ ss_ctl_ad_rows
+----------------
+            120
+(1 row)
+
+SET
+SET
+ ss_rls_opened
+---------------
+             3
+(1 row)
+
+ ss_rls_rows
+-------------
+          60
+(1 row)
+
+SET
+ ss_rls_other_rows
+-------------------
+                60
+(1 row)
+
+PREPARE
+ count
+-------
+    60
+(1 row)
+
+SET
+ count
+-------
+    60
+(1 row)
+
+SET
+ count
+-------
+    60
+(1 row)
+
+RESET
+RESET
+SET
+ ss_super_rows
+---------------
+           240
+(1 row)
+
+RESET
+SET
+UPDATE 20
+UPDATE 20
+RESET
+ ss_fenced_0
+-------------
+ t
+(1 row)
+
+ ss_edit_flushed
+-----------------
+ t
+(1 row)
+
+ ss_fenced_0b
+--------------
+ t
+(1 row)
+
+ ss_scopes_with_segments | ss_table_wide_segments
+-------------------------+------------------------
+                       4 |                      0
+(1 row)
+
+SET
+ ss_untouched_scope_under_cap
+------------------------------
+                           60
+(1 row)
+
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=15, limit=15). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+SET
+ ss_overlapping_scope_exact
+----------------------------
+                         60
+(1 row)
+
+RESET
+ ss_content_equal_after_edit
+-----------------------------
+ t
+(1 row)
+
+SET
+DELETE 12
+DELETE 12
+RESET
+ ss_fenced
+-----------
+ t
+(1 row)
+
+ ss_reflushed
+--------------
+ t
+(1 row)
+
+ ss_fenced_2
+-------------
+ t
+(1 row)
+
+ ss_content_equal
+------------------
+ t
+(1 row)
+
+ user_id | rows
+---------+------
+ user-a  |   57
+ user-c  |   57
+(2 rows)
+
+ user_id | rows
+---------+------
+ user-a  |   57
+ user-c  |   57
+(2 rows)
+
+ ss_deleted_visible
+--------------------
+                  0
+(1 row)
+
+ ss_b_rows_after
+-----------------
+              57
+(1 row)
+
+ ss_ctl_b_rows_after
+---------------------
+                  57
+(1 row)
+
+SET
+SET
+ ss_rls_c_after
+----------------
+             57
+(1 row)
+
+RESET
+RESET

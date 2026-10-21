@@ -369,6 +369,10 @@ deterministic collation (a primary key cannot have any other); `numeric` keys us
 an order-preserving decimal encoding in which `1.5`, `1.50` and `1.500` are one
 key, with bounds computed from the values at flush time.
 
+A user-scoped table's scan also drops segments of other scopes (ADR-010): when the quals pin the scope column (an equality, `IN`, an OR
+of equalities, or the row-level-security policy's `current_setting('koldstore.user_id')`), only that scope's segments and the table-wide
+ones are candidates, and disjointness is judged over that set.
+
 A segment with no index row for the pruning column at all (flushed before the
 column could be indexed) is always a candidate: it cannot be excluded by bounds
 it does not have.

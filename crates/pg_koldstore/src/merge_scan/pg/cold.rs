@@ -19,7 +19,7 @@ use koldstore_parquet::{
 use pgrx::pg_sys;
 
 use super::profile::{elapsed_ms, ColdReadProfile, ProfileCollectionMode, SegmentReadProfile};
-use super::qual::segment_prune_predicates;
+use super::qual::{segment_prune_predicates, session_scope_equality};
 use super::with_hook_disabled;
 
 /// Returns whether safe bounds prove that no active cold segment can match.
@@ -441,8 +441,28 @@ fn plan_cold_segments(
     // older one -- the reason pruning is otherwise limited to columns whose values never change (key,
     // scope, order). Hot rows are always read in full and still mask cold ones. Such a column (one with a
     // regular index or listed in `pruning_columns`) is then treated like an immutable one.
-    let pk_ranges_disjoint = manifest_stats.segments.len() > 1
-        && cold_pk_ranges_disjoint(*table_oid, manifest_stats.generation, catalog, manifest_stats.segments.len());
+    //
+    // A user-scoped scan that is restricted to certain scopes (by a predicate on the scope column or the
+    // session's `koldstore.user_id` under row-level security) can only return rows of those scopes, and a
+    // key lives in exactly one scope, so its candidate segments are those scopes' plus the table-wide ones
+    // (delete markers, rows from before scoping). Disjointness is judged over that set alone.
+    let scopes = scope_column_id.and_then(|scope_column| {
+        let session = unsafe { session_scope_equality(*scanrelid, *qual, catalog, scope_column) };
+        scope_filter_values(&all_predicates, scope_column, session)
+    });
+    let in_scope = |segment: &SegmentStatsHint| match (&scopes, &segment.scope_id) {
+        (Some(scopes), Some(scope)) => scopes.contains(scope),
+        _ => true,
+    };
+    let scoped_segment_count = manifest_stats.segments.iter().filter(|segment| in_scope(segment)).count();
+    let pk_ranges_disjoint = scoped_segment_count > 1
+        && cold_pk_ranges_disjoint(
+            *table_oid,
+            manifest_stats.generation,
+            catalog,
+            scoped_segment_count,
+            scopes.as_deref(),
+        );
     let prune_predicates = retain_pre_merge_cold_prune_predicates(all_predicates, |column_id| {
         let column = catalog.column_by_attnum(column_id)?;
         let mut policy = cold_prune_column_policy(column, scope_column_id, segment_order_column_id);
@@ -460,6 +480,7 @@ fn plan_cold_segments(
         manifest_stats.generation,
         catalog,
         segment_order_column_id,
+        scope_column_id,
         &prune_predicates,
         profile_mode.collects_counts(),
     )?;
@@ -478,9 +499,11 @@ fn plan_cold_segments(
     let segment_index_candidate_segments = indexed_candidates
         .as_ref()
         .map(|candidates| candidates.len());
-    let segments = indexed_candidates
+    let mut segments = indexed_candidates
         .map(|candidates| candidates.to_vec())
         .unwrap_or_else(|| manifest_stats.segments.clone());
+    // Segments of other scopes cannot hold a row this scan may return (counted as catalog-pruned).
+    segments.retain(|segment| in_scope(segment));
     let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
     let profile = if profile_mode.collects_counts() {
@@ -621,6 +644,7 @@ fn resolve_segment_index_candidates(
     manifest_generation: u64,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     segment_order_column_id: Option<ColumnId>,
+    scope_column_id: Option<ColumnId>,
     predicates: &[SegmentPrunePredicate],
     collect_profile: bool,
 ) -> Result<SegmentIndexCandidateResolution, String> {
@@ -632,15 +656,21 @@ fn resolve_segment_index_candidates(
                     .any(|predicate| predicate.column_id == column.column_id.get())
         })
     });
-    let column = preferred.or_else(|| {
-        predicates.iter().find_map(|predicate| {
-            catalog
-                .column_by_attnum(predicate.column_id)
-                .filter(|column| {
-                    koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())
-                        .is_some()
-                })
+    // Which column drives the catalog lookup. The scope column is handled by the scope filter (a
+    // segment's `scope_id`), so a predicate on any other column is the more selective driver when one
+    // exists; the scope column only drives when it is all there is.
+    let bounds_column = |predicate: &SegmentPrunePredicate| {
+        catalog.column_by_attnum(predicate.column_id).filter(|column| {
+            koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid()).is_some()
         })
+    };
+    let scope_column = scope_column_id.map(ColumnId::get);
+    let column = preferred.or_else(|| {
+        predicates
+            .iter()
+            .filter(|predicate| Some(predicate.column_id) != scope_column)
+            .find_map(bounds_column)
+            .or_else(|| predicates.iter().find_map(bounds_column))
     });
     // A full composite-key equality probes the summary on the first key column's index row, whatever
     // column the range logic would otherwise have picked: the first column's equality bounds still
@@ -759,7 +789,7 @@ fn resolve_segment_index_candidates(
 
 thread_local! {
     /// `(table oid, manifest generation)` -> whether the table's active segments have disjoint key ranges.
-    static PK_DISJOINT_CACHE: std::cell::RefCell<HashMap<(u32, u64), bool>> =
+    static PK_DISJOINT_CACHE: std::cell::RefCell<HashMap<(u32, u64, u64), bool>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -777,12 +807,19 @@ fn cold_pk_ranges_disjoint(
     manifest_generation: u64,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     active_segments: usize,
+    scopes: Option<&[String]>,
 ) -> bool {
-    let key = (table_oid.to_u32(), manifest_generation);
+    let scope_hash = scopes.map_or(0, |scopes| {
+        // 0 is "no scope restriction"; an empty or any other scope list hashes to a distinct, stable value.
+        let mut sorted = scopes.to_vec();
+        sorted.sort();
+        koldstore_common::stable_name_hash(&sorted.join("\u{1f}")) | 1
+    });
+    let key = (table_oid.to_u32(), manifest_generation, scope_hash);
     if let Some(cached) = PK_DISJOINT_CACHE.with(|cache| cache.borrow().get(&key).copied()) {
         return cached;
     }
-    let computed = compute_cold_pk_ranges_disjoint(table_oid, catalog, active_segments).unwrap_or(false);
+    let computed = compute_cold_pk_ranges_disjoint(table_oid, catalog, active_segments, scopes).unwrap_or(false);
     PK_DISJOINT_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.len() >= 512 {
@@ -793,6 +830,53 @@ fn cold_pk_ranges_disjoint(
     computed
 }
 
+/// The scopes a user-scoped scan is restricted to, or `None` when it is not restricted: the scopes
+/// every predicate on the scope column allows (equalities and value lists), intersected, together with
+/// the session's `koldstore.user_id` when the row-level-security policy contributes it. An empty list
+/// (contradictory predicates) is a valid answer: only table-wide segments can then matter.
+fn scope_filter_values(
+    predicates: &[SegmentPrunePredicate],
+    scope_column: ColumnId,
+    session: Option<String>,
+) -> Option<Vec<String>> {
+    let mut sets: Vec<Vec<String>> = Vec::new();
+    for predicate in predicates.iter().filter(|predicate| predicate.column_id == scope_column.get()) {
+        let values: Vec<&koldstore_sortkey::SortKeyValue> = if !predicate.any_of.is_empty() {
+            predicate.any_of.iter().collect()
+        } else if predicate.is_equality() {
+            predicate.min.iter().collect()
+        } else {
+            continue;
+        };
+        let texts: Option<Vec<String>> = values.into_iter().map(scope_text).collect();
+        if let Some(texts) = texts {
+            sets.push(texts);
+        }
+    }
+    sets.extend(session.map(|value| vec![value]));
+    let mut sets = sets.into_iter();
+    let mut result = sets.next()?;
+    for set in sets {
+        result.retain(|value| set.contains(value));
+    }
+    result.sort();
+    result.dedup();
+    Some(result)
+}
+
+/// A scope value as the text a segment's `scope_id` holds (what flush wrote for the same value).
+fn scope_text(value: &koldstore_sortkey::SortKeyValue) -> Option<String> {
+    use koldstore_sortkey::SortKeyValue;
+    match value {
+        SortKeyValue::Text(text) if !text.is_empty() => Some(text.clone()),
+        SortKeyValue::Int2(number) => Some(number.to_string()),
+        SortKeyValue::Int4(number) => Some(number.to_string()),
+        SortKeyValue::Int8(number) => Some(number.to_string()),
+        SortKeyValue::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
 /// Upper bound on first-column-overlapping segment pairs the disjointness check examines; past it the
 /// layout is treated as possibly overlapping (the exact retaining path is always correct).
 const MAX_DISJOINT_PAIR_CHECKS: usize = 2_000_000;
@@ -801,6 +885,7 @@ fn compute_cold_pk_ranges_disjoint(
     table_oid: pg_sys::Oid,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     active_segments: usize,
+    scopes: Option<&[String]>,
 ) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -822,6 +907,7 @@ fn compute_cold_pk_ranges_disjoint(
         DatumWithOid::from(table_oid),
         DatumWithOid::from(key_columns.iter().map(|key| key.column_id.get()).collect::<Vec<i16>>()),
         DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
+        DatumWithOid::from(scopes.map(|scopes| pgrx::JsonB(serde_json::json!(scopes)))),
     ];
     type Boxed = (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>, i64, Option<Vec<u8>>, Option<Vec<u8>>);
     let rows: Vec<Boxed> = crate::catalog::owner::with_extension_owner(|| {
@@ -1061,6 +1147,7 @@ fn load_segment_index_candidates(
                         let row_group_null_counts = tuple
                             .get::<Vec<Option<i64>>>(13)?
                             .ok_or_else(|| missing_candidate_field("row_group_null_counts"))?;
+                        let scope_id = tuple.get::<String>(14)?;
                         let min_seq = SeqId::new(min_seq_raw).map_err(|error| {
                             pgrx::spi::SpiError::DatumError(
                                 pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
@@ -1085,6 +1172,7 @@ fn load_segment_index_candidates(
                                 min_seq,
                                 max_seq,
                                 selected_row_groups: None,
+                                scope_id,
                             },
                             column_id,
                             std::sync::Arc::new(crate::catalog::cache::CachedPackedRowGroupIndex {
@@ -1779,6 +1867,7 @@ mod tests {
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(10).unwrap(),
             selected_row_groups: None,
+            scope_id: None,
         };
 
         assert_eq!(

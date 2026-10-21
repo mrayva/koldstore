@@ -461,7 +461,8 @@ WITH active_segments AS (
         cs.max_seq,
         cs.byte_size,
         cs.batch_number,
-        cs.table_oid
+        cs.table_oid,
+        cs.scope_id
     FROM koldstore.cold_segments cs
     WHERE cs.table_oid = $1::oid
       AND cs.scope_key = ''
@@ -492,7 +493,8 @@ SELECT jsonb_build_object(
               'min_seq', a.min_seq,
               'max_seq', a.max_seq,
               'physical_names', COALESCE(names.physical_names, '{{}}'::jsonb),
-              'byte_size', a.byte_size
+              'byte_size', a.byte_size,
+              'scope_id', a.scope_id
           )
           ORDER BY a.batch_number
       )
@@ -886,7 +888,8 @@ SELECT
     cs.row_group_row_counts,
     mi.row_group_min_values,
     mi.row_group_max_values,
-    mi.row_group_null_counts
+    mi.row_group_null_counts,
+    cs.scope_id
 FROM matching_index mi
 JOIN koldstore.cold_segments cs
   ON cs.segment_id = mi.segment_id
@@ -1017,8 +1020,9 @@ ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
 /// minimum. Then come the count of active segments of other scopes and the composite-key tuple
 /// bounds `key_min` / `key_max` (NULL when the segment has none).
 ///
-/// Parameters are table OID, the key columns' stable IDs (`smallint[]`, in key order) and the codec
-/// version.
+/// Parameters are table OID, the key columns' stable IDs (`smallint[]`, in key order), the codec
+/// version and an optional JSON array of scope ids: when given, only segments of those scopes and
+/// table-wide ones (`scope_id IS NULL`) are listed.
 ///
 /// # Errors
 ///
@@ -1048,11 +1052,18 @@ SELECT
         AND csi.codec_version = $3::smallint) AS key_max
 FROM koldstore.cold_segments cs
 WHERE cs.table_oid = $1::oid AND cs.status = 'active' AND cs.scope_key = ''
+  AND ($4::jsonb IS NULL OR cs.scope_id IS NULL
+       OR cs.scope_id IN (SELECT jsonb_array_elements_text($4::jsonb)))
 ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
            WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
              AND csi.codec_version = $3::smallint) NULLS LAST, cs.segment_id
 "#,
-        [SqlParamType::Oid, SqlParamType::SmallIntArray, SqlParamType::Integer],
+        [
+            SqlParamType::Oid,
+            SqlParamType::SmallIntArray,
+            SqlParamType::Integer,
+            SqlParamType::Jsonb,
+        ],
     )
 }
 

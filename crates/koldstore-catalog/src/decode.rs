@@ -28,6 +28,8 @@ pub struct ManifestScanSegmentStats {
     pub min_seq: i64,
     /// Segment maximum `seq` (inclusive).
     pub max_seq: i64,
+    /// Scope the segment's rows belong to; `None` = table-wide.
+    pub scope_id: Option<String>,
 }
 
 /// Manifest-backed merge-scan context loaded from catalog SPI.
@@ -147,6 +149,10 @@ pub fn manifest_scan_segment_stats(
         byte_size: optional_u64(value, "byte_size"),
         min_seq: required_i64(value, "min_seq")?,
         max_seq: required_i64(value, "max_seq")?,
+        scope_id: value
+            .get("scope_id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
     })
 }
 

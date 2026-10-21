@@ -128,6 +128,7 @@ fn versioned_segment(path: &str, min_seq: i64, max_seq: i64) -> SegmentStatsHint
         min_seq: SeqId::new(min_seq).unwrap(),
         max_seq: SeqId::new(max_seq).unwrap(),
         selected_row_groups: None,
+        scope_id: None,
     }
 }
 
@@ -190,6 +191,7 @@ fn newest_first_segment_groups_reject_reversed_sequence_range() {
         min_seq: SeqId::new(20).unwrap(),
         max_seq: SeqId::new(10).unwrap(),
         selected_row_groups: None,
+        scope_id: None,
     }])
     .unwrap_err();
 

@@ -52,6 +52,10 @@ pub struct SegmentStatsHint {
     /// Catalog-selected Parquet row groups; `None` means no packed prune ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_row_groups: Option<Vec<usize>>,
+    /// Scope the segment's rows belong to (user-scoped tables, ADR-010); `None` = table-wide, which
+    /// every scope's read must include.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
 }
 
 /// Resolves the Parquet field name for a logical column in one segment schema.

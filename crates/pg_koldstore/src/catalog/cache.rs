@@ -854,6 +854,7 @@ fn cached_from_context(
                 min_seq,
                 max_seq,
                 selected_row_groups: None,
+                scope_id: segment.scope_id,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

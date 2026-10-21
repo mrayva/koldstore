@@ -108,3 +108,31 @@ What shipped, and where it differs from the sketch above:
 
 Still open for slices 2 and 3: scope resolution in the scan and per-scope disjointness; the `max_scopes_per_flush` fallback; a
 "keep delete markers" compaction mode so the table-wide group can be merged too.
+
+## Slice 2 as built (2026-10-21)
+
+A user-scoped scan now reads only its scope's segments plus the table-wide ones.
+
+* **Resolving the scope** (executor time, in `plan_cold_segments`): the scope column's value list from the scan's own prune
+  predicates (equality, `IN`, `= ANY`, an OR of equalities -- all already extracted for bounds pruning), intersected, plus the
+  session's `koldstore.user_id` when the quals contain `scope_column = current_setting('koldstore.user_id'[, true])`, which is
+  what the generated RLS policy contributes (`qual::session_scope_equality`). The GUC is read when the scan starts, never at plan
+  time, so a cached generic plan reused under another `user_id` selects that user's segments. It is the *qual* that restricts the
+  scan, not the role: a superuser (RLS bypassed) with `user_id` set is not restricted and reads everything, and a query whose
+  quals do not pin the scope reads everything as before. A restriction to scopes the table does not have leaves only the
+  table-wide segments.
+* **Filtering**: segment hints carry `scope_id` (catalog candidate query, scan-context JSON); segments of other scopes are
+  dropped after the catalog lookup, before any Parquet footer is read, and counted in "Segments Pruned by Catalog Index".
+* **Per-scope disjointness**: `cold_pk_ranges_disjoint` takes the scope set (cache key gains its hash) and the key-box query
+  lists only those scopes' segments plus table-wide ones, so a scope whose rows were never rewritten scans without retaining
+  cold keys even when another scope's segments overlap.
+* **Catalog driver**: when a query pins the scope and another indexed column, the other column drives the catalog lookup (the
+  scope is already handled by the filter).
+* **Known limitation**: delete markers are table-wide and their key range can overlap any scope's segments, so while a table has
+  markers every scope's scan treats the layout as possibly overlapping (correct, but retention returns). Fixing it needs the
+  scope at delete time: store it in the mirror (a captured column carried forward from the row's last insert/update) so markers
+  can be written to their scope's folder. Slice 3 candidate, with the `max_scopes_per_flush` fallback and a keep-markers
+  compaction mode.
+
+Tests: `scoped_cold_scan` (segments opened per predicate shape, RLS session, prepared statement reuse, superuser, edits and
+deletes against an unmanaged control, per-scope retention-free scans).
