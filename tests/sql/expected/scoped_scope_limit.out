@@ -1,0 +1,112 @@
+CREATE FUNCTION
+CREATE FUNCTION
+SET
+CREATE TABLE
+INSERT 0 120
+SELECT 120
+ koldstore.max_scopes_per_flush
+--------------------------------
+ 3
+(1 row)
+
+ sc_managed
+------------
+ t
+(1 row)
+
+ sc_caught_up
+--------------
+ t
+(1 row)
+
+ sc_flushed
+------------
+ t
+(1 row)
+
+ sc_table_wide | sc_scoped
+---------------+-----------
+ t             |         0
+(1 row)
+
+ sc_content_equal
+------------------
+ t
+(1 row)
+
+ sc_user_3_rows
+----------------
+             20
+(1 row)
+
+ sc_ctl_user_3_rows
+--------------------
+                 20
+(1 row)
+
+SET
+SET
+UPDATE 20
+UPDATE 20
+RESET
+ sc_fenced
+-----------
+ t
+(1 row)
+
+ sc_reflushed
+--------------
+ t
+(1 row)
+
+ sc_fenced_2
+-------------
+ t
+(1 row)
+
+ scope_id | segments
+----------+----------
+ user-4   |        1
+(1 row)
+
+ sc_content_equal_after_edit
+-----------------------------
+ t
+(1 row)
+
+ sc_user_1_rows
+----------------
+             20
+(1 row)
+
+ sc_ctl_user_1_rows
+--------------------
+                 20
+(1 row)
+
+ sc_edited_value
+-----------------
+ edited
+(1 row)
+
+ sc_compacted
+--------------
+ f
+(1 row)
+
+ sc_content_equal_after_compaction
+-----------------------------------
+ t
+(1 row)
+
+ sc_orphans
+------------
+          0
+(1 row)
+
+ sc_valid
+----------
+ true
+(1 row)
+
+RESET

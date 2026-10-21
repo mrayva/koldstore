@@ -34,6 +34,9 @@ static COLD_OBJECT_AUTO_PURGE: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static AUTO_COMPACTION: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static MAX_SCOPES_PER_FLUSH: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_MAX_SCOPES_PER_FLUSH);
+#[cfg(feature = "pg")]
 static HYDRATE_ON_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static HYDRATING: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -386,6 +389,16 @@ pub fn define_gucs() {
         GucContext::Suset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_scopes_per_flush",
+        c"Most distinct scopes one flush pass writes per-scope segments for.",
+        c"A user-scoped table flushes one segment group per scope. When a single pass touches more distinct scopes than this, it is written as ordinary table-wide segments instead, so a flush across very many scopes does not scatter into very many tiny objects. 0 disables the limit. Superuser-only.",
+        &MAX_SCOPES_PER_FLUSH,
+        0,
+        1_000_000,
+        GucContext::Suset,
+        flags,
+    );
     GucRegistry::define_bool_guc(
         c"koldstore.auto_compaction",
         c"Compacts cold segments of managed tables from the maintenance worker.",
@@ -645,6 +658,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::COLD_OBJECT_RETENTION_SECONDS_GUC,
             internal: false,
             default_value: "0",
+        },
+        GucDefinition {
+            name: settings::MAX_SCOPES_PER_FLUSH_GUC,
+            internal: false,
+            default_value: "256",
         },
         GucDefinition {
             name: settings::AUTO_COMPACTION_GUC,
@@ -1127,6 +1145,20 @@ pub fn flush_job_max_runtime_seconds() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    }
+}
+
+/// Most distinct scopes one flush pass writes per-scope segments for (`0` = unlimited).
+#[must_use]
+pub fn max_scopes_per_flush() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        MAX_SCOPES_PER_FLUSH.get().max(0)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_MAX_SCOPES_PER_FLUSH
     }
 }
 

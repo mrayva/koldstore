@@ -215,6 +215,10 @@ pub const fn bounded_flush_job_max_runtime_seconds(value: i32) -> i32 {
     }
 }
 
+/// GUC name: most distinct scopes one flush pass of a user-scoped table writes per-scope segments for.
+pub const MAX_SCOPES_PER_FLUSH_GUC: &str = "koldstore.max_scopes_per_flush";
+/// Default for [`MAX_SCOPES_PER_FLUSH_GUC`].
+pub const DEFAULT_MAX_SCOPES_PER_FLUSH: i32 = 256;
 /// GUC name: let the maintenance worker compact cold segments of managed tables on its own.
 pub const AUTO_COMPACTION_GUC: &str = "koldstore.auto_compaction";
 /// GUC name: purge retained cold objects automatically once their window has passed.

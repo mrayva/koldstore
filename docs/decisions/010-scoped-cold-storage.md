@@ -157,3 +157,19 @@ Effect: a delete no longer poisons every scope's scan. Only the scope that holds
 compaction drops the marker); `scoped_cold_scan` shows an untouched scope scanning under a tiny key cap after another scope's deletes.
 Assumption: a row's scope never changes (it backs the RLS policy). A mirror row has one scope, so a moved row would leave its old version
 in the old scope's segments.
+
+## Scope-count fallback (2026-10-21)
+
+`koldstore.max_scopes_per_flush` (default 256, `0` = unlimited, superuser-only). The flush executor reads the whole pass, counts the distinct
+scopes (`row_scope`), and when the count exceeds the limit writes the pass as ordinary table-wide segments: `scope_column_index` is cleared so
+the encoder neither cuts at scope changes nor tags chunks, and the rows are served in their original order (not grouped). Differences from the
+sketch above, which said "sorted by (scope, order)":
+
+* The fallback keeps the original `(order key, key, seq)` order. Scope-sorted table-wide segments would have to give up the segments' "sorted
+  by the order key" claim that ordered scans rely on, so clustering by scope is not attempted; the fallback is simply the pre-scoping layout.
+  A later flush below the limit is per-scope again, and the table then mixes both kinds, which readers and compaction already handle (the
+  table-wide group is read by every scope's scan and is left alone by compaction while scoped segments exist).
+* A pass is the unit, not the table: the limit bounds the scatter of one flush, and `max_rows_per_flush` already bounds a pass.
+
+The first version of the prefetch ran the mirror query with the merge-scan hook enabled and failed with `RefCell already borrowed`; it now
+runs inside `with_custom_scan_disabled` like the streaming fetch. Covered by `scoped_scope_limit`.
