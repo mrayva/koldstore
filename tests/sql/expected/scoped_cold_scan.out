@@ -167,8 +167,8 @@ RESET
 (1 row)
 
 SET
-DELETE 12
-DELETE 12
+DELETE 3
+DELETE 3
 RESET
  ss_fenced
 -----------
@@ -190,38 +190,51 @@ RESET
  t
 (1 row)
 
+ ss_table_wide_after_deletes
+-----------------------------
+                           0
+(1 row)
+
+SET
+ ss_other_scope_under_cap_after_deletes
+----------------------------------------
+                                     60
+(1 row)
+
+psql:<PATH>: ERROR:  KoldMergeScan stream failed: KoldMergeScan retained too many exact primary-key identities (seen=15, limit=15). Raise koldstore.max_merge_seen_keys for large intentional scans, set it to 0 to disable the cap, or add filters to reduce distinct keys.
+RESET
  user_id | rows
 ---------+------
  user-a  |   57
- user-c  |   57
+ user-c  |   60
 (2 rows)
 
  user_id | rows
 ---------+------
  user-a  |   57
- user-c  |   57
+ user-c  |   60
 (2 rows)
 
  ss_deleted_visible
 --------------------
-                  0
+                  9
 (1 row)
 
  ss_b_rows_after
 -----------------
-              57
+              60
 (1 row)
 
  ss_ctl_b_rows_after
 ---------------------
-                  57
+                  60
 (1 row)
 
 SET
 SET
  ss_rls_c_after
 ----------------
-             57
+             60
 (1 row)
 
 RESET

@@ -182,6 +182,13 @@ fn compact_locked(
     if table_has_scoped {
         groups.remove(&None);
     }
+    // A delete marker now follows its row into the row's scope group (the mirror records the scope),
+    // where compaction can drop it once it has met the older versions it masks. That is only safe
+    // while nothing outside the scope group could still hold such a version: older versions never
+    // live in another scope (a key has one scope), but the table-wide group (rows from before
+    // scoping, NULL scopes, markers whose scope was unknown) can. While it is not empty, a unit that
+    // holds a marker is left as it is.
+    let drop_markers = !table_has_scoped || !segments.iter().any(|segment| segment.scope_id.is_none());
     // A composite key whose segments all have exact tuple bounds is planned with both tests (see
     // `SegmentRange::may_share_keys`): a sorted rewrite makes the output lexicographically disjoint,
     // so a repeat finds nothing to do and the scan sees disjoint segments afterwards.
@@ -252,6 +259,7 @@ fn compact_locked(
             started,
             *exact_tuples,
             scope.as_deref(),
+            drop_markers,
         )?
         else {
             units_without_gain += 1;
@@ -309,6 +317,7 @@ fn compact_unit(
     started: std::time::Instant,
     exact_tuples: bool,
     scope: Option<&str>,
+    drop_markers: bool,
 ) -> Result<Option<UnitOutcome>, String> {
     let catalog = &ctx.catalog;
     let hints: Vec<SegmentStatsHint> = members.iter().map(|segment| segment.hint.clone()).collect();
@@ -331,6 +340,11 @@ fn compact_unit(
                 winners.insert(key, row);
             }
         }
+    }
+    // A winning delete marker may only be dropped when nothing outside this unit's scope group can
+    // still hold an older version of its key (see `compact_locked`).
+    if !drop_markers && winners.values().any(|row| row.deleted) {
+        return Ok(None);
     }
     let key_names: Vec<&String> = catalog
         .primary_key
@@ -391,6 +405,7 @@ fn compact_unit(
             // The encoder only checks the key is present (rows arrive sorted); paging below does
             // not use it.
             order_key: sorted_by_key.then(Vec::new),
+            scope: None,
         })
         .collect();
     let max_seq = mirror_rows.iter().map(|row| row.seq).max().unwrap_or(0);

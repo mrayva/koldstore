@@ -44,7 +44,7 @@ pub use encode::{
 pub use ops::{
     classify_command, flush_table_request, plan_count_pending_flush_jobs,
     plan_enqueue_or_lookup_flush_job, plan_koldstore_exec, plan_mirror_flush_selection_batch,
-    plan_mirror_flush_selection_batch_with_order_key, plan_next_pending_flush_due_epoch_ms,
+    plan_mirror_flush_selection_batch_with_order_key, plan_mirror_flush_selection_batch_with_scope, plan_next_pending_flush_due_epoch_ms,
     plan_select_pending_flush_candidates, plan_select_pending_flush_candidates_after,
     sql_param_cast, table_status_plan, FlushJobEnqueuePlan, FlushRequest, KoldstoreExecPlan,
     MirrorFlushSelectionPlan, OpsCommand, OpsError,

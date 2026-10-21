@@ -135,6 +135,21 @@ SELECT (SELECT jsonb_build_object(
        AND NOT a.attisdropped
       WHERE (c->>'column_id')::int = (s.options->>'segment_order_column_id')::int
       LIMIT 1
+    ),
+    -- User-scoped tables carry the row's scope into the mirror (ADR-010) when the mirror has the column.
+    'scope_column', (
+      SELECT c->>'name'
+      FROM jsonb_array_elements(s.columns) AS c
+      JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = s.table_oid
+       AND a.attnum = (c->>'column_id')::smallint
+       AND NOT a.attisdropped
+      WHERE (c->>'column_id')::int = (s.options->>'scope_column_id')::int
+      LIMIT 1
+    ),
+    'mirror_has_scope', EXISTS (
+      SELECT 1 FROM pg_catalog.pg_attribute ma
+      WHERE ma.attrelid = s.mirror_relation AND ma.attname = 'scope_id' AND NOT ma.attisdropped
     )
 )::text
 FROM koldstore.schemas s

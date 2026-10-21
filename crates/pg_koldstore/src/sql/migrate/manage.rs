@@ -224,6 +224,8 @@ pub(crate) fn manage_table_pg_impl(
             pgrx::Spi::run(&statement.sql)
                 .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         }
+        ensure_mirror_scope_column(&mirror_plan.mirror_table, empty_plan.effective_scope_column.as_deref())
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
             pgrx::Spi::run(&statement)
                 .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -269,6 +271,7 @@ pub(crate) fn manage_table_pg_impl(
             &mirror_plan.mirror_table,
             &primary_key_shape,
             order_column_name,
+            empty_plan.effective_scope_column.as_deref(),
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         manage_timer.finish(format!(
@@ -293,6 +296,8 @@ pub(crate) fn manage_table_pg_impl(
         pgrx::Spi::run(&statement.sql)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     }
+    ensure_mirror_scope_column(&mirror_plan.mirror_table, empty_plan.effective_scope_column.as_deref())
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
         pgrx::Spi::run(&statement)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -309,6 +314,7 @@ pub(crate) fn manage_table_pg_impl(
         &mirror_plan.mirror_table,
         &primary_key_shape,
         order_column_name,
+        plan.effective_scope_column.as_deref(),
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let activation_lsn =
@@ -421,6 +427,24 @@ fn refresh_managed_table_row_counters(
         table,
         mirror,
     )
+}
+
+/// Gives the mirror of a user-scoped table its `scope_id` column (ADR-010), where capture records each
+/// row's scope so a delete marker can follow the row into its scope's folder. Idempotent; a no-op for
+/// tables without a scope column.
+#[cfg(feature = "pg")]
+pub(crate) fn ensure_mirror_scope_column(
+    mirror: &koldstore_migrate::QualifiedTableName,
+    scope_column: Option<&str>,
+) -> Result<(), String> {
+    if scope_column.is_none() {
+        return Ok(());
+    }
+    pgrx::Spi::run(&format!(
+        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS scope_id text",
+        mirror.quoted()
+    ))
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "pg")]

@@ -30,6 +30,9 @@ pub struct FlushMirrorRow {
     pub values: Vec<CellValue>,
     /// Encoded immutable segment-order key retained by the mirror.
     pub order_key: Option<Vec<u8>>,
+    /// Scope the mirror recorded for the row (user-scoped tables, ADR-010); the only source of a
+    /// delete marker's scope, since the row itself is gone.
+    pub scope: Option<String>,
 }
 
 /// Resolves catalog positions for primary-key columns.

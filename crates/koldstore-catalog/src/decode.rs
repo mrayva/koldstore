@@ -233,6 +233,10 @@ pub struct AsyncManagedRelationMeta {
     pub primary_key: Vec<String>,
     /// Optional immutable segment-order column.
     pub order_column: Option<AsyncOrderColumnMeta>,
+    /// Name of the scope column of a user-scoped table whose mirror has a `scope_id` column, so
+    /// capture can carry each row's scope forward to its delete marker (ADR-010). `None` for other
+    /// tables, and for a scoped table whose mirror predates the column.
+    pub scope_column: Option<String>,
 }
 
 /// Segment-order column published into async capture.
@@ -296,11 +300,19 @@ pub fn async_managed_relation(
             )
         }
     };
+    let scope_column = value
+        .get("mirror_has_scope")
+        .and_then(serde_json::Value::as_bool)
+        .filter(|has| *has)
+        .and_then(|_| value.get("scope_column"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
     Ok(AsyncManagedRelationMeta {
         table_oid,
         mirror,
         primary_key,
         order_column,
+        scope_column,
     })
 }
 

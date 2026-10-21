@@ -90,6 +90,7 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
         &["id"],
         &["bigint".to_string()],
         false,
+            false,
     )
     .unwrap();
 
@@ -111,6 +112,7 @@ fn async_mirror_batch_upsert_includes_order_key_bind() {
         &["id"],
         &["bigint".to_string()],
         true,
+            false,
     )
     .unwrap();
 
@@ -127,6 +129,7 @@ fn async_mirror_batch_upsert_keeps_text_cast_for_uuid() {
         &["id"],
         &["uuid".to_string()],
         false,
+            false,
     )
     .unwrap();
 
@@ -141,6 +144,7 @@ fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
         &["tenant_id", "id"],
         &["uuid".to_string(), "bigint".to_string()],
         false,
+            false,
     )
     .unwrap();
 
@@ -198,4 +202,38 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
     assert!(stats.sql.contains("'row_count', count(*)"));
     assert!(stats.sql.contains("FROM \"koldstore\".\"app_items__cl\""));
     assert!(stats.param_types.is_empty());
+}
+
+#[test]
+fn async_mirror_batch_upsert_carries_scope_and_keeps_it_on_delete() {
+    let sql = plan_async_mirror_batch_upsert(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["bigint".to_string()],
+        true,
+        true,
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[], $4::bytea[], $5::text[])"));
+    assert!(sql.contains("incoming.scope_id AS \"scope_id\""));
+    assert!(sql.contains("\"seq\", \"op\", \"scope_id\""));
+    assert!(sql.contains(
+        "\"scope_id\" = COALESCE(EXCLUDED.\"scope_id\", \"koldstore\".\"items__cl\".\"scope_id\")"
+    ));
+}
+
+#[test]
+fn async_mirror_batch_update_carries_scope_without_an_order_key() {
+    let sql = plan_async_mirror_batch_update(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["bigint".to_string()],
+        false,
+        true,
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[], $4::text[])"));
+    assert!(sql.contains("\"scope_id\" = COALESCE(incoming.\"scope_id\", mirror.\"scope_id\")"));
 }

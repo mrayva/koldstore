@@ -100,6 +100,37 @@ pub fn plan_mirror_initialization_batch_with_segment_order(
     batch_size: MigrationBatchSize,
     segment_order_column: Option<&str>,
 ) -> MirrorInitializationResult<MirrorInitializationBatchPlan> {
+    plan_mirror_initialization_batch_with_scope(
+        table,
+        mirror_table,
+        primary_key,
+        ordering,
+        batch_size,
+        segment_order_column,
+        None,
+    )
+}
+
+/// Like [`plan_mirror_initialization_batch_with_segment_order`], also recording each row's scope in the
+/// mirror's `scope_id` column for a user-scoped table (ADR-010), so a later delete of a backfilled row
+/// still writes its delete marker to the right scope.
+///
+/// # Errors
+///
+/// As [`plan_mirror_initialization_batch_with_segment_order`], plus an unsafe scope identifier.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_mirror_initialization_batch_with_scope(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+    ordering: MigrationOrdering,
+    batch_size: MigrationBatchSize,
+    segment_order_column: Option<&str>,
+    scope_column: Option<&str>,
+) -> MirrorInitializationResult<MirrorInitializationBatchPlan> {
+    if let Some(column) = scope_column.filter(|column| !is_valid_identifier(column)) {
+        return Err(MirrorInitializationError::InvalidIdentifier(column.to_string()));
+    }
     if primary_key.is_empty() {
         return Err(MirrorInitializationError::MissingPrimaryKey);
     }
@@ -141,14 +172,23 @@ pub fn plan_mirror_initialization_batch_with_segment_order(
         insert_columns.push("\"order_key\"".to_string());
     }
     insert_columns.extend(MirrorColumn::insert_quoted_names());
+    if scope_column.is_some() {
+        insert_columns.push("\"scope_id\"".to_string());
+    }
     let mut select_columns = pk_columns.clone();
     if segment_order_column.is_some() {
         select_columns.push("koldstore.internal_encode_sort_key(segment_order_value)".to_string());
     }
     select_columns.extend([snowflake_id_call_expression().to_string(), "1".to_string()]);
-    let segment_order_projection = segment_order_column.map_or_else(String::new, |column| {
+    if scope_column.is_some() {
+        select_columns.push("NULLIF(scope_value, '')".to_string());
+    }
+    let mut segment_order_projection = segment_order_column.map_or_else(String::new, |column| {
         format!(", hot.{} AS segment_order_value", quote_ident(column))
     });
+    if let Some(column) = scope_column {
+        segment_order_projection.push_str(&format!(", hot.{}::text AS scope_value", quote_ident(column)));
+    }
     let order_direction = if ordering.ascending_oldest_first {
         "ASC"
     } else {

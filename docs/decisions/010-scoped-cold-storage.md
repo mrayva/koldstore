@@ -136,3 +136,24 @@ A user-scoped scan now reads only its scope's segments plus the table-wide ones.
 
 Tests: `scoped_cold_scan` (segments opened per predicate shape, RLS session, prepared statement reuse, superuser, edits and
 deletes against an unmanaged control, per-scope retention-free scans).
+
+## Delete markers follow their row (2026-10-21)
+
+Slice 1 left delete markers table-wide because a marker has only the primary key. The mirror now records the scope:
+
+* A user-scoped table's mirror gets a nullable `scope_id text` column (created at manage time; the upgrade script adds it to existing
+  scoped mirrors). The scope column joins the table's publication column list (primary key, order column, scope column), so the
+  applier reads it from every insert/update tuple (`take_pk_cells_order_and_scope_text`; best effort, an unreadable or unchanged-TOAST
+  value records nothing).
+* The batch SQL (`plan_async_mirror_batch_upsert` / `_update`) writes it and keeps the existing value when a statement carries none
+  (`COALESCE(EXCLUDED.scope_id, mirror.scope_id)`), so a delete -- whose old tuple is the key only -- leaves the scope its row last
+  recorded. Backfill records it for rows that pre-date management.
+* Flush selects `mirror.scope_id` (`FlushMirrorRow::scope`); `row_scope` uses it for a delete marker, so the marker is written to its
+  row's scope group. Rows with no recorded scope (a mirror older than the column, a NULL scope) still go to the table-wide group.
+* Compaction may now drop a marker inside a scope group, because older versions of its key can only be in that group -- unless the
+  table-wide group is non-empty (it could hold one), in which case a unit with a marker is left alone.
+
+Effect: a delete no longer poisons every scope's scan. Only the scope that holds the deleted row loses the retention-free scan (until
+compaction drops the marker); `scoped_cold_scan` shows an untouched scope scanning under a tiny key cap after another scope's deletes.
+Assumption: a row's scope never changes (it backs the RLS policy). A mirror row has one scope, so a moved row would leave its old version
+in the old scope's segments.

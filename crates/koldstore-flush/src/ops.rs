@@ -415,6 +415,37 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
         mirror_ops,
         sort_by_order_key,
         primary_key_param_types,
+        false,
+    )
+}
+
+/// [`plan_mirror_flush_selection_batch_with_order_key`] that also selects the mirror's `scope_id`
+/// (the scope recorded for each row, the only scope a delete marker has) as the last output column.
+///
+/// # Errors
+///
+/// As [`plan_mirror_flush_selection_batch_with_order_key`].
+#[allow(clippy::too_many_arguments)]
+pub fn plan_mirror_flush_selection_batch_with_scope(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    base_columns: &[String],
+    mirror_ops: Option<&[i16]>,
+    sort_by_order_key: bool,
+    primary_key_param_types: &[SqlParamType],
+    mirror_scope: bool,
+) -> Result<MirrorFlushSelectionPlan, OpsError> {
+    plan_mirror_flush_selection_inner(
+        table,
+        mirror_table,
+        primary_key_columns,
+        base_columns,
+        None,
+        mirror_ops,
+        sort_by_order_key,
+        primary_key_param_types,
+        mirror_scope,
     )
 }
 
@@ -452,6 +483,7 @@ fn plan_mirror_flush_selection_inner(
     mirror_ops: Option<&[i16]>,
     sort_by_order_key: bool,
     primary_key_param_types: &[SqlParamType],
+    mirror_scope: bool,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
@@ -497,6 +529,9 @@ fn plan_mirror_flush_selection_inner(
     ]);
     if sort_by_order_key {
         select_columns.push("mirror.\"order_key\" AS order_key".to_string());
+    }
+    if mirror_scope {
+        select_columns.push("mirror.\"scope_id\" AS scope_id".to_string());
     }
 
     let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];

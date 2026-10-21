@@ -63,6 +63,7 @@ pub(super) fn fetch_mirror_batch(
     cursor: &MirrorFlushPageCursor,
     fetch_limit: i64,
     include_order_key: bool,
+    include_scope: bool,
 ) -> Result<Vec<FlushMirrorRow>, String> {
     let limit = fetch_limit.max(1);
     let spi_statement = crate::spi::SpiStatement::read_with_params(
@@ -75,7 +76,7 @@ pub(super) fn fetch_mirror_batch(
     let owned = build_owned_binds(columns, primary_key_columns, max_seq, cursor, limit)?;
     let args = owned_binds_to_datums(&owned);
     crate::spi::execute_prepared(&spi_statement, &args, |tuples| {
-        decode_mirror_batch(tuples, columns, include_order_key)
+        decode_mirror_batch(tuples, columns, include_order_key, include_scope)
     })
     .map_err(|error| error.to_string())
 }
@@ -259,12 +260,14 @@ fn decode_mirror_batch(
     tuples: pgrx::spi::SpiTupleTable<'_>,
     columns: &[CatalogColumn],
     include_order_key: bool,
+    include_scope: bool,
 ) -> pgrx::spi::Result<Vec<FlushMirrorRow>> {
     // Column layout from plan_mirror_flush_selection_batch:
     //   1..=N  application columns (catalog order)
     //   N+1    seq
     //   N+2    op
     //   N+3    order_key (optional)
+    //   next   scope_id (optional, user-scoped tables)
     let seq_ordinal = columns.len() + 1;
     let op_ordinal = columns.len() + 2;
     let mut rows = Vec::with_capacity(tuples.len());
@@ -275,6 +278,7 @@ fn decode_mirror_batch(
             seq_ordinal,
             op_ordinal,
             include_order_key,
+            include_scope,
         )?);
     }
     Ok(rows)
@@ -286,6 +290,7 @@ fn decode_mirror_row(
     seq_ordinal: usize,
     op_ordinal: usize,
     include_order_key: bool,
+    include_scope: bool,
 ) -> pgrx::spi::Result<FlushMirrorRow> {
     // PERFORMANCE: Ordinal access avoids per-column name lookups (SPI_fnumber).
     let seq = tuple
@@ -302,11 +307,16 @@ fn decode_mirror_row(
         .then(|| tuple.get::<Vec<u8>>(columns.len() + 3))
         .transpose()?
         .flatten();
+    let scope = include_scope
+        .then(|| tuple.get::<String>(columns.len() + 3 + usize::from(include_order_key)))
+        .transpose()?
+        .flatten();
     Ok(FlushMirrorRow {
         seq,
         op,
         values,
         order_key,
+        scope,
     })
 }
 

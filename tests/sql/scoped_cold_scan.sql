@@ -112,15 +112,22 @@ SELECT count(*) AS ss_overlapping_scope_exact FROM sqlreg.ss WHERE user_id = 'us
 RESET koldstore.max_merge_seen_keys;
 SELECT sqlreg.same_content('sqlreg.ss', 'sqlreg.ss_ctl', 'id') AS ss_content_equal_after_edit;
 
--- deletes: markers are table-wide, join every scope's candidates and must still mask their scope's rows
+-- deletes: a marker follows its row into the row's scope (the mirror recorded it), so only that scope's scans see it
 SET koldstore.hydrate_on_write = on;
-DELETE FROM sqlreg.ss WHERE id BETWEEN 100 AND 111;
-DELETE FROM sqlreg.ss_ctl WHERE id BETWEEN 100 AND 111;
+DELETE FROM sqlreg.ss WHERE user_id = 'user-a' AND id BETWEEN 100 AND 111;
+DELETE FROM sqlreg.ss_ctl WHERE user_id = 'user-a' AND id BETWEEN 100 AND 111;
 RESET koldstore.hydrate_on_write;
 SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS ss_fenced;
 SELECT sqlreg.flush_table('sqlreg.ss'::regclass) IS NOT NULL AS ss_reflushed;
 SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS ss_fenced_2;
 SELECT sqlreg.same_content('sqlreg.ss', 'sqlreg.ss_ctl', 'id') AS ss_content_equal;
+SELECT count(*) FILTER (WHERE scope_id IS NULL) AS ss_table_wide_after_deletes FROM koldstore.cold_segments
+WHERE table_oid = 'sqlreg.ss'::regclass::oid AND status = 'active';
+-- another scope never sees user-a's markers: its scan is still retention-free
+SET koldstore.max_merge_seen_keys = 15;
+SELECT count(*) AS ss_other_scope_under_cap_after_deletes FROM sqlreg.ss WHERE user_id = 'user-d';
+SELECT count(*) AS ss_deleting_scope_under_cap FROM sqlreg.ss WHERE user_id = 'user-a';
+RESET koldstore.max_merge_seen_keys;
 SELECT user_id, count(*) AS rows FROM sqlreg.ss WHERE user_id IN ('user-a', 'user-c') GROUP BY user_id ORDER BY user_id;
 SELECT user_id, count(*) AS rows FROM sqlreg.ss_ctl WHERE user_id IN ('user-a', 'user-c') GROUP BY user_id ORDER BY user_id;
 SELECT count(*) AS ss_deleted_visible FROM sqlreg.ss WHERE id BETWEEN 100 AND 111;

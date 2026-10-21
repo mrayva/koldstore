@@ -1,8 +1,9 @@
 -- Scoped cold storage, slice 1 (ADR-010): a user-scoped table flushes one segment group per scope. Each
 -- segment holds a single scope's rows, lives in that scope's folder (`{scopeId}/{folder}/segment-….parquet`,
--- percent-encoded) and records it in cold_segments.scope_id; delete markers carry no row values, so they
--- stay table-wide (scope_id NULL). Reads still consider every segment, so content must match an unmanaged
--- control, and compaction runs per scope without ever mixing scopes.
+-- percent-encoded) and records it in cold_segments.scope_id. A delete marker has no row values, but the mirror
+-- records each row's scope (mirror.scope_id) and a delete keeps it, so the marker is written to its row's scope
+-- group too. Content must match an unmanaged control, and compaction runs per scope without ever mixing
+-- scopes, dropping the markers it meets.
 
 \set VERBOSITY terse
 \set ON_ERROR_STOP off
@@ -59,7 +60,12 @@ SELECT count(*) AS sl_ann_rows FROM sqlreg.sl;
 RESET koldstore.user_id;
 RESET ROLE;
 
--- updates stay in their scope; deletes leave a table-wide marker segment
+-- the mirror of a scoped table records each row's scope
+SELECT count(*) AS sl_mirror_scope_column FROM pg_attribute
+WHERE attrelid = (SELECT mirror_relation FROM koldstore.schemas WHERE table_oid = 'sqlreg.sl'::regclass AND active)
+  AND attname = 'scope_id' AND NOT attisdropped;
+
+-- updates and deletes stay in their row's scope
 SET koldstore.hydrate_on_write = on;
 UPDATE sqlreg.sl SET v = 'edited' WHERE n % 5 = 0;
 UPDATE sqlreg.sl_ctl SET v = 'edited' WHERE n % 5 = 0;
@@ -71,7 +77,7 @@ SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS sl_fenced;
 SELECT sqlreg.flush_table('sqlreg.sl'::regclass) IS NOT NULL AS sl_reflushed;
 SELECT sqlreg.flush_table('sqlreg.sl'::regclass) IS NOT NULL AS sl_reflushed_2;
 SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS sl_fenced_2;
-SELECT count(*) FILTER (WHERE scope_id IS NULL) > 0 AS sl_marker_segment_is_table_wide,
+SELECT count(*) FILTER (WHERE scope_id IS NULL) AS sl_table_wide_segments,
        count(DISTINCT scope_id) AS sl_scopes
 FROM koldstore.cold_segments WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active';
 SELECT count(*) AS sl_misplaced_2 FROM koldstore.cold_segments
@@ -81,19 +87,18 @@ SELECT sqlreg.same_content('sqlreg.sl', 'sqlreg.sl_ctl', 'id') AS sl_content_equ
 
 -- compaction works per scope and never mixes them
 CREATE TEMP TABLE sl_before AS
-SELECT scope_id, count(*) AS segs FROM koldstore.cold_segments
+SELECT scope_id, count(*) AS segs, sum(row_count) AS rows FROM koldstore.cold_segments
 WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active' GROUP BY scope_id;
 SELECT (koldstore.compact_table('sqlreg.sl'::regclass, grace_seconds => 3600) ->> 'compacted')::boolean AS sl_compacted;
 SELECT sqlreg.same_content('sqlreg.sl', 'sqlreg.sl_ctl', 'id') AS sl_content_equal_after_compaction;
 SELECT count(*) AS sl_misplaced_3 FROM koldstore.cold_segments
 WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active' AND scope_id IS NOT NULL
   AND split_part(path, '/', 1) <> replace(replace(scope_id, '/', '%2F'), ' ', '%20');
--- the table-wide group (the delete markers) is left alone while scoped segments exist
-SELECT (SELECT segs FROM sl_before WHERE scope_id IS NULL) =
-       (SELECT count(*) FROM koldstore.cold_segments
-         WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active' AND scope_id IS NULL) AS sl_marker_group_untouched;
-SELECT count(*) FILTER (WHERE scope_id IS NOT NULL) <= (SELECT sum(segs) FROM sl_before WHERE scope_id IS NOT NULL) AS sl_scoped_segments_not_more
-FROM koldstore.cold_segments WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active';
+SELECT count(*) AS sl_table_wide_after FROM koldstore.cold_segments
+WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active' AND scope_id IS NULL;
+-- the markers and the versions they masked are gone: fewer rows stored than before
+SELECT (SELECT sum(row_count) FROM koldstore.cold_segments
+         WHERE table_oid = 'sqlreg.sl'::regclass::oid AND status = 'active') < (SELECT sum(rows) FROM sl_before) AS sl_rows_shrank;
 SELECT (koldstore.compact_table('sqlreg.sl'::regclass, grace_seconds => 3600) ->> 'compacted')::boolean AS sl_noop_second;
 
 SELECT koldstore.reap_compacted_segments('sqlreg.sl'::regclass, 0) > 0 AS sl_reaped;

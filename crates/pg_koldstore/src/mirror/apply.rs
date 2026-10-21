@@ -30,7 +30,7 @@ use koldstore_wal_mirror::{
     budget_hit, decode_message, must_flush_before_push, pk_column_indexes, pk_identity,
     pk_type_oids, plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_update,
     plan_async_mirror_batch_upsert, resolve_row_budget, resolve_time_budget,
-    take_pk_cells_and_order_text, PgOutputMessage, PgOutputRelation, PgOutputTuple, PkBindColumn,
+    take_pk_cells_order_and_scope_text, PgOutputMessage, PgOutputRelation, PgOutputTuple, PkBindColumn,
     PkCell, PkIdentity, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
@@ -61,6 +61,8 @@ struct ManagedRelation {
     mirror: String,
     primary_key: Vec<String>,
     order_column: Option<OrderColumnConfig>,
+    /// Scope column of a user-scoped table whose mirror records each row's scope (ADR-010).
+    scope_column: Option<String>,
     /// Cached `format_type` spellings for each primary-key column.
     pk_type_names: Option<Vec<String>>,
     /// Cached relation-tuple indexes for managed PK columns.
@@ -89,6 +91,10 @@ impl ManagedRelation {
     fn include_order_key(&self) -> bool {
         self.order_column.is_some()
     }
+
+    fn include_scope(&self) -> bool {
+        self.scope_column.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,11 +109,13 @@ struct ApplyBatch {
     pk_columns: Vec<PkBindColumn>,
     seqs: Vec<i64>,
     order_keys: Option<Vec<Vec<u8>>>,
+    /// One entry per row (`None` = not recorded) when the mirror carries scope ids.
+    scope_ids: Option<Vec<Option<String>>>,
     seen: HashSet<PkIdentity>,
 }
 
 impl ApplyBatch {
-    fn new(key: BatchKey, type_oids: &[u32], include_order_key: bool) -> Self {
+    fn new(key: BatchKey, type_oids: &[u32], include_order_key: bool, include_scope: bool) -> Self {
         Self {
             key,
             pk_columns: type_oids
@@ -116,6 +124,7 @@ impl ApplyBatch {
                 .collect(),
             seqs: Vec::with_capacity(APPLY_BATCH_ROWS),
             order_keys: include_order_key.then(|| Vec::with_capacity(APPLY_BATCH_ROWS)),
+            scope_ids: include_scope.then(|| Vec::with_capacity(APPLY_BATCH_ROWS)),
             seen: HashSet::with_capacity(APPLY_BATCH_ROWS),
         }
     }
@@ -129,6 +138,7 @@ impl ApplyBatch {
         pk_cells: Vec<PkCell>,
         seq: i64,
         order_key: Option<Vec<u8>>,
+        scope: Option<String>,
     ) -> Result<(), String> {
         if pk_cells.len() != self.pk_columns.len() {
             return Err(format!(
@@ -145,6 +155,9 @@ impl ApplyBatch {
             order_keys.push(
                 order_key.ok_or_else(|| "async mirror batch row missing order_key".to_string())?,
             );
+        }
+        if let Some(scope_ids) = self.scope_ids.as_mut() {
+            scope_ids.push(scope);
         }
         Ok(())
     }
@@ -673,7 +686,7 @@ fn push_change(
     let relation = relations
         .get(&relation_id)
         .ok_or_else(|| format!("pgoutput row references unknown relation {relation_id}"))?;
-    let (pk_cells, include_order_key, table_oid, type_oids, order_key, identity, key) = {
+    let (pk_cells, include_order_key, include_scope, table_oid, type_oids, order_key, scope_text, identity, key) = {
         let config = managed_relation(managed, relation_id)?;
         let Some(config) = config else {
             return Ok(());
@@ -699,12 +712,19 @@ fn push_change(
         } else {
             None
         };
-        let (pk_cells, order_text) = take_pk_cells_and_order_text(
+        let include_scope = config.include_scope();
+        // A delete carries no scope (old tuple = key only): the mirror keeps what the row recorded.
+        let scope_column_name = config
+            .scope_column
+            .as_deref()
+            .filter(|_| operation != MirrorOperation::Delete);
+        let (pk_cells, order_text, scope_text) = take_pk_cells_order_and_scope_text(
             relation,
             &config.primary_key,
             key_columns,
             pk_type_oids,
             order_column_name,
+            scope_column_name,
             &mut tuple,
         )?;
         let table_oid = config.table_oid.to_u32();
@@ -749,9 +769,11 @@ fn push_change(
         (
             pk_cells,
             include_order_key,
+            include_scope,
             table_oid,
             type_oids,
             order_key,
+            scope_text,
             identity,
             key,
         )
@@ -770,13 +792,13 @@ fn push_change(
         flush_batch(batch, relations, managed, type_names)?;
     }
     if let Some(type_oids) = type_oids {
-        *batch = Some(ApplyBatch::new(key, &type_oids, include_order_key));
+        *batch = Some(ApplyBatch::new(key, &type_oids, include_order_key, include_scope));
     }
     let current = batch
         .as_mut()
         .expect("apply batch exists after optional open");
     current.seen.insert(identity);
-    current.push(pk_cells, seq, order_key)?;
+    current.push(pk_cells, seq, order_key, scope_text)?;
     Ok(())
 }
 
@@ -833,6 +855,7 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
             name: order.name,
             type_oid: order.type_oid,
         }),
+        scope_column: meta.scope_column,
         pk_type_names: None,
         pk_indexes: None,
         pk_type_oids: None,
@@ -905,6 +928,7 @@ fn apply_batch(
         .collect::<Vec<_>>();
     let pk_types = config.pk_type_names.as_ref().expect("pk types populated");
     let include_order_key = config.include_order_key();
+    let include_scope = config.include_scope();
     let operation = batch.key.operation;
     let sql = match operation {
         MirrorOperation::Update => {
@@ -915,6 +939,7 @@ fn apply_batch(
                         &pk_refs,
                         pk_types,
                         include_order_key,
+                        include_scope,
                     )
                     .map_err(|error| error.to_string())?,
                 );
@@ -938,6 +963,7 @@ fn apply_batch(
                         &pk_refs,
                         pk_types,
                         include_order_key,
+                        include_scope,
                     )
                     .map_err(|error| error.to_string())?,
                 );
@@ -950,8 +976,11 @@ fn apply_batch(
         pk_columns,
         seqs,
         order_keys,
+        scope_ids,
         ..
     } = batch;
+    // The delete-existing statement (ordered tables) only touches existing rows and takes no scope.
+    let scope_ids = scope_ids.filter(|_| !(operation == MirrorOperation::Delete && include_order_key));
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
         let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 3);
         args.push(DatumWithOid::from(operation.code()));
@@ -961,6 +990,9 @@ fn apply_batch(
         args.push(DatumWithOid::from(seqs));
         if let Some(order_keys) = order_keys {
             args.push(DatumWithOid::from(order_keys));
+        }
+        if let Some(scope_ids) = scope_ids {
+            args.push(DatumWithOid::from(scope_ids));
         }
         let table = client
             .select(sql, None, &args)

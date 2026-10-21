@@ -19,7 +19,7 @@ pub use guard::{
 pub use r#async::{
     decode_message, must_flush_before_push, order_column_text, parse_pk_bool, parse_pk_ints,
     pg_value_text, pk_column_indexes, pk_identity, pk_type_oids, primary_key_cells,
-    take_pk_cells_and_order_text, BatchFlushReason, PgOutputColumn, PgOutputDecodeError,
+    take_pk_cells_and_order_text, take_pk_cells_order_and_scope_text, BatchFlushReason, PgOutputColumn, PgOutputDecodeError,
     PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue, PkBindColumn, PkCell,
     PkIdentity, APPLY_BATCH_ROWS, BOOLOID, INT2OID, INT4OID, INT8OID,
 };
@@ -31,7 +31,7 @@ pub use shared::{
     plan_mirror_relation_rename, plan_mirror_schema, plan_mirror_schema_with_order_key,
     plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,
     plan_select_mirror_rows_after_seq, plan_select_mirror_rows_after_seq_with_params,
-    plan_upsert_mirror_row, published_column_list, quoted_pk_columns, MirrorColumn, MirrorError,
+    plan_upsert_mirror_row, published_column_list, published_column_list_with_scope, quoted_pk_columns, MirrorColumn, MirrorError,
     MirrorRelation, MirrorResult, MirrorSchemaPlan, MirrorSeqStats, SqlAccess, SqlParamType,
     SqlStatement, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
 };

@@ -55,6 +55,11 @@ SET
 
 RESET
 RESET
+ sl_mirror_scope_column
+------------------------
+                      1
+(1 row)
+
 SET
 UPDATE 48
 UPDATE 48
@@ -81,9 +86,9 @@ RESET
  t
 (1 row)
 
- sl_marker_segment_is_table_wide | sl_scopes
----------------------------------+-----------
- t                               |         4
+ sl_table_wide_segments | sl_scopes
+------------------------+-----------
+                      0 |         4
 (1 row)
 
  sl_misplaced_2
@@ -96,7 +101,7 @@ RESET
  t
 (1 row)
 
-SELECT 5
+SELECT 4
  sl_compacted
 --------------
  t
@@ -112,13 +117,13 @@ SELECT 5
               0
 (1 row)
 
- sl_marker_group_untouched
----------------------------
- t
+ sl_table_wide_after
+---------------------
+                   0
 (1 row)
 
- sl_scoped_segments_not_more
------------------------------
+ sl_rows_shrank
+----------------
  t
 (1 row)
 

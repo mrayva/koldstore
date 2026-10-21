@@ -324,6 +324,37 @@ pub fn take_pk_cells_and_order_text(
     Ok((cells, order_text))
 }
 
+/// Like [`take_pk_cells_and_order_text`], also reading the row's scope (user-scoped tables).
+///
+/// The scope is best effort: a NULL, unchanged-TOAST, omitted or non-text value yields `None`
+/// (the mirror then keeps whatever scope the row already had), never an error, because a row
+/// without a recorded scope is simply written to the table-wide group.
+///
+/// # Errors
+///
+/// As [`take_pk_cells_and_order_text`].
+#[allow(clippy::too_many_arguments)]
+pub fn take_pk_cells_order_and_scope_text(
+    relation: &PgOutputRelation,
+    primary_key: &[String],
+    key_columns: &[usize],
+    type_oids: &[u32],
+    order_column: Option<&str>,
+    scope_column: Option<&str>,
+    tuple: &mut PgOutputTuple,
+) -> Result<(Vec<PkCell>, Option<String>, Option<String>), String> {
+    let scope_text = scope_column.and_then(|name| {
+        let index = relation.columns.iter().position(|column| column.name == name)?;
+        match tuple.values.get(index)? {
+            PgOutputValue::Text(text) if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        }
+    });
+    let (cells, order_text) =
+        take_pk_cells_and_order_text(relation, primary_key, key_columns, type_oids, order_column, tuple)?;
+    Ok((cells, order_text, scope_text))
+}
+
 /// Reads one published column as pgoutput text without taking it.
 ///
 /// # Errors

@@ -15,7 +15,7 @@ pub mod write;
 
 pub use columns::MirrorColumn;
 pub use error::{MirrorError, MirrorResult};
-pub use publication::published_column_list;
+pub use publication::{published_column_list, published_column_list_with_scope};
 pub use read::{
     plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats,
     plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,

@@ -11,7 +11,7 @@ use koldstore_common::{quote_ident, QualifiedTableName};
 use koldstore_supervisor::DatabaseOid;
 use koldstore_wal_mirror::{
     flush_replication_origin_name as wal_flush_origin_name,
-    is_flush_replication_origin as wal_is_flush_replication_origin, published_column_list,
+    is_flush_replication_origin as wal_is_flush_replication_origin, published_column_list_with_scope,
     slot_name as wal_slot_name,
 };
 use pgrx::datum::DatumWithOid;
@@ -194,6 +194,7 @@ pub(crate) fn activate_table(
     _mirror: &QualifiedTableName,
     primary_key: &koldstore_common::PrimaryKeyShape,
     order_column: Option<&str>,
+    scope_column: Option<&str>,
 ) -> Result<(), String> {
     let publication = quote_ident(PUBLICATION_NAME);
 
@@ -217,7 +218,7 @@ pub(crate) fn activate_table(
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     if !is_member {
-        let published_columns = published_column_list(primary_key, order_column);
+        let published_columns = published_column_list_with_scope(primary_key, order_column, scope_column);
         pgrx::Spi::run(&format!(
             "ALTER PUBLICATION {publication} ADD TABLE {} ({published_columns})",
             source.quoted(),
@@ -226,7 +227,7 @@ pub(crate) fn activate_table(
     } else {
         // Renames keep publication membership by attnum; refresh the explicit
         // column list so pgoutput Relation messages use current names.
-        reconcile_publication_columns(source, primary_key, order_column)?;
+        reconcile_publication_columns(source, primary_key, order_column, scope_column)?;
     }
 
     // Activation is transactional. The dirty scheduling bit is published only
@@ -241,9 +242,10 @@ fn reconcile_publication_columns(
     source: &QualifiedTableName,
     primary_key: &koldstore_common::PrimaryKeyShape,
     order_column: Option<&str>,
+    scope_column: Option<&str>,
 ) -> Result<(), String> {
     let publication = quote_ident(PUBLICATION_NAME);
-    let published_columns = published_column_list(primary_key, order_column);
+    let published_columns = published_column_list_with_scope(primary_key, order_column, scope_column);
     pgrx::Spi::run(&format!(
         "ALTER PUBLICATION {publication} SET TABLE {} ({published_columns})",
         source.quoted(),

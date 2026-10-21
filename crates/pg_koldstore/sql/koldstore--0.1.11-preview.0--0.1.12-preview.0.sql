@@ -428,3 +428,17 @@ ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS key_max bytea;
 
 -- Scoped cold storage (ADR-010, slice 1): the scope a segment's rows belong to; NULL = table-wide.
 ALTER TABLE koldstore.cold_segments ADD COLUMN IF NOT EXISTS scope_id text;
+
+-- Delete markers follow their row's scope (ADR-010): the mirror of a user-scoped table records each row's
+-- scope. Existing scoped mirrors get the column; their publication column list picks up the scope column
+-- the next time the table is (re)managed.
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT s.mirror_relation::regclass AS mirror FROM koldstore.schemas s
+           WHERE s.active AND s.mirror_relation IS NOT NULL AND (s.options->>'scope_column_id') IS NOT NULL
+  LOOP
+    EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS scope_id text', r.mirror);
+  END LOOP;
+END
+$$;

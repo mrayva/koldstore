@@ -122,6 +122,7 @@ pub fn plan_async_mirror_batch_upsert(
     primary_key: &[&str],
     pk_type_names: &[String],
     include_order_key: bool,
+    include_scope: bool,
 ) -> MirrorResult<String> {
     if primary_key.len() != pk_type_names.len() {
         return Err(MirrorError::InvalidColumn(
@@ -132,7 +133,7 @@ pub fn plan_async_mirror_batch_upsert(
     let conflict_keys = quoted_keys.join(", ");
     let pk_count = quoted_keys.len();
     // $1 = op; $2..$(pk_count+1) = pk arrays; $(pk_count+2) = seq bigint[]
-    // optional $(pk_count+3) = order_key bytea[]
+    // optional $(pk_count+3) = order_key bytea[]; then, when `include_scope`, one text[] of scope ids
     let mut unnest_args = Vec::with_capacity(pk_count + 2);
     let mut unnest_aliases = Vec::with_capacity(pk_count + 2);
     let mut select_keys = Vec::with_capacity(pk_count + 2);
@@ -153,13 +154,19 @@ pub fn plan_async_mirror_batch_upsert(
         unnest_aliases.push("order_key".to_string());
         select_keys.push("incoming.order_key AS \"order_key\"".to_string());
     }
+    if include_scope {
+        let scope_param = pk_count + 3 + usize::from(include_order_key);
+        unnest_args.push(format!("${scope_param}::text[]"));
+        unnest_aliases.push("scope_id".to_string());
+        select_keys.push("incoming.scope_id AS \"scope_id\"".to_string());
+    }
 
-    let insert_columns = if include_order_key {
+    let mut insert_columns = if include_order_key {
         format!("{conflict_keys}, \"order_key\", \"seq\", \"op\"")
     } else {
         format!("{conflict_keys}, \"seq\", \"op\"")
     };
-    let insert_select_cols = quoted_keys
+    let mut insert_select_cols = quoted_keys
         .iter()
         .map(|key| format!("incoming.{key}"))
         .chain(include_order_key.then(|| "incoming.\"order_key\"".to_string()))
@@ -167,8 +174,15 @@ pub fn plan_async_mirror_batch_upsert(
         .collect::<Vec<_>>()
         .join(", ");
     // Order keys are immutable per PK; keep the first encoded value on conflict.
-    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\"";
+    let mut conflict_set = "\"seq\" = EXCLUDED.\"seq\", \"op\" = EXCLUDED.\"op\"".to_string();
+    if include_scope {
+        // A delete carries no scope: keep the one the row's last insert/update recorded.
+        insert_columns.push_str(", \"scope_id\"");
+        insert_select_cols.push_str(", incoming.\"scope_id\"");
+        conflict_set.push_str(&format!(
+            ", \"scope_id\" = COALESCE(EXCLUDED.\"scope_id\", {mirror_quoted}.\"scope_id\")"
+        ));
+    }
     Ok(format!(
         "WITH incoming AS (\
            SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
@@ -207,6 +221,7 @@ pub fn plan_async_mirror_batch_update(
     primary_key: &[&str],
     pk_type_names: &[String],
     include_order_key: bool,
+    include_scope: bool,
 ) -> MirrorResult<String> {
     if primary_key.len() != pk_type_names.len() {
         return Err(MirrorError::InvalidColumn(
@@ -236,6 +251,12 @@ pub fn plan_async_mirror_batch_update(
         unnest_aliases.push("order_key".to_string());
         projected.push("incoming.order_key AS \"order_key\"".to_string());
     }
+    if include_scope {
+        let scope_param = pk_count + 3 + usize::from(include_order_key);
+        unnest_args.push(format!("${scope_param}::text[]"));
+        unnest_aliases.push("scope_id".to_string());
+        projected.push("incoming.scope_id AS \"scope_id\"".to_string());
+    }
 
     let update_join = quoted_keys
         .iter()
@@ -252,23 +273,30 @@ pub fn plan_async_mirror_batch_update(
         .map(|key| format!("mirror.{key}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let update_set = "\"seq\" = incoming.\"seq\", \
-               \"op\" = $1::smallint";
-    let incoming_values = quoted_keys
+    let mut update_set = "\"seq\" = incoming.\"seq\", \"op\" = $1::smallint".to_string();
+    let mut incoming_values = quoted_keys
         .iter()
         .map(|key| format!("incoming.{key}"))
         .chain(include_order_key.then(|| "incoming.\"order_key\"".to_string()))
         .chain(["incoming.\"seq\"".to_string(), "$1::smallint".to_string()])
         .collect::<Vec<_>>()
         .join(", ");
-    let insert_columns = if include_order_key {
+    let mut insert_columns = if include_order_key {
         format!("{conflict_keys}, \"order_key\", \"seq\", \"op\"")
     } else {
         format!("{conflict_keys}, \"seq\", \"op\"")
     };
     // Order keys are immutable per PK; keep the first encoded value on conflict.
-    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\"";
+    let mut conflict_set = "\"seq\" = EXCLUDED.\"seq\", \"op\" = EXCLUDED.\"op\"".to_string();
+    if include_scope {
+        // An update that cannot name the scope keeps the one already recorded.
+        update_set.push_str(", \"scope_id\" = COALESCE(incoming.\"scope_id\", mirror.\"scope_id\")");
+        insert_columns.push_str(", \"scope_id\"");
+        incoming_values.push_str(", incoming.\"scope_id\"");
+        conflict_set.push_str(&format!(
+            ", \"scope_id\" = COALESCE(EXCLUDED.\"scope_id\", {mirror_quoted}.\"scope_id\")"
+        ));
+    }
     let missing_key = quoted_keys
         .first()
         .expect("primary-key planner rejects an empty key");

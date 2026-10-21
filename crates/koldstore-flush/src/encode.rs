@@ -94,6 +94,8 @@ pub struct StreamEncodeInput {
     /// whenever the scope changes, so no segment mixes scopes. Delete markers carry no row values and
     /// belong to the table-wide (`None`) group. `None` for tables that are not user-scoped.
     pub scope_column_index: Option<usize>,
+    /// The mirror has a `scope_id` column: select it, so a delete marker keeps its row's scope.
+    pub mirror_scope: bool,
 }
 
 /// Exclusive lower-bound cursor for one mirror flush page fetch.
@@ -167,12 +169,13 @@ pub fn group_rows_by_scope(rows: Vec<FlushMirrorRow>, scope_column_index: usize)
     groups.into_values().flatten().collect()
 }
 
-/// The scope a flushed row belongs to: the text of its scope-column value, or `None` for a delete
-/// marker (no values), a NULL scope or an empty one (none of which can name a folder).
+/// The scope a flushed row belongs to: the text of its scope-column value (a delete marker's is the
+/// one the mirror recorded), or `None` for a NULL or empty scope, which cannot name a folder.
 #[must_use]
 pub fn row_scope(row: &FlushMirrorRow, scope_column_index: usize) -> Option<String> {
+    // A delete marker has no row values: its scope is the one the mirror recorded for the row.
     if row.op == 3 {
-        return None;
+        return row.scope.clone().filter(|scope| !scope.is_empty());
     }
     let text = match row.values.get(scope_column_index)? {
         CellValue::Utf8(text) => text.clone(),
@@ -594,15 +597,15 @@ where
     F: FnMut(&SqlStatement, i64, &MirrorFlushPageCursor) -> Result<Vec<FlushMirrorRow>, String>,
     W: FnMut(FlushWriteChunk) -> Result<(), String>,
 {
-    let selection = crate::ops::plan_mirror_flush_selection_batch_with_order_key(
+    let selection = crate::ops::plan_mirror_flush_selection_batch_with_scope(
         &input.table,
         &input.mirror,
         &input.primary_key_columns,
         &input.base_column_names,
-        None,
         input.mirror_ops.as_deref(),
         input.sort_by_order_key,
         &input.primary_key_param_types,
+        input.mirror_scope,
     )
     .map_err(|error| error.to_string())?;
 
@@ -716,6 +719,7 @@ mod tests {
             sort_by_order_key: false,
             order_key_column: None,
             scope_column_index: None,
+            mirror_scope: false,
         }
     }
 
@@ -726,6 +730,7 @@ mod tests {
                 op: 1,
                 values: vec![CellValue::Int64(seq), CellValue::Utf8("payload".repeat(20))],
                 order_key: None,
+                scope: None,
             })
             .collect()
     }
@@ -904,6 +909,7 @@ mod tests {
                         op: 1,
                         values: vec![CellValue::Int64(seq), CellValue::Int32(i32::try_from(seq).unwrap() * 10)],
                         order_key: None,
+                        scope: None,
                     })
                     .collect())
             },
@@ -968,18 +974,21 @@ mod tests {
                 op: 1,
                 values: vec![CellValue::Int64(1), CellValue::Utf8("a".into())],
                 order_key: Some(vec![5]),
+                scope: None,
             },
             FlushMirrorRow {
                 seq: 2,
                 op: 1,
                 values: vec![CellValue::Int64(2), CellValue::Utf8("b".into())],
                 order_key: Some(vec![10]),
+                scope: None,
             },
             FlushMirrorRow {
                 seq: 1,
                 op: 1,
                 values: vec![CellValue::Int64(3), CellValue::Utf8("c".into())],
                 order_key: Some(vec![10]),
+                scope: None,
             },
         ];
         let mut page_idx = 0_usize;
@@ -1043,6 +1052,7 @@ mod tests {
                     op: 1,
                     values: vec![CellValue::Int64(1), CellValue::Utf8("x".into())],
                     order_key: None,
+                    scope: None,
                 }])
             },
             |_| Ok(()),
@@ -1063,8 +1073,10 @@ mod tests {
                 if op == 3 { CellValue::Null } else { CellValue::Utf8(body.to_string()) },
             ],
             order_key: None,
+            // a delete marker has no values: the mirror recorded the scope of the row it deleted
+            scope: (op == 3).then(|| "bob".to_string()),
         };
-        // grouped by scope (as the flush executor groups a pass); the delete marker is table-wide
+        // grouped by scope (as the flush executor groups a pass): the delete marker follows its scope
         let pass = vec![row(1, 1, "alice"), row(2, 2, "alice"), row(3, 1, "bob"), row(4, 3, ""), row(5, 1, "")];
         let mut served = false;
         let mut scopes = Vec::new();
@@ -1085,8 +1097,8 @@ mod tests {
             },
         )
         .unwrap();
-        // the empty scope value of seq 5 is table-wide too, and follows the delete marker's group
+        // the empty scope value of seq 5 is table-wide
         assert_eq!(scopes, vec![Some("alice".to_string()), Some("bob".to_string()), None]);
-        assert_eq!(counts, vec![2, 1, 2]);
+        assert_eq!(counts, vec![2, 2, 1]);
     }
 }

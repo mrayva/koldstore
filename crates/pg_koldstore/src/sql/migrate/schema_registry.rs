@@ -236,11 +236,13 @@ pub(crate) fn sync_active_mirror_relation_name(
     for statement in pk_guard.create_statements() {
         pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
     }
+    let scope_column = koldstore_migrate::resolve_scope_column_name(&active, &catalog, &options);
     crate::mirror::lifecycle::activate_table(
         &source,
         &new_mirror,
         &primary_key_shape,
         order_column,
+        scope_column.as_deref(),
     )?;
     crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();
@@ -408,6 +410,7 @@ fn sync_runtime_artifacts_after_schema_refresh(
         &mirror,
         primary_key_shape,
         order_column_name,
+        scope_column.as_deref(),
     )?;
     Ok(())
 }

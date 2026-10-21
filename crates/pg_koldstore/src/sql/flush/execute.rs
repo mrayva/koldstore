@@ -71,6 +71,9 @@ pub(super) struct FlushPreparedContext {
     pub(super) parquet_row_group_size: usize,
     pub(super) parquet_data_page_row_count_limit: Option<usize>,
     pub(super) parquet_bloom_filter_false_positive_rate: Option<f64>,
+    /// The mirror records each row's scope (`scope_id`), so delete markers can follow their rows into
+    /// a scope's folder (ADR-010). False for tables that are not user-scoped and for older mirrors.
+    pub(super) mirror_has_scope: bool,
 }
 
 /// Acquires the session table-job lock without waiting.
@@ -216,6 +219,16 @@ pub(super) fn load_flush_prepared_context(
                 .map(|column| column.name.clone())
                 .collect()
         });
+    let mirror_has_scope = snapshot.scope_column_id.is_some() && {
+        let mirror_name = QualifiedTableName::from_table_name(&snapshot.mirror_relation).quoted();
+        pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute \
+             WHERE attrelid = to_regclass($1) AND attname = 'scope_id' AND NOT attisdropped)",
+            &[pgrx::datum::DatumWithOid::from(mirror_name.as_str())],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false)
+    };
     Ok(FlushPreparedContext {
         job_id,
         attempt_token,
@@ -231,6 +244,7 @@ pub(super) fn load_flush_prepared_context(
         parquet_row_group_size,
         parquet_data_page_row_count_limit,
         parquet_bloom_filter_false_positive_rate,
+        mirror_has_scope,
     })
 }
 
@@ -347,6 +361,7 @@ pub(super) fn build_stream_encode_input(
                 .iter()
                 .position(|column| column.column_id == scope_id)
         }),
+        mirror_scope: ctx.mirror_has_scope,
     };
     Ok((encode_input, primary_key_columns))
 }
@@ -403,7 +418,7 @@ fn stream_write_flush_batches(
             &encode_input,
             |statement, max_seq, cursor| {
                 let page_size = usize::try_from(fetch_batch_size).unwrap_or(1).max(1);
-                let mut fetch = |cursor: &koldstore_flush::MirrorFlushPageCursor| {
+                let fetch = |cursor: &koldstore_flush::MirrorFlushPageCursor| {
                     // Short: each mirror fetch is its own catalog transaction.
                     commit_style.run_spi(|| {
                         fetch_mirror_batch(
@@ -414,6 +429,7 @@ fn stream_write_flush_batches(
                             cursor,
                             fetch_batch_size,
                             ctx.snapshot.segment_order_column_id.is_some(),
+                            encode_input.mirror_scope,
                         )
                     })
                 };

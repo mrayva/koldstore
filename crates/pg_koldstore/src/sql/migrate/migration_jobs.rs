@@ -125,13 +125,14 @@ pub(super) fn run_existing_table_mirror_initialization_inline(
     segment_order_column: Option<&str>,
     job_id: Uuid,
 ) -> Result<i64, String> {
-    let batch = koldstore_migrate::backfill::plan_mirror_initialization_batch_with_segment_order(
+    let batch = koldstore_migrate::backfill::plan_mirror_initialization_batch_with_scope(
         &plan.table,
         &mirror_plan.mirror_table,
         primary_key_shape.columns(),
         plan.ordering.clone(),
         plan.backfill_batch_size,
         segment_order_column,
+        plan.effective_scope_column.as_deref(),
     )
     .map_err(|error| error.to_string())?;
     let mut processed_rows = 0_i64;
