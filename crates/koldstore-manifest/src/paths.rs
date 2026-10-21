@@ -52,16 +52,18 @@ pub fn relative_manifest_shard_content_path(folder: u32, content_sha256: &str) -
     format!("{folder:03}/manifest-shard-{path_token}.json")
 }
 
-/// First path component of a table-relative segment path (`001/segment-….parquet`).
+/// Folder of a table-relative segment path: `001/segment-….parquet`, or for a user-scoped table
+/// `{scopeId}/001/segment-….parquet` (ADR-010), where the leading component is the percent-encoded
+/// scope and the folder is the one after it.
 #[must_use]
 pub(crate) fn folder_from_segment_relative_path(path: &str) -> Option<&str> {
-    let (folder, file_name) = path.split_once('/')?;
-    if parse_folder_name(folder).is_none()
-        || file_name.is_empty()
-        || file_name.contains('/')
-        || file_name == "."
-        || file_name == ".."
-    {
+    let parts: Vec<&str> = path.split('/').collect();
+    let (folder, file_name) = match parts.as_slice() {
+        [folder, file_name] => (*folder, *file_name),
+        [scope, folder, file_name] if !scope.is_empty() && *scope != "." && *scope != ".." => (*folder, *file_name),
+        _ => return None,
+    };
+    if parse_folder_name(folder).is_none() || file_name.is_empty() || file_name == "." || file_name == ".." {
         return None;
     }
     Some(folder)
@@ -130,5 +132,17 @@ mod tests {
             relative_manifest_path("app", "items"),
             "app/items/manifest.json"
         );
+    }
+
+    #[test]
+    fn scoped_segment_paths_resolve_to_their_folder() {
+        assert_eq!(
+            folder_from_segment_relative_path("alice/003/segment-0003-aaaaaaaa.parquet"),
+            Some("003")
+        );
+        assert_eq!(folder_from_segment_relative_path("%2E%2E/003/segment-0003-a.parquet"), Some("003"));
+        assert_eq!(folder_from_segment_relative_path("../003/segment-0003-a.parquet"), None);
+        assert_eq!(folder_from_segment_relative_path("a/b/c/segment-0003-a.parquet"), None);
+        assert_eq!(folder_from_segment_relative_path("alice/notafolder/segment-1.parquet"), None);
     }
 }

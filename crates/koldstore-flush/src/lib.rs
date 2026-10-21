@@ -38,7 +38,8 @@ pub use cleanup::{
     cleanup_allowed, plan_seq_range_cleanup, retain_tombstone, CleanSchemaCleanupPlan,
 };
 pub use encode::{
-    stream_flush_chunks, MirrorFlushPageCursor, StreamEncodeInput, StreamEncodeOutcome,
+    group_rows_by_scope, initial_page_cursor, next_page_cursor, row_scope, stream_flush_chunks,
+    MirrorFlushPageCursor, StreamEncodeInput, StreamEncodeOutcome,
 };
 pub use ops::{
     classify_command, flush_table_request, plan_count_pending_flush_jobs,

@@ -45,6 +45,7 @@ column cold_segments.row_group_max_seqs bigint[] not null
 column cold_segments.row_group_min_seqs bigint[] not null
 column cold_segments.row_group_row_counts bigint[] not null
 column cold_segments.schema_version integer not null
+column cold_segments.scope_id text
 column cold_segments.scope_key text not null
 column cold_segments.segment_id uuid not null
 column cold_segments.segment_ordinal integer

@@ -89,6 +89,11 @@ pub struct StreamEncodeInput {
     pub sort_by_order_key: bool,
     /// Application column name for [`Self::sort_by_order_key`] (Parquet sort metadata).
     pub order_key_column: Option<String>,
+    /// Position of the scope column in [`Self::base_column_names`] for a user-scoped table. Rows are
+    /// then expected grouped by scope (the flush executor groups each pass) and a segment is closed
+    /// whenever the scope changes, so no segment mixes scopes. Delete markers carry no row values and
+    /// belong to the table-wide (`None`) group. `None` for tables that are not user-scoped.
+    pub scope_column_index: Option<usize>,
 }
 
 /// Exclusive lower-bound cursor for one mirror flush page fetch.
@@ -108,6 +113,76 @@ pub enum MirrorFlushPageCursor {
         /// `seq` from the previous page's last row (ignored on the first page).
         after_seq: i64,
     },
+}
+
+/// Cursor of the first mirror page of a pass.
+#[must_use]
+pub fn initial_page_cursor(input: &StreamEncodeInput) -> MirrorFlushPageCursor {
+    if input.sort_by_order_key {
+        MirrorFlushPageCursor::AfterOrderKey {
+            after_order_key: None,
+            after_pk_values: Vec::new(),
+            after_seq: 0,
+        }
+    } else {
+        MirrorFlushPageCursor::AfterSeq { after_seq: 0 }
+    }
+}
+
+/// Cursor of the page that follows one ending at `last`. `pk_indices` are the primary-key positions
+/// in the row values (`koldstore_parquet::pk_column_indices`).
+#[must_use]
+pub fn next_page_cursor(
+    input: &StreamEncodeInput,
+    pk_indices: &[usize],
+    last: &FlushMirrorRow,
+) -> MirrorFlushPageCursor {
+    if input.sort_by_order_key {
+        let after_pk_values = pk_indices
+            .iter()
+            .map(|index| last.values.get(*index).cloned().unwrap_or(CellValue::Null))
+            .collect();
+        MirrorFlushPageCursor::AfterOrderKey {
+            after_order_key: last.order_key.clone(),
+            after_pk_values,
+            after_seq: last.seq,
+        }
+    } else {
+        MirrorFlushPageCursor::AfterSeq {
+            after_seq: last.seq,
+        }
+    }
+}
+
+/// Stable-groups a pass's rows by scope (rows keep their relative order inside a scope), so the
+/// encoder can close one segment per scope. Delete markers and rows without a usable scope form the
+/// table-wide group.
+#[must_use]
+pub fn group_rows_by_scope(rows: Vec<FlushMirrorRow>, scope_column_index: usize) -> Vec<FlushMirrorRow> {
+    let mut groups: std::collections::BTreeMap<Option<String>, Vec<FlushMirrorRow>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        groups.entry(row_scope(&row, scope_column_index)).or_default().push(row);
+    }
+    groups.into_values().flatten().collect()
+}
+
+/// The scope a flushed row belongs to: the text of its scope-column value, or `None` for a delete
+/// marker (no values), a NULL scope or an empty one (none of which can name a folder).
+#[must_use]
+pub fn row_scope(row: &FlushMirrorRow, scope_column_index: usize) -> Option<String> {
+    if row.op == 3 {
+        return None;
+    }
+    let text = match row.values.get(scope_column_index)? {
+        CellValue::Utf8(text) => text.clone(),
+        CellValue::Int16(value) => value.to_string(),
+        CellValue::Int32(value) => value.to_string(),
+        CellValue::Int64(value) => value.to_string(),
+        CellValue::Bool(value) => value.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 /// Accumulates the primary-key membership summary of the segment being written.
@@ -533,19 +608,13 @@ where
 
     let pk_indices =
         koldstore_parquet::pk_column_indices(&input.base_column_names, &input.primary_key_columns)?;
-    let mut cursor = if input.sort_by_order_key {
-        MirrorFlushPageCursor::AfterOrderKey {
-            after_order_key: None,
-            after_pk_values: Vec::new(),
-            after_seq: 0,
-        }
-    } else {
-        MirrorFlushPageCursor::AfterSeq { after_seq: 0 }
-    };
+    let mut cursor = initial_page_cursor(input);
     let mut rows_written = 0_usize;
     let mut max_seq = 0_i64;
     let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns)?;
     let mut segment_builder = SegmentBuilder::new(input);
+    // Scope of the segment being built (user-scoped tables): the outer `None` means no row yet.
+    let mut current_scope: Option<Option<String>> = None;
 
     loop {
         let batch = fetch_batch(&selection.statement, input.max_seq, &cursor)?;
@@ -558,6 +627,21 @@ where
         }
         for row in &batch {
             max_seq = max_seq.max(row.seq);
+            if let Some(index) = input.scope_column_index {
+                let scope = row_scope(row, index);
+                if current_scope.as_ref().is_some_and(|current| *current != scope) {
+                    // A different scope starts: close the segment so none mixes scopes.
+                    if chunk_builder.len() > 0 {
+                        let cold_batch = chunk_builder.take_batch()?;
+                        let _ = segment_builder.push_batch(cold_batch)?;
+                    }
+                    if let Some(mut chunk) = segment_builder.finish_segment()? {
+                        chunk.scope = current_scope.clone().flatten();
+                        write_chunk(chunk)?;
+                    }
+                }
+                current_scope = Some(scope);
+            }
             chunk_builder.push_row(row, &input.primary_key_columns, input.schema_version)?;
             rows_written += 1;
             let row_group_limit = input.row_group_size.max(1).min(
@@ -568,7 +652,8 @@ where
             if chunk_builder.len() >= row_group_limit {
                 let cold_batch = chunk_builder.take_batch()?;
                 if segment_builder.push_batch(cold_batch)? {
-                    if let Some(chunk) = segment_builder.finish_segment()? {
+                    if let Some(mut chunk) = segment_builder.finish_segment()? {
+                        chunk.scope = current_scope.clone().flatten();
                         write_chunk(chunk)?;
                     }
                 }
@@ -577,21 +662,7 @@ where
         let Some(last) = batch.last() else {
             break;
         };
-        cursor = if input.sort_by_order_key {
-            let after_pk_values = pk_indices
-                .iter()
-                .map(|index| last.values.get(*index).cloned().unwrap_or(CellValue::Null))
-                .collect();
-            MirrorFlushPageCursor::AfterOrderKey {
-                after_order_key: last.order_key.clone(),
-                after_pk_values,
-                after_seq: last.seq,
-            }
-        } else {
-            MirrorFlushPageCursor::AfterSeq {
-                after_seq: last.seq,
-            }
-        };
+        cursor = next_page_cursor(input, &pk_indices, last);
         if (batch_len as i64) < input.fetch_batch_size {
             break;
         }
@@ -601,7 +672,8 @@ where
         let cold_batch = chunk_builder.take_batch()?;
         let _ = segment_builder.push_batch(cold_batch)?;
     }
-    if let Some(chunk) = segment_builder.finish_segment()? {
+    if let Some(mut chunk) = segment_builder.finish_segment()? {
+        chunk.scope = current_scope.clone().flatten();
         write_chunk(chunk)?;
     }
 
@@ -643,6 +715,7 @@ mod tests {
             mirror_ops: None,
             sort_by_order_key: false,
             order_key_column: None,
+            scope_column_index: None,
         }
     }
 
@@ -976,5 +1049,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("order key is missing"));
+    }
+
+    #[test]
+    fn scoped_rows_are_cut_into_one_segment_per_scope() {
+        let mut encode_input = input(None, 1000);
+        encode_input.scope_column_index = Some(1);
+        let row = |seq: i64, op: i16, body: &str| FlushMirrorRow {
+            seq,
+            op,
+            values: vec![
+                CellValue::Int64(seq),
+                if op == 3 { CellValue::Null } else { CellValue::Utf8(body.to_string()) },
+            ],
+            order_key: None,
+        };
+        // grouped by scope (as the flush executor groups a pass); the delete marker is table-wide
+        let pass = vec![row(1, 1, "alice"), row(2, 2, "alice"), row(3, 1, "bob"), row(4, 3, ""), row(5, 1, "")];
+        let mut served = false;
+        let mut scopes = Vec::new();
+        let mut counts = Vec::new();
+        stream_flush_chunks(
+            &encode_input,
+            |_, _, _| {
+                if served {
+                    return Ok(Vec::new());
+                }
+                served = true;
+                Ok(pass.clone())
+            },
+            |chunk| {
+                scopes.push(chunk.scope.clone());
+                counts.push(chunk.row_count());
+                Ok(())
+            },
+        )
+        .unwrap();
+        // the empty scope value of seq 5 is table-wide too, and follows the delete marker's group
+        assert_eq!(scopes, vec![Some("alice".to_string()), Some("bob".to_string()), None]);
+        assert_eq!(counts, vec![2, 1, 2]);
     }
 }

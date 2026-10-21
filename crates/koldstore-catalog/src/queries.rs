@@ -994,7 +994,8 @@ SELECT
         AND csi.codec_version = $3::smallint) AS key_min,
     (SELECT csi.key_max FROM koldstore.cold_segment_index csi
       WHERE csi.segment_id = cs.segment_id AND csi.column_id = ($2::smallint[])[1]
-        AND csi.codec_version = $3::smallint) AS key_max
+        AND csi.codec_version = $3::smallint) AS key_max,
+    cs.scope_id
 FROM koldstore.cold_segments cs
 LEFT JOIN versions v ON v.schema_version = cs.schema_version
 LEFT JOIN table_prefix pref ON true

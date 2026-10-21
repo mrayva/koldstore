@@ -33,12 +33,20 @@ pub struct WrittenFlushSegment {
     pub packed_metadata: PackedSegmentMetadata,
     /// Catalog row shape for manifest assembly (relative `path`, sizes, seq bounds).
     pub catalog_row: CatalogManifestSegmentRow,
+    /// Scope the segment's rows belong to; `None` = table-wide.
+    pub scope_id: Option<String>,
 }
 
-/// Builds the table-relative object key for one flush segment.
+/// Builds the table-relative object key for one flush segment. A scoped segment lives in its
+/// scope's folder, `{scopeId}/{folder}/segment-….parquet` (ADR-010); `scopeId` is percent-encoded like
+/// every other path segment.
 #[must_use]
-pub fn flush_segment_relative_path(batch_number: i32, segment_id: Uuid) -> String {
-    segment_relative_object_path(batch_number, segment_path_token(segment_id))
+pub fn flush_segment_relative_path(batch_number: i32, segment_id: Uuid, scope: Option<&str>) -> String {
+    let relative = segment_relative_object_path(batch_number, segment_path_token(segment_id));
+    match scope {
+        Some(scope) => format!("{}/{relative}", koldstore_common::encode_path_segment(scope)),
+        None => relative,
+    }
 }
 
 /// Writes one Parquet segment via encode → validate → durable Create publish.
@@ -62,7 +70,7 @@ pub fn write_flush_segment_with_client(
     // Allocate the segment id before publish so the final key is unique per
     // write attempt. Retries after abort must not reuse an orphaned object.
     let segment_id = Uuid::new_v4();
-    let relative_path = flush_segment_relative_path(batch_number, segment_id);
+    let relative_path = flush_segment_relative_path(batch_number, segment_id, chunk.scope.as_deref());
     let object_path = join_object_key(prefix, &relative_path);
     // Flat temp under `{prefix}/.tmp/` — uniqueness is in the file name UUID.
     // Avoids leaving empty per-attempt directories after temp cleanup.
@@ -146,5 +154,6 @@ pub fn write_flush_segment_with_client(
         object_etag: published.etag,
         packed_metadata: chunk.packed_metadata.clone(),
         catalog_row,
+        scope_id: chunk.scope.clone(),
     })
 }

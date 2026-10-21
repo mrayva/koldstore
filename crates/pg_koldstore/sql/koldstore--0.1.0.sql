@@ -222,6 +222,8 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   writer_attempt_token uuid,
   pass_id uuid,
   segment_ordinal integer,
+  -- Scope this segment's rows belong to (user-scoped tables, see ADR-010). NULL means table-wide.
+  scope_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   CHECK (min_seq > 0 AND min_seq <= max_seq),
   CHECK (row_count > 0),

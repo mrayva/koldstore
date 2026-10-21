@@ -46,6 +46,7 @@ impl From<ManifestAssemblyError> for SegmentCatalogError {
 /// - `$32` per-index-row `value_summary` bitmaps (`bytea[]`, aligned with `$17..$24`; NULL = none)
 /// - `$33` / `$34` per-index-row composite-key tuple bounds `key_min` / `key_max` (`bytea[]`, aligned
 ///   with `$32`; NULL = none; only the first key column's row of a composite key carries them)
+/// - `$35` per-segment `scope_id` (`text[]`, aligned with `$2`; NULL = table-wide)
 ///
 /// `segment_ordinal` is taken from each row's `batch_number`.
 ///
@@ -70,7 +71,8 @@ WITH segment_input AS (
         $10::text[],
         $11::text[],
         $12::integer[],
-        $13::integer[]
+        $13::integer[],
+        $35::text[]
     ) AS u(
         segment_id,
         path,
@@ -83,7 +85,8 @@ WITH segment_input AS (
         checksum,
         object_etag,
         row_group_count,
-        row_group_offset
+        row_group_offset,
+        scope_id
     )
 ),
 inserted_segments AS (
@@ -108,7 +111,8 @@ inserted_segments AS (
         writer_job_id,
         writer_attempt_token,
         pass_id,
-        segment_ordinal
+        segment_ordinal,
+        scope_id
     )
     SELECT
         u.segment_id,
@@ -140,7 +144,8 @@ inserted_segments AS (
         $28::uuid,
         $29::uuid,
         $30::uuid,
-        u.batch_number
+        u.batch_number,
+        u.scope_id
     FROM segment_input u
     RETURNING segment_id, table_oid, scope_key
 ),

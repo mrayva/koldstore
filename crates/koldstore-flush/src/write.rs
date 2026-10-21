@@ -16,6 +16,9 @@ pub struct FlushWriteChunk {
     pub parquet_metadata: Arc<parquet::file::metadata::ParquetMetaData>,
     /// Compact catalog metadata derived from `parquet_metadata`.
     pub packed_metadata: PackedSegmentMetadata,
+    /// Scope every row of this segment belongs to (user-scoped tables); `None` for table-wide
+    /// segments. Decides the object folder and the catalog `scope_id`.
+    pub scope: Option<String>,
 }
 
 impl FlushWriteChunk {
@@ -31,6 +34,7 @@ impl FlushWriteChunk {
             parquet_bytes: encoded.bytes,
             parquet_metadata: encoded.metadata,
             packed_metadata,
+            scope: None,
         }
     }
 

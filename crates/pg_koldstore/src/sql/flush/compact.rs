@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use koldstore_common::SeqId;
-use koldstore_flush::compaction::{plan_compaction_units, SegmentRange};
+use koldstore_flush::compaction::{plan_compaction_units, CompactionUnit, SegmentRange};
 use koldstore_flush::plan_activate_compaction;
 use koldstore_manifest::write_manifest_with_client;
 use koldstore_merge::scan::plan::SegmentStatsHint;
@@ -56,6 +56,8 @@ struct ListedSegment {
     bounds: Option<Vec<(Vec<u8>, Vec<u8>)>>,
     /// Lexicographic `(min, max)` of the whole composite key tuple, when the segment has it.
     tuple_bounds: Option<(Vec<u8>, Vec<u8>)>,
+    /// Scope the segment's rows belong to (user-scoped tables); `None` = table-wide.
+    scope_id: Option<String>,
 }
 
 /// Compacts `table_oid`'s cold segments; returns a JSON report.
@@ -167,41 +169,63 @@ fn compact_locked(
             "reaped_segments": reaped,
         }));
     }
-    // A composite key whose every segment has exact tuple bounds is planned with both tests (see
+    // User-scoped tables keep one segment group per scope (ADR-010): a unit never crosses scopes, its
+    // output stays in the scope's folder, and the table-wide group (delete markers, rows from before
+    // scoping) is left alone once scoped segments exist -- a marker there may be masking an older
+    // version in a scoped group, and the per-group rewrite below could not tell.
+    let table_has_scoped = segments.iter().any(|segment| segment.scope_id.is_some());
+    let mut groups: std::collections::BTreeMap<Option<String>, Vec<&ListedSegment>> =
+        std::collections::BTreeMap::new();
+    for segment in &segments {
+        groups.entry(segment.scope_id.clone()).or_default().push(segment);
+    }
+    if table_has_scoped {
+        groups.remove(&None);
+    }
+    // A composite key whose segments all have exact tuple bounds is planned with both tests (see
     // `SegmentRange::may_share_keys`): a sorted rewrite makes the output lexicographically disjoint,
     // so a repeat finds nothing to do and the scan sees disjoint segments afterwards.
-    let exact_tuples = catalog.primary_key.columns.len() > 1
-        && segments.iter().all(|segment| segment.tuple_bounds.is_some());
-    let segments: Vec<&ListedSegment> = segments.iter().collect();
-    let ranges: Vec<SegmentRange> = segments
-        .iter()
-        .filter_map(|segment| {
-            segment.bounds.as_ref().map(|bounds| SegmentRange {
-                row_count: segment.row_count,
-                bounds: bounds.clone(),
-                tuple: if exact_tuples { segment.tuple_bounds.clone() } else { None },
+    let composite = catalog.primary_key.columns.len() > 1;
+    let mut planned: Vec<(CompactionUnit, Vec<&ListedSegment>, Option<String>, bool)> = Vec::new();
+    let mut skipped_over_cap = 0_usize;
+    for (scope, group) in groups {
+        let exact_tuples = composite && group.iter().all(|segment| segment.tuple_bounds.is_some());
+        let ranges: Vec<SegmentRange> = group
+            .iter()
+            .filter_map(|segment| {
+                segment.bounds.as_ref().map(|bounds| SegmentRange {
+                    row_count: segment.row_count,
+                    bounds: bounds.clone(),
+                    tuple: if exact_tuples { segment.tuple_bounds.clone() } else { None },
+                })
             })
-        })
-        .collect();
-    let mut plan = plan_compaction_units(
-        &ranges,
-        i64::try_from(ctx.max_rows_per_file).unwrap_or(i64::MAX),
-        max_rows,
-    );
-    if auto {
-        // Only a single-column key ordered by itself is rewritten into key-disjoint segments; for
-        // anything else an overlap component would be reread and rewritten unchanged every tick.
-        let stable_rewrite = (catalog.primary_key.columns.len() == 1 || exact_tuples)
-            && ctx
-                .snapshot
-                .segment_order_column_id
-                .is_none_or(|column_id| column_id == lead_key);
-        if !stable_rewrite {
-            plan.units.retain(|unit| !unit.overlapping);
+            .collect();
+        let mut plan = plan_compaction_units(
+            &ranges,
+            i64::try_from(ctx.max_rows_per_file).unwrap_or(i64::MAX),
+            max_rows,
+        );
+        skipped_over_cap += plan.skipped_over_cap;
+        if auto {
+            // Only a single-column key ordered by itself is rewritten into key-disjoint segments;
+            // for anything else an overlap component would be reread and rewritten unchanged every
+            // tick.
+            let stable_rewrite = (!composite || exact_tuples)
+                && ctx
+                    .snapshot
+                    .segment_order_column_id
+                    .is_none_or(|column_id| column_id == lead_key);
+            if !stable_rewrite {
+                plan.units.retain(|unit| !unit.overlapping);
+            }
         }
-        if plan.units.is_empty() {
-            return Ok(json!({ "compacted": false }));
+        for unit in plan.units {
+            let members: Vec<&ListedSegment> = unit.members.iter().map(|index| group[*index]).collect();
+            planned.push((unit, members, scope.clone(), exact_tuples));
         }
+    }
+    if auto && planned.is_empty() {
+        return Ok(json!({ "compacted": false }));
     }
     let client = match client {
         Some(client) => client,
@@ -214,15 +238,22 @@ fn compact_locked(
     let (mut segments_removed, mut segments_added) = (0_usize, 0_usize);
     let (mut rows_read, mut rows_written, mut dropped_versions) = (0_i64, 0_i64, 0_i64);
     let (mut bytes_removed, mut bytes_added) = (0_i64, 0_i64);
-    for unit in &plan.units {
+    for (unit, members, scope, exact_tuples) in &planned {
         if unit.rows > budget {
             units_left += 1;
             continue;
         }
         budget -= unit.rows;
-        let members: Vec<&ListedSegment> =
-            unit.members.iter().map(|index| segments[*index]).collect();
-        let Some(outcome) = compact_unit(table_oid, &ctx, &client, &members, started, exact_tuples)? else {
+        let Some(outcome) = compact_unit(
+            table_oid,
+            &ctx,
+            &client,
+            members,
+            started,
+            *exact_tuples,
+            scope.as_deref(),
+        )?
+        else {
             units_without_gain += 1;
             continue;
         };
@@ -248,7 +279,7 @@ fn compact_locked(
         "compacted": units_done > 0,
         "units": units_done,
         "units_left_for_next_call": units_left,
-        "units_over_max_rows": plan.skipped_over_cap,
+        "units_over_max_rows": skipped_over_cap,
         "units_without_gain": units_without_gain,
         "segments_before": segments_before,
         "segments_replaced": segments_removed,
@@ -277,6 +308,7 @@ fn compact_unit(
     members: &[&ListedSegment],
     started: std::time::Instant,
     exact_tuples: bool,
+    scope: Option<&str>,
 ) -> Result<Option<UnitOutcome>, String> {
     let catalog = &ctx.catalog;
     let hints: Vec<SegmentStatsHint> = members.iter().map(|segment| segment.hint.clone()).collect();
@@ -369,7 +401,9 @@ fn compact_unit(
         &ctx.relation.name,
     )?;
     let manifest_path = manifest_object_key(&table_prefix);
-    let (encode_input, _) = build_stream_encode_input(ctx, max_seq, None)?;
+    let (mut encode_input, _) = build_stream_encode_input(ctx, max_seq, None)?;
+    // Compaction keeps every row of a unit in the unit's scope (set per chunk below).
+    encode_input.scope_column_index = None;
     let fetch_batch_size = usize::try_from(encode_input.fetch_batch_size)
         .unwrap_or(1)
         .max(1);
@@ -386,7 +420,8 @@ fn compact_unit(
             next = end;
             Ok(page)
         },
-        |chunk| {
+        |mut chunk| {
+            chunk.scope = scope.map(str::to_string);
             write_streamed_chunk(
                 client,
                 ctx,
@@ -533,6 +568,7 @@ fn list_active_segments(
                 let maxs = to_vec(tuple.get::<pgrx::Array<&[u8]>>(10)?);
                 scoped = tuple.get::<i64>(11)?.unwrap_or(0);
                 let tuple_bounds = tuple.get::<Vec<u8>>(12)?.zip(tuple.get::<Vec<u8>>(13)?);
+                let scope_id = tuple.get::<String>(14)?;
                 let bounds = (mins.len() == key_ids.len() && maxs.len() == key_ids.len())
                     .then(|| {
                         mins.into_iter()
@@ -564,6 +600,7 @@ fn list_active_segments(
                     row_count,
                     bounds,
                     tuple_bounds,
+                    scope_id,
                 });
             }
             Ok((out, scoped))

@@ -1,6 +1,6 @@
 # ADR-010: Scoped cold storage (user-scoped tables)
 
-Status: proposed (2026-10-20). Related: [ADR-004](004-segment-publication-protocol.md) (publication),
+Status: accepted; slice 1 built (2026-10-21). Related: [ADR-004](004-segment-publication-protocol.md) (publication),
 [ADR-009](009-segment-pk-value-summaries.md) (pruning and disjointness).
 
 ## Context
@@ -82,3 +82,29 @@ proportion as the number of scopes; a full scan of one scope no longer retains c
 * Whether a scope below some row count should skip its own segment and ride in the next flush instead (needs per-scope
   hot/prune cuts; deliberately not proposed).
 * NULL scope values (the policy already excludes them; `manage_table` should require `NOT NULL`).
+
+## Slice 1 as built (2026-10-21)
+
+What shipped, and where it differs from the sketch above:
+
+* **`cold_segments.scope_id text`** (NULL = table-wide) records a segment's scope. The existing `scope_key` column is *not*
+  used yet: every read-side catalog query filters `scope_key = ''`, so keeping scoped segments in that group means every
+  existing scan, count, manifest and recovery query still sees them with no change. Slice 2 introduces the scope-aware
+  candidate query on `scope_id` (and may then retire `scope_key`).
+* **Flush** (`StreamEncodeInput::scope_column_index`): a user-scoped table's pass is read in full, stably grouped by scope
+  (`group_rows_by_scope`), and the encoder closes a segment when the scope changes, so no segment mixes scopes. The pass is held
+  in memory (bounded by `max_rows_per_flush`; a pass over 2,000,000 rows is refused). The object path is
+  `{scopeId}/{folder}/segment-….parquet` relative to the table prefix (`flush_segment_relative_path`), `scopeId` percent-encoded.
+  The manifest shard-folder parser accepts the extra leading component.
+* **Delete markers stay table-wide.** A marker has the primary key only; the row is gone, so its scope is unknowable at flush
+  time (the mirror stores no scope column). Markers (and rows with a NULL or empty scope) go to `scope_id IS NULL` segments in the
+  table-wide folder. They must mask older versions in any scoped group, so readers will always include the table-wide group.
+* **No per-scope manifest objects yet.** One table manifest lists every segment, scoped ones with their scope-prefixed relative
+  paths. Per-scope manifests are only worth having once something reads them per scope.
+* **Compaction is already per scope** (slice 3's core): units never cross scopes, output keeps the unit's scope and folder, and the
+  table-wide group is skipped once scoped segments exist (a marker there may be masking an older version in a scoped group; rewriting
+  it needs a "keep markers" mode). Markers therefore accumulate in small table-wide segments for now.
+* Reads are unchanged: all segments are candidates. Tests: `scoped_cold_layout` (SQL), encoder and manifest-path unit tests.
+
+Still open for slices 2 and 3: scope resolution in the scan and per-scope disjointness; the `max_scopes_per_flush` fallback; a
+"keep delete markers" compaction mode so the table-wide group can be merged too.

@@ -425,3 +425,6 @@ AS 'MODULE_PATHNAME', 'unregister_backup_pg_wrapper';
 -- Exact segment disjointness for composite primary keys: the lexicographic min/max of the key tuple.
 ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS key_min bytea;
 ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS key_max bytea;
+
+-- Scoped cold storage (ADR-010, slice 1): the scope a segment's rows belong to; NULL = table-wide.
+ALTER TABLE koldstore.cold_segments ADD COLUMN IF NOT EXISTS scope_id text;

@@ -340,9 +340,19 @@ pub(super) fn build_stream_encode_input(
                 .find(|column| column.column_id == column_id)
                 .map(|column| column.name.clone())
         }),
+        // User-scoped tables write one segment per scope (ADR-010); compaction clears this.
+        scope_column_index: ctx.snapshot.scope_column_id.and_then(|scope_id| {
+            ctx.catalog
+                .columns
+                .iter()
+                .position(|column| column.column_id == scope_id)
+        }),
     };
     Ok((encode_input, primary_key_columns))
 }
+
+/// Most rows one user-scoped flush pass groups in memory (a pass is normally `max_rows_per_flush`).
+const SCOPED_FLUSH_MAX_BUFFERED_ROWS: i64 = 2_000_000;
 
 fn stream_write_flush_batches(
     table_oid: pgrx::pg_sys::Oid,
@@ -371,22 +381,64 @@ fn stream_write_flush_batches(
     let fetch_batch_size = encode_input.fetch_batch_size;
     // Failpoint after pending catalog inserts lives in write_streamed_chunk.
 
+    // A user-scoped table closes a segment per scope, which needs the pass's rows grouped by scope.
+    // The mirror pages come ordered by seq / order key, so the pass is read in full, grouped, and
+    // served from memory (bounded by `max_rows_per_flush`; refuse a pass too large to hold).
+    let scope_index = encode_input.scope_column_index;
+    if scope_index.is_some() && stats.row_count > SCOPED_FLUSH_MAX_BUFFERED_ROWS {
+        return Err(format!(
+            "this flush pass selects {} rows, more than the {SCOPED_FLUSH_MAX_BUFFERED_ROWS} a user-scoped \
+             table groups in memory per scope; lower koldstore.max_rows_per_flush",
+            stats.row_count
+        ));
+    }
+    let pk_indices = koldstore_parquet::pk_column_indices(
+        &encode_input.base_column_names,
+        &encode_input.primary_key_columns,
+    )?;
+    let mut buffered: Option<std::collections::VecDeque<koldstore_parquet::FlushMirrorRow>> = None;
+
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
             &encode_input,
             |statement, max_seq, cursor| {
-                // Short: each mirror fetch is its own catalog transaction.
-                commit_style.run_spi(|| {
-                    fetch_mirror_batch(
-                        catalog_columns,
-                        &primary_key_columns,
-                        statement,
-                        max_seq,
-                        cursor,
-                        fetch_batch_size,
-                        ctx.snapshot.segment_order_column_id.is_some(),
-                    )
-                })
+                let page_size = usize::try_from(fetch_batch_size).unwrap_or(1).max(1);
+                let mut fetch = |cursor: &koldstore_flush::MirrorFlushPageCursor| {
+                    // Short: each mirror fetch is its own catalog transaction.
+                    commit_style.run_spi(|| {
+                        fetch_mirror_batch(
+                            catalog_columns,
+                            &primary_key_columns,
+                            statement,
+                            max_seq,
+                            cursor,
+                            fetch_batch_size,
+                            ctx.snapshot.segment_order_column_id.is_some(),
+                        )
+                    })
+                };
+                let Some(scope_index) = scope_index else {
+                    return fetch(cursor);
+                };
+                if buffered.is_none() {
+                    let mut all = Vec::new();
+                    let mut next = cursor.clone();
+                    loop {
+                        let page = fetch(&next)?;
+                        let full = page.len() >= page_size;
+                        if let Some(last) = page.last() {
+                            next = koldstore_flush::next_page_cursor(&encode_input, &pk_indices, last);
+                        }
+                        all.extend(page);
+                        if !full {
+                            break;
+                        }
+                    }
+                    buffered = Some(koldstore_flush::group_rows_by_scope(all, scope_index).into());
+                }
+                let queue = buffered.as_mut().ok_or_else(|| "scoped flush buffer missing".to_string())?;
+                let take = queue.len().min(page_size);
+                Ok(queue.drain(..take).collect())
             },
             |chunk| {
                 write_streamed_chunk(

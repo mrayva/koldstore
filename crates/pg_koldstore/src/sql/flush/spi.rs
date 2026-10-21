@@ -341,12 +341,14 @@ pub(super) fn persist_flush_segments_batch(
     let mut index_value_summaries: Vec<Option<Vec<u8>>> = Vec::new();
     let mut index_key_mins: Vec<Option<Vec<u8>>> = Vec::new();
     let mut index_key_maxs: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut scope_ids: Vec<Option<String>> = Vec::with_capacity(segments.len());
     let mut index_row_group_counts = Vec::new();
     let mut index_row_group_offsets = Vec::new();
     let mut row_group_min_values: Vec<Option<Vec<u8>>> = Vec::new();
     let mut row_group_max_values: Vec<Option<Vec<u8>>> = Vec::new();
     let mut row_group_null_counts: Vec<Option<i64>> = Vec::new();
     for segment in segments {
+        scope_ids.push(segment.scope_id.clone());
         let row = &segment.catalog_row;
         let packed = &segment.packed_metadata;
         let row_group_count = i32::try_from(packed.row_group_count)
@@ -450,6 +452,7 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(index_value_summaries),
             DatumWithOid::from(index_key_mins),
             DatumWithOid::from(index_key_maxs),
+            DatumWithOid::from(scope_ids),
         ],
     )
     .map_err(|error| error.to_string())?;

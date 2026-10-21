@@ -1,0 +1,149 @@
+DO
+CREATE ROLE
+GRANT
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 240
+SELECT 240
+ sl_managed
+------------
+ t
+(1 row)
+
+ALTER TABLE
+GRANT
+ sl_caught_up
+--------------
+ t
+(1 row)
+
+ sl_flushed
+------------
+ t
+(1 row)
+
+  scope  | segments | rows
+---------+----------+------
+ ann/lee |        3 |   60
+ user-a  |        3 |   60
+ user-b  |        3 |   60
+ user-c  |        3 |   60
+(4 rows)
+
+ sl_misplaced
+--------------
+            0
+(1 row)
+
+ sl_content_equal
+------------------
+ t
+(1 row)
+
+SET
+SET
+ sl_user_b_rows
+----------------
+             60
+(1 row)
+
+SET
+ sl_ann_rows
+-------------
+          60
+(1 row)
+
+RESET
+RESET
+SET
+UPDATE 48
+UPDATE 48
+DELETE 12
+DELETE 12
+RESET
+ sl_fenced
+-----------
+ t
+(1 row)
+
+ sl_reflushed
+--------------
+ t
+(1 row)
+
+ sl_reflushed_2
+----------------
+ t
+(1 row)
+
+ sl_fenced_2
+-------------
+ t
+(1 row)
+
+ sl_marker_segment_is_table_wide | sl_scopes
+---------------------------------+-----------
+ t                               |         4
+(1 row)
+
+ sl_misplaced_2
+----------------
+              0
+(1 row)
+
+ sl_content_equal_after_dml
+----------------------------
+ t
+(1 row)
+
+SELECT 5
+ sl_compacted
+--------------
+ t
+(1 row)
+
+ sl_content_equal_after_compaction
+-----------------------------------
+ t
+(1 row)
+
+ sl_misplaced_3
+----------------
+              0
+(1 row)
+
+ sl_marker_group_untouched
+---------------------------
+ t
+(1 row)
+
+ sl_scoped_segments_not_more
+-----------------------------
+ t
+(1 row)
+
+ sl_noop_second
+----------------
+ f
+(1 row)
+
+ sl_reaped
+-----------
+ t
+(1 row)
+
+ sl_orphans
+------------
+          0
+(1 row)
+
+ sl_valid
+----------
+ true
+(1 row)
+
+ sl_content_final
+------------------
+ t
+(1 row)
+
