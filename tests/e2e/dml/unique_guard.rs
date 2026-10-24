@@ -74,6 +74,27 @@ async fn non_pk_unique_is_enforced_across_hot_and_cold() -> Result<()> {
         .await?
         .expect("cold duplicate on a later-added constraint must be refused");
         assert!(err.starts_with("23505"), "{err}");
+
+        // Dropping a constraint or a unique index lifts the guard (re-planned by the DDL hook).
+        let schema = relation.split('.').next().unwrap();
+        db.client.batch_execute(&format!("ALTER TABLE {relation} DROP CONSTRAINT uniq_items_ext_key")).await?;
+        db.client
+            .batch_execute(&format!("INSERT INTO {relation} (id, account_id, title, qty, category, ext) VALUES (505, 1, 't', 1, 'x', 6)"))
+            .await?;
+        db.client
+            .batch_execute(&format!(
+                "ALTER TABLE {relation} ADD COLUMN ext2 int; \
+                 INSERT INTO {relation} (id, account_id, title, qty, category, ext2) VALUES (610, 1, 't', 1, 'x', 7); \
+                 CREATE UNIQUE INDEX uniq_items_ext2_idx ON {relation} (ext2)"
+            ))
+            .await?;
+        db.flush_table(relation).await?;
+        common::fence_async_mirror(&db.client).await?;
+        let dup = format!("INSERT INTO {relation} (id, account_id, title, qty, category, ext2) VALUES (611, 1, 't', 1, 'x', 7)");
+        let err = insert_err(&db, &dup).await?.expect("cold duplicate on a unique index must be refused");
+        assert!(err.starts_with("23505"), "{err}");
+        db.client.batch_execute(&format!("DROP INDEX {schema}.uniq_items_ext2_idx")).await?;
+        db.client.batch_execute(&dup).await?;
     }
     Ok(())
 }

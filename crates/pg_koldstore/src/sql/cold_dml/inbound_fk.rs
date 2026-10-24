@@ -70,24 +70,34 @@ fn resolve_oid(source: &koldstore_common::QualifiedTableName) -> Option<pgrx::pg
 /// Statements removing every child-side guard created for `parent_oid` (found by the parent oid
 /// baked into the function body).
 fn teardown_statements(parent_oid: pgrx::pg_sys::Oid) -> Vec<String> {
+    // Functions are found by the oid baked into their body (not through their triggers), so a
+    // function whose table was dropped is cleaned up as well.
     let sql = "SELECT t.tgname::text, t.tgrelid::regclass::text, p.oid::regprocedure::text \
-               FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid \
-               JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-               WHERE n.nspname = 'koldstore' AND NOT t.tgisinternal \
+               FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+               LEFT JOIN pg_catalog.pg_trigger t ON t.tgfoid = p.oid AND NOT t.tgisinternal \
+               WHERE n.nspname = 'koldstore' \
                  AND p.prosrc LIKE '%_cold_fk_child_hydrate(' || $1::text || '::oid,%'";
     let args = [DatumWithOid::from(parent_oid.to_u32() as i64)];
-    let rows: Vec<(String, String, String)> = pgrx::Spi::connect(|client| {
+    let rows: Vec<(Option<String>, Option<String>, String)> = pgrx::Spi::connect(|client| {
         client
             .select(sql, None, &args)?
-            .map(|row| Ok((row.get::<String>(1)?.unwrap_or_default(), row.get::<String>(2)?.unwrap_or_default(), row.get::<String>(3)?.unwrap_or_default())))
+            .map(|row| Ok((row.get::<String>(1)?, row.get::<String>(2)?, row.get::<String>(3)?.unwrap_or_default())))
             .collect::<Result<Vec<_>, pgrx::spi::Error>>()
     })
     .unwrap_or_default();
     let mut statements = Vec::new();
     for (trigger, relation, _) in &rows {
-        statements.push(format!("DROP TRIGGER IF EXISTS {} ON {relation}", koldstore_common::sql::ident::quote_ident(trigger)));
+        if let (Some(trigger), Some(relation)) = (trigger, relation) {
+            statements.push(format!(
+                "DROP TRIGGER IF EXISTS {} ON {relation}",
+                koldstore_common::sql::ident::quote_ident(trigger)
+            ));
+        }
     }
-    for (_, _, function) in &rows {
+    let mut functions: Vec<&String> = rows.iter().map(|(_, _, function)| function).collect();
+    functions.sort();
+    functions.dedup();
+    for function in functions {
         statements.push(format!("DROP FUNCTION IF EXISTS {function}"));
     }
     statements

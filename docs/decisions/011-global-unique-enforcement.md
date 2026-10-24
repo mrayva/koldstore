@@ -26,7 +26,7 @@ Reuse the per-table write-guard trigger (ADR-007) instead of a new constraint in
   with segment ranges. A value-summary index (as ADR-009 does for primary keys) is the
   upgrade path if this proves too slow.
 - Partial and expression unique indexes remain hot-only (warned about at attach time).
-- `DROP INDEX` of a unique index leaves the guard over-enforcing until it is re-planned.
+- `DROP INDEX` is hooked (the owning table is resolved before the drop and its guard re-planned after).
 - Not covered here: foreign keys (outbound, then inbound), `MERGE`/`ON CONFLICT` upserts onto
   cold rows (still governed by ADR-007's refusal and `hydrate_pk`).
 

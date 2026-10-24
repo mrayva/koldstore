@@ -61,6 +61,16 @@ async fn inbound_fk_sees_cold_parents_and_blocks_their_purge() -> Result<()> {
             .await?
             .expect("still referenced after re-flush");
         assert!(err.starts_with("23503"), "{err}");
+
+        // Guards follow the foreign keys: dropping a child table or its constraint removes them.
+        let guards = "SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+                      WHERE n.nspname = 'koldstore' AND p.prosrc LIKE '%_cold_fk_child_hydrate(%'";
+        assert_eq!(db.client.query_one(guards, &[]).await?.get::<_, i32>(0), 2);
+        db.client.batch_execute(&format!("DROP TABLE {child_post}")).await?;
+        assert_eq!(db.client.query_one(guards, &[]).await?.get::<_, i32>(0), 1);
+        db.client.batch_execute(&format!("ALTER TABLE {child_pre} DROP CONSTRAINT ifk_child_pre_item_id_fkey")).await?;
+        assert_eq!(db.client.query_one(guards, &[]).await?.get::<_, i32>(0), 0);
+        db.client.batch_execute(&format!("SELECT koldstore.purge_where('{relation}'::regclass, 't.id = 4')")).await?;
     }
     Ok(())
 }

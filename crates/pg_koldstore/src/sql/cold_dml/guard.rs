@@ -504,22 +504,29 @@ pub(crate) fn refresh_insert_guard(table_oid: pgrx::pg_sys::Oid) {
     }
 }
 
-/// Re-plans the write guard of every managed table that `child_oid` references through a foreign
-/// key, so a foreign key added to (or dropped from) an unmanaged table is guarded on the parent.
-pub(crate) fn refresh_guards_of_referenced_managed(child_oid: pgrx::pg_sys::Oid) {
+/// Active managed tables that `child_oid` references through a foreign key.
+pub(crate) fn referenced_managed_parents(child_oid: pgrx::pg_sys::Oid) -> Vec<pgrx::pg_sys::Oid> {
     let sql = "SELECT DISTINCT c.confrelid FROM pg_catalog.pg_constraint c \
                WHERE c.conrelid = $1 AND c.contype = 'f' \
                  AND EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active)";
     let args = [pgrx::datum::DatumWithOid::from(child_oid)];
-    let parents: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
+    pgrx::Spi::connect(|client| {
         client
             .select(sql, None, &args)?
             .map(|row| Ok(row.get::<pgrx::pg_sys::Oid>(1)?.unwrap_or(pgrx::pg_sys::InvalidOid)))
             .collect::<Result<Vec<_>, pgrx::spi::Error>>()
     })
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
+
+/// Re-plans the write guard of every table in `parents` that is still managed, so a foreign key
+/// added to, dropped from, or lost with an unmanaged child is reflected on the parent.
+pub(crate) fn refresh_guards_of(parents: impl IntoIterator<Item = pgrx::pg_sys::Oid>) {
+    let mut seen = std::collections::HashSet::new();
     for parent in parents {
-        refresh_insert_guard(parent);
+        if seen.insert(parent.to_u32()) && crate::catalog::cache::is_managed_relation(parent) {
+            refresh_insert_guard(parent);
+        }
     }
 }
 

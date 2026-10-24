@@ -23,7 +23,7 @@ mod process_utility {
     use pgrx::pg_sys;
 
     use crate::hooks::drop_cleanup::{
-        cleanup_managed_tables_before_drop, drop_captured_mirrors, drop_table_oids,
+        cleanup_managed_tables_before_drop, drop_captured_mirrors, drop_index_table_oids, drop_table_oids,
     };
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -99,6 +99,11 @@ mod process_utility {
             let mut unique_guard_oid = None;
             // Table whose foreign keys may now point at a managed table.
             let mut fk_child_relation: Option<*mut pg_sys::RangeVar> = None;
+            // Managed tables the statement's target referenced before it ran (their guards go stale
+            // when a foreign key or the whole child disappears).
+            let mut fk_parents_before: Vec<pg_sys::Oid> = Vec::new();
+            // Tables whose unique indexes may be dropped by this statement.
+            let mut dropped_index_tables: Vec<pg_sys::Oid> = Vec::new();
             let mut renamed_schema = None;
             let mut copy_from_oid = None;
             // Partitions created or attached by this statement; a partition template manages them.
@@ -122,6 +127,11 @@ mod process_utility {
                         refresh_oid = relation_oid_from_range_var((*stmt).relation);
                         unique_guard_oid = refresh_oid;
                         fk_child_relation = Some((*stmt).relation);
+                        if crate::catalog::cache::managed_catalog_ready() {
+                            if let Some(child_oid) = refresh_oid {
+                                fk_parents_before = crate::sql::cold_dml::guard::referenced_managed_parents(child_oid);
+                            }
+                        }
                     }
                     pg_sys::NodeTag::T_IndexStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::IndexStmt>();
@@ -147,6 +157,13 @@ mod process_utility {
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
                         drop_oids = drop_table_oids(stmt);
+                        if crate::catalog::cache::managed_catalog_ready() {
+                            for oid in &drop_oids {
+                                fk_parents_before
+                                    .extend(crate::sql::cold_dml::guard::referenced_managed_parents(*oid));
+                            }
+                            dropped_index_tables = drop_index_table_oids(stmt);
+                        }
                         if crate::catalog::cache::managed_catalog_ready() {
                             drop_oids = crate::sql::migrate::partition::expand_drop_targets(drop_oids);
                         }
@@ -237,12 +254,22 @@ mod process_utility {
                     crate::sql::cold_dml::guard::refresh_insert_guard(table_oid);
                 }
             }
-            if let Some(relation) = fk_child_relation {
-                if crate::catalog::cache::managed_catalog_ready() {
+            if crate::catalog::cache::managed_catalog_ready() {
+                let mut stale_parents = std::mem::take(&mut fk_parents_before);
+                if let Some(relation) = fk_child_relation {
                     if let Some(child_oid) = relation_oid_from_range_var(relation) {
                         pg_sys::CommandCounterIncrement();
-                        crate::sql::cold_dml::guard::refresh_guards_of_referenced_managed(child_oid);
+                        stale_parents.extend(crate::sql::cold_dml::guard::referenced_managed_parents(child_oid));
                     }
+                }
+                if !stale_parents.is_empty() {
+                    pg_sys::CommandCounterIncrement();
+                    crate::sql::cold_dml::guard::refresh_guards_of(stale_parents);
+                }
+                if !dropped_index_tables.is_empty() {
+                    // A dropped unique index changes what the write guard enforces.
+                    pg_sys::CommandCounterIncrement();
+                    crate::sql::cold_dml::guard::refresh_guards_of(dropped_index_tables);
                 }
             }
             if let Some(schema_name) = renamed_schema {

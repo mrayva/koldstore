@@ -260,10 +260,8 @@ min/max statistics and reads only the surviving row groups.
   advisory lock, so a hot insert and a cold-duplicate insert cannot both succeed.
 - A delete committed moments ago is honoured (the same mirror-lag fence the primary
   key guard uses).
-- Constraints added through `ALTER TABLE … ADD/DROP CONSTRAINT` or
-  `CREATE UNIQUE INDEX` after `manage_table` re-plan the guard automatically.
-  `DROP INDEX` does not: a dropped unique index stays enforced until the next
-  `ALTER TABLE` on the table, a re-`manage_table`, or an extension upgrade.
+- Constraints added or dropped through `ALTER TABLE … ADD/DROP CONSTRAINT`,
+  `CREATE UNIQUE INDEX` or `DROP INDEX` after `manage_table` re-plan the guard automatically.
 - **Partial and expression unique indexes are enforced on hot rows only**
   (a warning names them when the guard is attached).
 - The check costs one merged-view lookup per constrained insert, so bulk loads
@@ -311,8 +309,7 @@ For `child -> managed` with an **unmanaged** child that references the managed t
   refuses to orphan children. `koldstore.purge_where` refuses (`23503`) when any matching
   row is referenced.
 - The guard is created by `manage_table`, re-planned when a foreign key is added by
-  `CREATE TABLE`/`ALTER TABLE` on the child, and removed by `unmanage_table`. `DROP
-  CONSTRAINT` leaves a harmless trigger until the next re-plan.
+  `CREATE TABLE`/`ALTER TABLE` on the child, and removed by `unmanage_table`.  Dropping the child table or the constraint removes the guard.
 - Foreign keys onto a non-primary-key unique constraint, `CASCADE`/`SET NULL`/`SET DEFAULT`,
   and managed children still require `allow_fk_hot_only`.
 - Each child write against a cold parent pays one hydration (a heap insert of the row).

@@ -330,3 +330,45 @@ pub(crate) fn active_managed_table_oids_in_schema(schema_name: &str, missing_ok:
         Vec::new()
     })
 }
+
+/// Tables owning the indexes named by a `DROP INDEX`, resolved before the drop runs.
+///
+/// # Safety
+///
+/// `stmt` must point at a live `DropStmt`.
+pub(super) unsafe fn drop_index_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys::Oid> {
+    unsafe {
+        if stmt.is_null() || (*stmt).removeType != pg_sys::ObjectType::OBJECT_INDEX || (*stmt).objects.is_null() {
+            return Vec::new();
+        }
+        let objects = (*stmt).objects;
+        let mut tables = Vec::new();
+        for index in 0..(*objects).length as usize {
+            let names = (*(*objects).elements.add(index)).ptr_value.cast::<pg_sys::List>();
+            if names.is_null() {
+                continue;
+            }
+            let relation = pg_sys::makeRangeVarFromNameList(names);
+            if relation.is_null() {
+                continue;
+            }
+            #[allow(clippy::unnecessary_cast)]
+            let flags: u32 = pg_sys::RVROption::RVR_MISSING_OK as u32;
+            let index_oid = pg_sys::RangeVarGetRelidExtended(
+                relation,
+                pg_sys::NoLock as pg_sys::LOCKMODE,
+                flags,
+                None,
+                std::ptr::null_mut(),
+            );
+            if index_oid == pg_sys::InvalidOid {
+                continue;
+            }
+            let table = pg_sys::IndexGetRelation(index_oid, true);
+            if table != pg_sys::InvalidOid {
+                tables.push(table);
+            }
+        }
+        tables
+    }
+}
