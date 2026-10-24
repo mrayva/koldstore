@@ -140,6 +140,7 @@ mod live {
             }
             crate::memory::release_process_heap_if_pending();
             crate::hooks::hydrate_on_write::release_locks();
+            crate::hooks::upsert_hydrate::release(query_desc);
             // Phase 2: SPI-safe now that standard_ExecutorEnd has run.
             for candidate in &cold_guard_candidates {
                 enforce_cold_only_update_delete_guard(candidate);

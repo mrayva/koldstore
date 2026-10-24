@@ -112,6 +112,9 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         }
         if crate::guc::hydrate_on_write() {
             hydrate_before_scan(query_desc, eflags);
+            if eflags & (pg_sys::EXEC_FLAG_EXPLAIN_ONLY as std::ffi::c_int) == 0 {
+                crate::hooks::upsert_hydrate::register(query_desc);
+            }
         }
         match PREVIOUS {
             Some(previous) => previous(query_desc, eflags),

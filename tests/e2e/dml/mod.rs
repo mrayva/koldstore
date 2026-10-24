@@ -12,6 +12,7 @@ mod fk_guard;
 mod inbound_fk_guard;
 mod purge_where;
 mod unique_guard;
+mod upsert_hydrate;
 mod pgoutput_old_row_cow;
 mod wal_applier_footprint;
 mod wal_only_seq_cursor;

@@ -11,6 +11,8 @@ pub(crate) mod dml_planner;
 #[cfg(feature = "pg")]
 pub(crate) mod hydrate_on_write;
 #[cfg(feature = "pg")]
+pub(crate) mod upsert_hydrate;
+#[cfg(feature = "pg")]
 pub(crate) mod where_deparse;
 pub mod planner;
 

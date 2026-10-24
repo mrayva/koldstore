@@ -365,12 +365,14 @@ unsafe extern "C-unwind" fn merge_scan_xact_callback(
             abandon_scan_states_after_abort();
             crate::txn_writes::clear();
             crate::hooks::hydrate_on_write::release_locks();
+            crate::hooks::upsert_hydrate::clear();
         }
         pg_sys::XactEvent::XACT_EVENT_COMMIT
         | pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT
         | pg_sys::XactEvent::XACT_EVENT_PREPARE => {
             crate::txn_writes::clear();
             crate::hooks::hydrate_on_write::release_locks();
+            crate::hooks::upsert_hydrate::clear();
         }
         _ => {}
     }
@@ -390,6 +392,7 @@ unsafe extern "C-unwind" fn merge_scan_subxact_callback(
         pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
             abandon_scan_states_after_abort();
             crate::txn_writes::on_subxact_abort(my_subid);
+            crate::hooks::upsert_hydrate::on_subxact_abort(my_subid);
         }
         pg_sys::SubXactEvent::SUBXACT_EVENT_COMMIT_SUB => {
             crate::txn_writes::on_subxact_commit(my_subid, parent_subid);

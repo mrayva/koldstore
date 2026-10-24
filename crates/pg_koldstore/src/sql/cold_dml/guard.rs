@@ -334,6 +334,13 @@ pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB
         exists = super::key_lock::with_current_view(|| cold_pk_exists(table_oid, &row.0))
             .unwrap_or_else(|error| pgrx::error!("cold-DML insert guard failed: {error}"));
     }
+    if exists
+        && crate::hooks::upsert_hydrate::hydrate_conflicting(table_oid, &row.0)
+            .unwrap_or_else(|error| pgrx::error!("cold-DML upsert hydration failed: {error}"))
+    {
+        // INSERT ... ON CONFLICT on the primary key: the row is hot now, native conflict handling takes over.
+        return;
+    }
     if exists {
         pgrx::error!(
             "koldstore: refusing INSERT on managed table {table_name} -- this primary key already \

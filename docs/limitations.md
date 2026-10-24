@@ -44,7 +44,13 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   - `INSERT` (including `INSERT ... SELECT`, `COPY` and the insert branch of a
     `MERGE`) of a primary key that already exists hot or cold is rejected by a
     per-table `BEFORE INSERT` trigger. Native `ON CONFLICT` inspects only the hot
-    index, so hydrate the key first with `koldstore.hydrate_pk()`.
+    index, so hydrate the key first with `koldstore.hydrate_pk()`. With the
+    experimental `koldstore.hydrate_on_write = on`, a top-level
+    `INSERT ... ON CONFLICT (pk) DO NOTHING / DO UPDATE` onto a managed table
+    hydrates the conflicting cold key itself and then lets native conflict
+    handling run. Not covered: inserts inside CTEs, partitioned parents, and
+    arbiters other than the primary key (a conflict on a non-PK unique key held
+    only by a cold row is still refused).
   - `UPDATE`/`DELETE`/`MERGE` on a primary key (equality, `IN`, an `OR` chain on
     one column, combined with further conditions) that exists but was not reached
     is rejected, naming the key.
