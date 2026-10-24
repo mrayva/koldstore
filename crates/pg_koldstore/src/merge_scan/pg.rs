@@ -513,10 +513,10 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     // Cold data can contribute from here on. Constructs that only make sense on a
     // real heap must be refused now rather than quietly running against the hot
     // side alone (upstream #125).
-    // `SELECT ... FOR UPDATE/SHARE` by full primary-key equality plans hot-only under
+    // `SELECT ... FOR UPDATE/SHARE` plans the locked table hot-only under
     // `koldstore.hydrate_on_write`: the executor hook hydrates the cold row first (and fails closed
     // if it cannot), so the lock lands on a real heap tuple.
-    if row_lock_by_primary_key_hydratable(root, rel, rti, rte, snapshot.as_deref()) {
+    if row_lock_hydratable(root, rti, rte, snapshot.as_deref()) {
         return;
     }
     reject_unsupported_cold_read_features(root, rti, rte, table_oid);
@@ -611,43 +611,34 @@ unsafe fn is_ri_key_share_probe(
     !mark.is_null() && (*mark).rti == rti && (*mark).strength == pg_sys::LockClauseStrength::LCS_FORKEYSHARE
 }
 
-/// True for a top-level, single-table `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE` whose
-/// `WHERE` pins the whole primary key by equality, while `koldstore.hydrate_on_write` is on. Such a
-/// statement is planned hot-only; `hooks::hydrate_on_write` hydrates the cold row before the scan.
-unsafe fn row_lock_by_primary_key_hydratable(
+/// True for a top-level `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE` locking `rti`, while
+/// `koldstore.hydrate_on_write` is on. Such a statement scans the locked table hot-only;
+/// `hooks::hydrate_on_write` first hydrates the cold rows the statement's `WHERE` / join selects
+/// (a deparsed single-table `WHERE`, or the probe `hooks::dml_planner` attached), and fails closed
+/// when it cannot, so the lock always lands on a real heap tuple.
+unsafe fn row_lock_hydratable(
     root: *mut pg_sys::PlannerInfo,
-    rel: *mut pg_sys::RelOptInfo,
     rti: pg_sys::Index,
     rte: *mut pg_sys::RangeTblEntry,
     snapshot: Option<&koldstore_catalog::ManagedTableSnapshot>,
 ) -> bool {
-    if !crate::guc::hydrate_on_write() || (*rte).inh || !(*root).parent_root.is_null() {
+    if !crate::guc::hydrate_on_write() || (*rte).inh || !(*root).parent_root.is_null() || snapshot.is_none() {
         return false;
     }
     let parse = (*root).parse;
-    if list_len((*root).rowMarks) != 1
-        || list_len((*parse).rtable) != 1
-        || (*parse).hasSubLinks
+    if (*parse).hasAggs
+        || (*parse).hasWindowFuncs
         || !(*parse).cteList.is_null()
         || !(*parse).setOperations.is_null()
         || !(*parse).groupClause.is_null()
-        || (*parse).hasAggs
-        || (*parse).hasWindowFuncs
         || !(*parse).distinctClause.is_null()
     {
         return false;
     }
-    let mark = list_nth_ptr((*root).rowMarks, 0).cast::<pg_sys::PlanRowMark>();
-    if mark.is_null() || (*mark).rti != rti {
-        return false;
-    }
-    let Some(snapshot) = snapshot else { return false };
-    let primary_key_attnums: Vec<_> = snapshot.primary_key_columns.iter().map(|column| column.column_id.get()).collect();
-    if primary_key_attnums.is_empty() {
-        return false;
-    }
-    let clauses = pg_sys::extract_actual_clauses((*rel).baserestrictinfo, false);
-    qual::quals_cover_primary_key(rti, clauses, &primary_key_attnums)
+    (0..list_len((*root).rowMarks)).any(|index| {
+        let mark = list_nth_ptr((*root).rowMarks, index).cast::<pg_sys::PlanRowMark>();
+        !mark.is_null() && (*mark).rti == rti && (*mark).prti == rti
+    })
 }
 
 /// Fails a plan before it runs when a query construct cannot be honoured over

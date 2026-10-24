@@ -73,12 +73,16 @@ unsafe extern "C-unwind" fn planner(
         } else {
             None
         };
+        let lock_probes = if crate::guc::hydrate_on_write() { build_lock_probes(parse) } else { Vec::new() };
         let planned = match PREVIOUS_PLANNER_HOOK {
             Some(previous) => previous(parse, query_string, cursor_options, bound_params),
             None => pg_sys::standard_planner(parse, query_string, cursor_options, bound_params),
         };
         if let Some(sql) = probe {
             attach_probe(planned, &sql);
+        }
+        if !lock_probes.is_empty() {
+            attach_lock_probes(planned, &lock_probes);
         }
         planned
     }
@@ -155,6 +159,88 @@ unsafe fn hierarchy_parent_primary_key_attnums(table_oid: pg_sys::Oid) -> Option
     }
 }
 
+/// The `SELECT <primary key>` target list over range-table entry `varno` of `table_oid`.
+unsafe fn pk_target_list(table_oid: pg_sys::Oid, varno: i32, pk_attnums: &[i16]) -> Option<*mut pg_sys::List> {
+    unsafe {
+        let mut target_list: *mut pg_sys::List = std::ptr::null_mut();
+        for (index, attnum) in pk_attnums.iter().enumerate() {
+            let mut type_oid = pg_sys::InvalidOid;
+            let mut typmod: i32 = -1;
+            let mut collation = pg_sys::InvalidOid;
+            pg_sys::get_atttypetypmodcoll(table_oid, *attnum, &mut type_oid, &mut typmod, &mut collation);
+            if type_oid == pg_sys::InvalidOid {
+                return None;
+            }
+            let var = pg_sys::makeVar(varno, *attnum, type_oid, typmod, collation, 0);
+            let resno = i16::try_from(index + 1).ok()?;
+            target_list = pg_sys::lappend(
+                target_list,
+                pg_sys::makeTargetEntry(var.cast(), resno, std::ptr::null_mut(), false).cast(),
+            );
+        }
+        Some(target_list)
+    }
+}
+
+/// One probe per managed table a multi-table / sub-query `SELECT ... FOR UPDATE/SHARE` locks:
+/// `(range-table index, SELECT <that table's primary key> over the statement's FROM/WHERE)`.
+/// The executor hydrates the cold-only rows these select before the locking scan (upstream #125).
+/// Single-table statements need none (the plan's own `WHERE` is deparsed instead).
+unsafe fn build_lock_probes(parse: *mut pg_sys::Query) -> Vec<(i32, String)> {
+    unsafe {
+        let mut probes = Vec::new();
+        if parse.is_null()
+            || (*parse).commandType != pg_sys::CmdType::CMD_SELECT
+            || (*parse).rowMarks.is_null()
+            || (*parse).jointree.is_null()
+            || !crate::catalog::cache::managed_catalog_ready()
+        {
+            return probes;
+        }
+        let query = &*parse;
+        let rtable = crate::merge_scan::pg::literals::list_node_pointers(query.rtable);
+        if (rtable.len() <= 1 && !query.hasSubLinks)
+            || !query.cteList.is_null()
+            || !query.setOperations.is_null()
+            || !query.groupClause.is_null()
+            || query.hasAggs
+            || query.hasWindowFuncs
+            || query.hasTargetSRFs
+            || pg_sys::contain_volatile_functions(query.jointree.cast())
+        {
+            return probes;
+        }
+        for clause in crate::merge_scan::pg::literals::list_node_pointers(query.rowMarks) {
+            let clause = clause.cast::<pg_sys::RowMarkClause>();
+            let rti = (*clause).rti as i32;
+            let Some(rte) = usize::try_from(rti).ok().and_then(|index| rtable.get(index.wrapping_sub(1))) else {
+                continue;
+            };
+            let rte = rte.cast::<pg_sys::RangeTblEntry>();
+            if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                continue;
+            }
+            let table_oid = (*rte).relid;
+            let Some(pk_attnums) = probe_pk_attnums(table_oid) else { continue };
+            let Some(target_list) = pk_target_list(table_oid, rti, &pk_attnums) else { continue };
+            let select = pg_sys::copyObjectImpl(parse.cast()).cast::<pg_sys::Query>();
+            (*select).targetList = target_list;
+            (*select).rowMarks = std::ptr::null_mut();
+            (*select).hasForUpdate = false;
+            (*select).sortClause = std::ptr::null_mut();
+            (*select).distinctClause = std::ptr::null_mut();
+            (*select).limitOffset = std::ptr::null_mut();
+            (*select).limitCount = std::ptr::null_mut();
+            (*select).hasTargetSRFs = false;
+            let text = pg_sys::pg_get_querydef(select, false);
+            if !text.is_null() {
+                probes.push((rti, CStr::from_ptr(text).to_string_lossy().into_owned()));
+            }
+        }
+        probes
+    }
+}
+
 /// The probe SQL for a join/sub-query `UPDATE`/`DELETE` (see `build_probe_sql`).
 unsafe fn build_update_delete_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
     unsafe {
@@ -196,22 +282,7 @@ unsafe fn build_update_delete_probe_sql(parse: *mut pg_sys::Query) -> Option<Str
         }
 
         let select = pg_sys::copyObjectImpl(parse.cast()).cast::<pg_sys::Query>();
-        let mut target_list: *mut pg_sys::List = std::ptr::null_mut();
-        for (index, attnum) in pk_attnums.iter().enumerate() {
-            let mut type_oid = pg_sys::InvalidOid;
-            let mut typmod: i32 = -1;
-            let mut collation = pg_sys::InvalidOid;
-            pg_sys::get_atttypetypmodcoll(table_oid, *attnum, &mut type_oid, &mut typmod, &mut collation);
-            if type_oid == pg_sys::InvalidOid {
-                return None;
-            }
-            let var = pg_sys::makeVar(query.resultRelation, *attnum, type_oid, typmod, collation, 0);
-            let resno = i16::try_from(index + 1).ok()?;
-            target_list = pg_sys::lappend(
-                target_list,
-                pg_sys::makeTargetEntry(var.cast(), resno, std::ptr::null_mut(), false).cast(),
-            );
-        }
+        let target_list = pk_target_list(table_oid, query.resultRelation, &pk_attnums)?;
         // The DML target's range-table entry is not "in the FROM clause" for a
         // DML statement; the deparser skips such entries, so mark it.
         let select_rte = crate::merge_scan::pg::literals::list_node_pointers((*select).rtable)
@@ -281,22 +352,7 @@ unsafe fn build_merge_probe_sql(parse: *mut pg_sys::Query) -> Option<String> {
         }
 
         let select = pg_sys::copyObjectImpl(parse.cast()).cast::<pg_sys::Query>();
-        let mut target_list: *mut pg_sys::List = std::ptr::null_mut();
-        for (index, attnum) in pk_attnums.iter().enumerate() {
-            let mut type_oid = pg_sys::InvalidOid;
-            let mut typmod: i32 = -1;
-            let mut collation = pg_sys::InvalidOid;
-            pg_sys::get_atttypetypmodcoll(table_oid, *attnum, &mut type_oid, &mut typmod, &mut collation);
-            if type_oid == pg_sys::InvalidOid {
-                return None;
-            }
-            let var = pg_sys::makeVar(query.resultRelation, *attnum, type_oid, typmod, collation, 0);
-            let resno = i16::try_from(index + 1).ok()?;
-            target_list = pg_sys::lappend(
-                target_list,
-                pg_sys::makeTargetEntry(var.cast(), resno, std::ptr::null_mut(), false).cast(),
-            );
-        }
+        let target_list = pk_target_list(table_oid, query.resultRelation, &pk_attnums)?;
 
         // The target relation is deliberately absent from `jointree.fromlist` at this point
         // (see the module doc comment); add it, and reuse the `ON` clause as the new `WHERE` --
@@ -443,5 +499,63 @@ pub(crate) unsafe fn collect_params(params: pg_sys::ParamListInfo) -> Option<Vec
             collected.push(ProbeParam { type_oid: (*prm).ptype, value, is_null: (*prm).isnull });
         }
         Some(collected)
+    }
+}
+
+/// First bytes of a lock-probe marker constant: `/*koldstore:lock-probe:<rti>*/<sql>`.
+const LOCK_PROBE_MARKER: &str = "/*koldstore:lock-probe:";
+
+/// The `LockRows` node of a planned `SELECT ... FOR UPDATE/SHARE` (below any `Limit`).
+pub(crate) unsafe fn lock_rows_node(plan: *mut pg_sys::Plan) -> *mut pg_sys::Plan {
+    unsafe {
+        let mut node = plan;
+        while !node.is_null() && (*node).type_ == pg_sys::NodeTag::T_Limit {
+            node = (*node).lefttree;
+        }
+        if !node.is_null() && (*node).type_ == pg_sys::NodeTag::T_LockRows { node } else { std::ptr::null_mut() }
+    }
+}
+
+/// Carries the lock probes on the `LockRows` node's `qual` list (never evaluated by the
+/// executor, copied with the plan).
+unsafe fn attach_lock_probes(planned: *mut pg_sys::PlannedStmt, probes: &[(i32, String)]) {
+    unsafe {
+        if planned.is_null() {
+            return;
+        }
+        let node = lock_rows_node((*planned).planTree);
+        if node.is_null() {
+            return;
+        }
+        for (rti, sql) in probes {
+            let Ok(text) = CString::new(format!("{LOCK_PROBE_MARKER}{rti}*/{sql}")) else { continue };
+            let datum = pg_sys::Datum::from(pg_sys::cstring_to_text(text.as_ptr()));
+            let constant =
+                pg_sys::makeConst(pg_sys::TEXTOID, -1, pg_sys::DEFAULT_COLLATION_OID, -1, datum, false, false);
+            (*node).qual = pg_sys::lappend((*node).qual, constant.cast());
+        }
+    }
+}
+
+/// The lock probe for range-table index `rti` carried by a planned `LockRows` node.
+pub(crate) unsafe fn lock_probe_sql_of(lock_rows: *mut pg_sys::Plan, rti: i32) -> Option<String> {
+    unsafe {
+        let prefix = format!("{LOCK_PROBE_MARKER}{rti}*/");
+        for node in crate::merge_scan::pg::literals::list_node_pointers((*lock_rows).qual) {
+            let node = node.cast::<pg_sys::Node>();
+            if node.is_null() || (*node).type_ != pg_sys::NodeTag::T_Const {
+                continue;
+            }
+            let constant = node.cast::<pg_sys::Const>();
+            if (*constant).consttype != pg_sys::TEXTOID || (*constant).constisnull {
+                continue;
+            }
+            let text = pg_sys::text_to_cstring((*constant).constvalue.cast_mut_ptr());
+            let value = CStr::from_ptr(text).to_string_lossy().into_owned();
+            if let Some(sql) = value.strip_prefix(&prefix) {
+                return Some(sql.to_string());
+            }
+        }
+        None
     }
 }

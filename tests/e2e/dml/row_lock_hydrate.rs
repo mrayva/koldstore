@@ -53,13 +53,45 @@ async fn select_for_update_by_primary_key_hydrates_cold_row() -> Result<()> {
             .await?;
         ensure!(db.client.query(&lock("UPDATE", 800), &[]).await?.len() == 1);
 
-        // Anything beyond a full primary-key equality is still refused (cold rows could be skipped).
-        let err = db
+        // Non-primary-key predicates hydrate every cold row they select, then lock them.
+        let rows = db.client.query(&format!("SELECT id FROM {relation} WHERE id BETWEEN 1 AND 2 ORDER BY id FOR UPDATE"), &[]).await?;
+        ensure!(rows.len() == 2 && rows[0].get::<_, i64>(0) == 1, "range lock returned {} rows", rows.len());
+        db.client.batch_execute("BEGIN").await?;
+        let n = db.client.query(&format!("SELECT id FROM {relation} WHERE id > 8 FOR SHARE"), &[]).await?.len();
+        let busy = peer.query(&format!("SELECT id FROM {relation} WHERE id = 9 FOR UPDATE NOWAIT"), &[]).await.err();
+        db.client.batch_execute("COMMIT").await?;
+        ensure!(n >= 2, "expected the cold rows id > 8, got {n}");
+        // The peer is refused either by the row lock or by the hydration retry guard (the key is mid-change).
+        ensure!(busy.is_some(), "a peer must not be able to take a row the range lock holds");
+        let limited = db.client.query(&format!("SELECT id FROM {relation} WHERE qty >= 0 ORDER BY id LIMIT 2 FOR UPDATE"), &[]).await?;
+        ensure!(limited.len() == 2, "LIMIT lock returned {} rows", limited.len());
+
+        // Joins and sub-queries: the locked table's cold rows are hydrated via the statement's own FROM/WHERE.
+        let schema = relation.split('.').next().unwrap();
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {schema}.lock_dim (id bigint PRIMARY KEY, tag text); \
+                 INSERT INTO {schema}.lock_dim VALUES (3, 'x'), (5, 'x'), (6, 'y')"
+            ))
+            .await?;
+        // All three managed rows 3/5/6 were already hydrated above, so flush again to make them cold.
+        db.flush_table_with_force(relation, true).await?;
+        common::fence_async_mirror(&db.client).await?;
+        let joined = db
             .client
-            .query(&format!("SELECT id FROM {relation} WHERE qty > 0 FOR UPDATE"), &[])
-            .await
-            .err();
-        ensure!(err.is_some(), "FOR UPDATE on a non-PK predicate must stay refused");
+            .query(
+                &format!("SELECT t.id FROM {relation} t JOIN {schema}.lock_dim d ON d.id = t.id WHERE d.tag = 'x' ORDER BY t.id FOR UPDATE OF t"),
+                &[],
+            )
+            .await?;
+        let ids: Vec<i64> = joined.iter().map(|r| r.get(0)).collect();
+        ensure!(ids == vec![3, 5], "join lock returned {ids:?}");
+        db.client.batch_execute(&format!("SELECT 1 FROM {schema}.lock_dim")).await?;
+        let sub = db
+            .client
+            .query(&format!("SELECT id FROM {relation} WHERE id IN (SELECT id FROM {schema}.lock_dim WHERE tag = 'y') FOR UPDATE"), &[])
+            .await?;
+        ensure!(sub.len() == 1 && sub[0].get::<_, i64>(0) == 6, "sub-query lock returned {} rows", sub.len());
 
         // SERIALIZABLE cannot hydrate: fail closed instead of skipping the cold row.
         db.client.batch_execute("BEGIN ISOLATION LEVEL SERIALIZABLE").await?;
