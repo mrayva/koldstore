@@ -34,12 +34,14 @@ fn flush_enabled_tables_reject_foreign_keys_with_column_details() {
                 direction: FkDirection::Outbound,
                 columns: vec!["user_id".to_string()],
                 related_relation: Some("public.users".to_string()),
+                globally_enforced: false,
             },
             ForeignKeyShape {
                 name: "orders_item_id_fkey".to_string(),
                 direction: FkDirection::Inbound,
                 columns: vec!["item_id".to_string()],
                 related_relation: Some("public.orders".to_string()),
+                globally_enforced: false,
             },
         ],
     };
@@ -69,6 +71,7 @@ fn hot_only_tables_allow_unique_and_foreign_keys() {
             direction: FkDirection::Outbound,
             columns: vec!["user_id".to_string()],
             related_relation: Some("public.users".to_string()),
+            globally_enforced: false,
         }],
     };
 
@@ -85,6 +88,7 @@ fn migration_validation_records_fk_hot_only_override() {
         direction: FkDirection::Outbound,
         columns: vec!["user_id".to_string()],
         related_relation: Some("public.users".to_string()),
+        globally_enforced: false,
     }];
     input.flush_enabled = true;
     input.allow_fk_hot_only = false;

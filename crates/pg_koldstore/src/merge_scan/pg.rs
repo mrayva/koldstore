@@ -450,6 +450,9 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if !crate::catalog::cache::managed_catalog_ready() {
         return;
     }
+    if is_ri_key_share_probe(root, rti, rte) {
+        return;
+    }
 
     let table_oid = (*rte).relid;
     let managed = with_hook_disabled(|| crate::catalog::cache::is_managed_relation(table_oid));
@@ -577,6 +580,26 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if !exact_full_primary_key_equality && cold_row_count > 0.0 {
         (*rel).rows = pg_sys::clamp_row_est((*rel).rows + cold_row_count);
     }
+}
+
+/// True for the probe PostgreSQL's referential-integrity trigger runs against a referencing table
+/// when a referenced row is deleted or re-keyed: `SELECT 1 FROM ONLY child x WHERE ... FOR KEY
+/// SHARE OF x`. It plans hot-only, because cold children cannot be row-locked; the write guard
+/// on the parent (`cold_dml::fk_guard`) refuses the change when cold children reference the key.
+unsafe fn is_ri_key_share_probe(
+    root: *mut pg_sys::PlannerInfo,
+    rti: pg_sys::Index,
+    rte: *mut pg_sys::RangeTblEntry,
+) -> bool {
+    if (*rte).inh || (*rte).eref.is_null() || list_len((*root).rowMarks) != 1 {
+        return false;
+    }
+    let alias = std::ffi::CStr::from_ptr((*(*rte).eref).aliasname);
+    if alias.to_bytes() != b"x" {
+        return false;
+    }
+    let mark = list_nth_ptr((*root).rowMarks, 0).cast::<pg_sys::PlanRowMark>();
+    !mark.is_null() && (*mark).rti == rti && (*mark).strength == pg_sys::LockClauseStrength::LCS_FORKEYSHARE
 }
 
 /// Fails a plan before it runs when a query construct cannot be honoured over

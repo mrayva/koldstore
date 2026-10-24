@@ -67,6 +67,19 @@ CREATE FUNCTION koldstore."_cold_unique_guard_check"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'cold_unique_guard_check_pg_wrapper';
 
+-- Backing function of the parent-side guard trigger for outbound foreign keys.
+CREATE FUNCTION koldstore."_cold_fk_parent_guard_check"(
+	"child_oid" oid,
+	"parent_oid" oid,
+	"fk_cols" jsonb,
+	"ref_cols" jsonb,
+	"old_row" jsonb,
+	"new_row" jsonb,
+	"constraint_name" TEXT
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'cold_fk_parent_guard_check_pg_wrapper';
+
 -- Installs the BEFORE INSERT guard trigger on tables managed under 0.1.11.
 CREATE FUNCTION koldstore."internal_attach_insert_guards"() RETURNS bigint
 STRICT

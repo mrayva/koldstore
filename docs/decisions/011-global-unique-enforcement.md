@@ -29,3 +29,15 @@ Reuse the per-table write-guard trigger (ADR-007) instead of a new constraint in
 - `DROP INDEX` of a unique index leaves the guard over-enforcing until it is re-planned.
 - Not covered here: foreign keys (outbound, then inbound), `MERGE`/`ON CONFLICT` upserts onto
   cold rows (still governed by ADR-007's refusal and `hydrate_pk`).
+
+## Addendum: outbound foreign keys
+
+`child -> parent` (parent unmanaged, `NO ACTION`/`RESTRICT`) uses the same machinery: a
+`BEFORE DELETE OR UPDATE OF <key>` trigger on the parent calls
+`koldstore._cold_fk_parent_guard_check`, which counts cold-only child rows (merged view minus
+heap-only view) and raises `23503`. It is planned by `guard::plan_insert_guard` (so attach,
+upgrade, DDL refresh and teardown share one path); the parent-side objects are found for
+teardown by the child oid baked into the function body. The merge-scan planner hook plans the
+RI trigger's `SELECT 1 FROM ONLY child x … FOR KEY SHARE OF x` probe hot-only instead of
+refusing it (#125). A foreign key to a managed parent needs cold-row locking or a child-side
+check against the parent's merged view and stays refused (inbound slice).

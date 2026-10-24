@@ -253,7 +253,15 @@ SELECT jsonb_build_object(
                       ON a.attrelid = c.conrelid
                      AND a.attnum = key_position.attnum
                 ),
-                'related_relation', format('%I.%I', ref_ns.nspname, ref_class.relname)
+                'related_relation', format('%I.%I', ref_ns.nspname, ref_class.relname),
+                'globally_enforced', (
+                    c.confdeltype IN ('a', 'r')
+                    AND c.confupdtype IN ('a', 'r')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM koldstore.schemas ks
+                        WHERE ks.table_oid = c.confrelid AND ks.active
+                    )
+                )
             ) AS entry
             FROM pg_constraint c
             JOIN pg_class ref_class ON ref_class.oid = c.confrelid
@@ -306,6 +314,8 @@ pub fn decode_manage_table_constraints_catalog(
         direction: Option<String>,
         #[serde(default)]
         related_relation: Option<String>,
+        #[serde(default)]
+        globally_enforced: bool,
     }
 
     #[derive(Deserialize)]
@@ -339,6 +349,7 @@ pub fn decode_manage_table_constraints_catalog(
                 },
                 columns: entry.columns,
                 related_relation: entry.related_relation,
+                globally_enforced: entry.globally_enforced,
             })
             .collect(),
     })

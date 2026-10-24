@@ -347,7 +347,7 @@ pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB
 /// does not fit keeps the start of `prefix` plus a hash of the whole prefix, so
 /// two long names that share their first characters never collapse onto the
 /// same helper object.
-fn bounded_identifier(prefix: &str, suffix: &str) -> String {
+pub(super) fn bounded_identifier(prefix: &str, suffix: &str) -> String {
     const MAX_LEN: usize = 63;
     let combined = format!("{prefix}{suffix}");
     if combined.len() <= MAX_LEN {
@@ -462,6 +462,7 @@ $$
     statements.push(format!("DROP FUNCTION IF EXISTS {function_name}()"));
     statements.push(function_sql);
     statements.push(trigger_sql);
+    statements.extend(super::fk_guard::plan_fk_parent_guards(source, true));
     statements
 }
 
@@ -557,6 +558,7 @@ pub(crate) fn plan_insert_guard_teardown(source: &koldstore_common::QualifiedTab
     let mut statements = legacy_teardown_sql(&names, &source_quoted);
     statements.push(drop_trigger_if_present_sql(&names.trigger, &source_quoted));
     statements.push(format!("DROP FUNCTION IF EXISTS {}()", names.function.quoted()));
+    statements.extend(super::fk_guard::plan_fk_parent_guards(source, false));
     statements
 }
 
@@ -596,6 +598,6 @@ $koldstore_drop_trigger$;"#
 /// inside generated DDL text (not a bind parameter -- this is building the
 /// trigger function's *source code*, evaluated once at `CREATE FUNCTION`
 /// time, not per-row).
-fn quote_sql_literal(value: &str) -> String {
+pub(super) fn quote_sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }

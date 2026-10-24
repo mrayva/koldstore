@@ -105,7 +105,7 @@ pub enum MigrationConstraintError {
     MissingStorage,
     /// Foreign keys need explicit hot-only acceptance when flush is enabled.
     #[error(
-        "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces foreign keys on hot rows only. Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
+        "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces these foreign keys on hot rows only (outbound foreign keys to an unmanaged parent with NO ACTION/RESTRICT are enforced globally). Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
     )]
     ForeignKeyRequiresHotOnlyOverride {
         /// Human-readable foreign-key listing.
@@ -237,6 +237,9 @@ pub struct ForeignKeyShape {
     pub columns: Vec<String>,
     /// Referenced table for outbound FKs or referencing table for inbound FKs.
     pub related_relation: Option<String>,
+    /// True when the write guard enforces this FK across hot and cold rows: an outbound FK to
+    /// an unmanaged parent with `NO ACTION`/`RESTRICT` actions.
+    pub globally_enforced: bool,
 }
 
 impl ForeignKeyShape {
@@ -289,12 +292,11 @@ impl ManageTableConstraintsCatalog {
     }
 
     fn validate_foreign_keys(&self, allow_fk_hot_only: bool) -> ConstraintResult<()> {
-        if self.foreign_keys.is_empty() || allow_fk_hot_only {
+        let unenforced = || self.foreign_keys.iter().filter(|fk| !fk.globally_enforced);
+        if unenforced().next().is_none() || allow_fk_hot_only {
             return Ok(());
         }
-        let foreign_keys = self
-            .foreign_keys
-            .iter()
+        let foreign_keys = unenforced()
             .map(ForeignKeyShape::display_label)
             .collect::<Vec<_>>()
             .join("; ");
