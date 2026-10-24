@@ -100,6 +100,10 @@ PGRX_LOGICAL_CONF=(
 PGRX_PRELOAD_CONF=(
   "${PGRX_LOGICAL_CONF[@]}"
   --postgresql-conf shared_preload_libraries=koldstore
+  # An inline flush that exhausts the pre-lock catch-up budget fails terminally (only queue
+  # jobs are retried), so a loaded machine turns a slow catch-up into a test failure. The
+  # product default stays 5s; the suite gets headroom for parallel runs.
+  --postgresql-conf koldstore.flush_prelock_max_ms=30000
 )
 pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}"
 
