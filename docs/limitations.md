@@ -88,6 +88,13 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   rows), so it is refused by default (2026-09-27, matching #121's
   same-transaction guard); `koldstore.reject_serializable_cold_reads = off`
   accepts the weaker guarantee instead.
+  With the experimental `koldstore.hydrate_on_write = on`, a top-level single-table
+  `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE` that pins the whole primary key by
+  equality hydrates the cold row first and then takes the native tuple lock. Not covered: joins, sub-queries, CTEs, partitioned tables, and any predicate other
+  than full-primary-key equality (still refused). Needs READ COMMITTED or REPEATABLE READ (or
+  `reject_serializable_cold_reads = off`); otherwise, and when this transaction already wrote the
+  table, it errors rather than skipping the cold row. A prepared plan made while the GUC was on keeps
+  its hot-only shape if the GUC is later turned off.
 - Foreign keys that reference a managed table with cold data: deleting or re-keying a
   parent row is refused (the referential-integrity scan of the child needs row locks,
   which cold rows do not support, #125), so parent rows cannot be removed while such a

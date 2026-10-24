@@ -12,6 +12,7 @@ mod persistent_wal_applier;
 mod fk_guard;
 mod inbound_fk_guard;
 mod purge_where;
+mod row_lock_hydrate;
 mod unique_guard;
 mod upsert_hydrate;
 mod pgoutput_old_row_cow;
