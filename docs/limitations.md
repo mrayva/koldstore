@@ -293,6 +293,7 @@ min/max statistics and reads only the surviving row groups.
 | Primary key | Yes | Logical winner via merge | Insert guard (`INSERT` only) |
 | `UNIQUE` (non-PK) | Yes | Yes | Yes, via the write guard |
 | Outbound FK to an unmanaged parent (`NO ACTION`/`RESTRICT`) | Yes | Yes | Yes, via the parent-side guard |
+| Inbound FK from an unmanaged child onto the PK (any `ON DELETE` action) | Yes | Yes | Yes, via the child-side guard and hydration |
 | Other foreign keys | Yes | No | No |
 
 ### Outbound foreign keys
@@ -316,19 +317,22 @@ while *cold* child rows still reference it (SQLSTATE `23503`). Notes:
 ### Inbound foreign keys
 
 For `child -> managed` with an **unmanaged** child that references the managed table's
-**primary key** with `NO ACTION`/`RESTRICT`:
+**primary key** (any `ON DELETE` action):
 
 - A guard trigger on the child hydrates a cold-only parent row (as `koldstore.hydrate_pk`
   does) before a write, so the native check finds and locks a hot parent. Flush prunes hot
   rows with RI triggers off, so the parent returns to cold storage while children keep
   referencing it. A missing parent still fails with `23503`.
 - `delete_row`/`update_row` hydrate the row and run an ordinary statement, so native RI
-  refuses to orphan children. `koldstore.purge_where` refuses (`23503`) when any matching
-  row is referenced.
+  refuses to orphan children (`NO ACTION`/`RESTRICT`) or applies the action
+  (`CASCADE`/`SET NULL`/`SET DEFAULT`). `koldstore.purge_where` does the same for the
+  referencing rows of the purged cold rows: it applies `CASCADE`/`SET NULL`/`SET DEFAULT`, and
+  with `NO ACTION`/`RESTRICT` it refuses (`23503`) when any matching row is referenced.
+  Managed tables do not support primary-key updates, so `ON UPDATE` actions never fire.
 - The guard is created by `manage_table`, re-planned when a foreign key is added by
   `CREATE TABLE`/`ALTER TABLE` on the child, and removed by `unmanage_table`.  Dropping the child table or the constraint removes the guard.
-- Foreign keys onto a non-primary-key unique constraint, `CASCADE`/`SET NULL`/`SET DEFAULT`,
-  and managed children still require `allow_fk_hot_only`.
+- Foreign keys onto a non-primary-key unique constraint and managed children still require
+  `allow_fk_hot_only`.
 - Each child write against a cold parent pays one hydration (a heap insert of the row).
 
 ### `manage_table` validation

@@ -8,11 +8,15 @@
 //!   semantics), after which the native check finds and locks a hot row. Flush later prunes hot
 //!   rows with RI triggers off, so a hydrated parent returns to cold storage unharmed.
 //! * **Cold deletes.** `purge_where` tombstones cold rows without a heap `DELETE`, so no native
-//!   check fires; it calls [`ensure_no_children`] first. `delete_row`/`update_row` hydrate and
+//!   check fires; it calls [`apply_purge_fk_actions`] first. `delete_row`/`update_row` hydrate and
 //!   then run an ordinary heap statement, which the native triggers already guard.
 //!
-//! Referencing a managed table through a non-primary-key unique constraint, a managed referencing
-//! table, and `CASCADE`/`SET NULL`/`SET DEFAULT` actions stay unsupported.
+//! `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT` work the same way: `delete_row`/`update_row` run an
+//! ordinary heap statement on the hydrated row, so the native action fires, and `purge_where`
+//! applies the action to the referencing rows itself before it tombstones the parents.
+//!
+//! Referencing a managed table through a non-primary-key unique constraint and a managed
+//! referencing table stay unsupported.
 
 use pgrx::datum::DatumWithOid;
 
@@ -24,6 +28,8 @@ pub(crate) struct InboundFk {
     pub child: String,
     pub fk_cols: Vec<String>,
     pub ref_cols: Vec<String>,
+    /// `pg_constraint.confdeltype`: `a` no action, `r` restrict, `c` cascade, `n` set null, `d` set default.
+    pub on_delete: char,
 }
 
 /// Inbound foreign keys of `parent_oid` the guard enforces.
@@ -32,9 +38,10 @@ pub(crate) fn inbound_fks(parent_oid: pgrx::pg_sys::Oid) -> Result<Vec<InboundFk
                       (SELECT jsonb_agg(a.attname::text ORDER BY k.ord) FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord) \
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum), \
                       (SELECT jsonb_agg(a.attname::text ORDER BY k.ord) FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord) \
-                        JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) \
+                        JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum), \
+                      c.confdeltype::text \
                FROM pg_catalog.pg_constraint c \
-               WHERE c.confrelid = $1 AND c.contype = 'f' AND c.confdeltype IN ('a', 'r') AND c.confupdtype IN ('a', 'r') \
+               WHERE c.confrelid = $1 AND c.contype = 'f' \
                  AND NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.conrelid AND ks.active) \
                  AND ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = \
                      (SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x) FROM pg_catalog.pg_index i \
@@ -55,6 +62,7 @@ pub(crate) fn inbound_fks(parent_oid: pgrx::pg_sys::Oid) -> Result<Vec<InboundFk
                 child: row.get(3).map_err(|e| e.to_string())?.unwrap_or_default(),
                 fk_cols: cols(4)?,
                 ref_cols: cols(5)?,
+                on_delete: row.get::<String>(6).map_err(|e| e.to_string())?.and_then(|c| c.chars().next()).unwrap_or('a'),
             });
         }
         Ok(found)
@@ -175,12 +183,24 @@ fn hot_exists(table_oid: pgrx::pg_sys::Oid, pk: &serde_json::Value) -> Result<bo
         .map_err(|e| e.to_string())
 }
 
-/// Refuses a `purge_where` that would orphan referencing rows. `predicate` is over `t`.
-/// Must run where the merged view of the table is readable (after the mirror fence).
-pub(crate) fn ensure_no_children(table_oid: pgrx::pg_sys::Oid, predicate: &str) -> Result<(), String> {
+/// Applies the `ON DELETE` action of every inbound foreign key to the rows a `purge_where` is about
+/// to remove, or refuses (`23503`) when the key is `NO ACTION`/`RESTRICT` and rows are still
+/// referenced. `predicate` is over `t`. Must run where the merged view of the table is readable
+/// (after the mirror fence), before the parents are tombstoned.
+pub(crate) fn apply_purge_fk_actions(table_oid: pgrx::pg_sys::Oid, predicate: &str) -> Result<(), String> {
     let quoted = super::qualified_relation(table_oid)?.quoted();
     let quote = koldstore_common::sql::ident::quote_ident;
-    for fk in inbound_fks(table_oid)? {
+    let fks = inbound_fks(table_oid)?;
+    if fks.is_empty() {
+        return Ok(());
+    }
+    // The merged hot+cold scan only serves plain SELECTs, so the matching parent keys are
+    // fetched first and handed to the child-side statements as JSON.
+    let keys_sql = format!("SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) FROM {quoted} AS t WHERE ({predicate})");
+    let keys: pgrx::JsonB = crate::txn_writes::with_check_suppressed(|| pgrx::Spi::get_one::<pgrx::JsonB>(&keys_sql))
+        .map_err(|e| e.to_string())?
+        .ok_or("purge_where: could not read the matching parent rows")?;
+    for fk in fks {
         let join = fk
             .fk_cols
             .iter()
@@ -188,11 +208,23 @@ pub(crate) fn ensure_no_children(table_oid: pgrx::pg_sys::Oid, predicate: &str) 
             .map(|(f, r)| format!("c.{} = t.{}", quote(f), quote(r)))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM {} AS c WHERE EXISTS (SELECT 1 FROM {quoted} AS t WHERE ({predicate}) AND {join}))",
-            fk.child
+        let referencing = format!(
+            "EXISTS (SELECT 1 FROM jsonb_populate_recordset(NULL::{quoted}, $1) AS t WHERE {join})"
         );
-        let found = crate::txn_writes::with_check_suppressed(|| pgrx::Spi::get_one::<bool>(&sql))
+        let assignments = |value: &str| fk.fk_cols.iter().map(|f| format!("{} = {value}", quote(f))).collect::<Vec<_>>().join(", ");
+        let action = match fk.on_delete {
+            'c' => Some(format!("DELETE FROM {} AS c WHERE {referencing}", fk.child)),
+            'n' => Some(format!("UPDATE {} AS c SET {} WHERE {referencing}", fk.child, assignments("NULL"))),
+            'd' => Some(format!("UPDATE {} AS c SET {} WHERE {referencing}", fk.child, assignments("DEFAULT"))),
+            _ => None,
+        };
+        let args = [DatumWithOid::from(pgrx::JsonB(keys.0.clone()))];
+        if let Some(action) = action {
+            crate::txn_writes::with_check_suppressed(|| pgrx::Spi::run_with_args(&action, &args)).map_err(|e| e.to_string())?;
+            continue;
+        }
+        let sql = format!("SELECT EXISTS (SELECT 1 FROM {} AS c WHERE {referencing})", fk.child);
+        let found = crate::txn_writes::with_check_suppressed(|| pgrx::Spi::get_one_with_args::<bool>(&sql, &args))
             .map_err(|e| e.to_string())?
             .unwrap_or(false);
         if found {
