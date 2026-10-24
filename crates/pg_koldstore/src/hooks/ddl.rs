@@ -96,6 +96,7 @@ mod process_utility {
             let mut drop_oids = Vec::new();
             let mut truncate_oids = Vec::new();
             let mut refresh_oid = None;
+            let mut unique_guard_oid = None;
             let mut renamed_schema = None;
             let mut copy_from_oid = None;
             // Partitions created or attached by this statement; a partition template manages them.
@@ -116,6 +117,13 @@ mod process_utility {
                         captured = strip_options(stmt);
                         has_standard_actions = !(*stmt).cmds.is_null();
                         refresh_oid = relation_oid_from_range_var((*stmt).relation);
+                        unique_guard_oid = refresh_oid;
+                    }
+                    pg_sys::NodeTag::T_IndexStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::IndexStmt>();
+                        if (*stmt).unique {
+                            unique_guard_oid = relation_oid_from_range_var((*stmt).relation);
+                        }
                     }
                     pg_sys::NodeTag::T_RenameStmt => {
                         // `ALTER TABLE … RENAME COLUMN` is RenameStmt, not AlterTableStmt.
@@ -214,6 +222,15 @@ mod process_utility {
                             "KoldStore schema refresh after ALTER TABLE deferred: {error}"
                         );
                     }
+                }
+            }
+            if let Some(table_oid) = unique_guard_oid {
+                if crate::catalog::cache::managed_catalog_ready()
+                    && crate::catalog::cache::is_managed_relation(table_oid)
+                {
+                    // New or dropped UNIQUE constraints change what the write guard enforces.
+                    pg_sys::CommandCounterIncrement();
+                    crate::sql::cold_dml::guard::refresh_insert_guard(table_oid);
                 }
             }
             if let Some(schema_name) = renamed_schema {

@@ -237,61 +237,59 @@ backend's own thread (plain SQL in the session) when they touch managed tables.
 
 ## Unique and Foreign Key Constraints
 
-PostgreSQL `UNIQUE` and foreign-key constraints on managed tables are enforced on
-the **hot heap only**. After flush, cold row values are preserved in Parquet,
-but PostgreSQL removes the corresponding index and constraint entries from the
-hot table.
+Non-primary-key `UNIQUE` constraints are enforced **globally across hot and cold
+rows**. Foreign keys are still enforced on the **hot heap only**: after flush,
+PostgreSQL removes the flushed rows' index and constraint entries from the hot
+table, and there is no global foreign-key layer yet.
 
-Koldstore does **not** currently implement a global hot+cold constraint layer.
-Manifest metadata and segment statistics are used for pruning and operator
-accounting, not for proving that a unique value is absent from cold storage on
-`INSERT` or `UPDATE`.
+### Global `UNIQUE` enforcement
+
+`koldstore.manage_table` accepts tables with non-PK `UNIQUE` constraints and unique
+indexes. The per-table write-guard trigger (the same one that guards primary keys)
+then fires on `INSERT`, and on `UPDATE` of a constrained column, and looks the new
+values up in the merged hot+cold view. A conflicting row anywhere is refused with
+SQLSTATE `23505`. The cold side of the lookup is pruned by the per-segment column
+min/max statistics and reads only the surviving row groups.
+
+- Multi-column constraints are supported. `NULL` values do not conflict (unless
+  the constraint is `NULLS NOT DISTINCT`).
+- Concurrent writers of the same value are serialised with a transaction-scoped
+  advisory lock, so a hot insert and a cold-duplicate insert cannot both succeed.
+- A delete committed moments ago is honoured (the same mirror-lag fence the primary
+  key guard uses).
+- Constraints added through `ALTER TABLE … ADD/DROP CONSTRAINT` or
+  `CREATE UNIQUE INDEX` after `manage_table` re-plan the guard automatically.
+  `DROP INDEX` does not: a dropped unique index stays enforced until the next
+  `ALTER TABLE` on the table, a re-`manage_table`, or an extension upgrade.
+- **Partial and expression unique indexes are enforced on hot rows only**
+  (a warning names them when the guard is attached).
+- The check costs one merged-view lookup per constrained insert, so bulk loads
+  into a table with a cold-heavy history and a non-selective unique column pay for
+  it; the lookup is cheapest when the unique column correlates with segment
+  ranges (for example time-ordered or sequential identifiers).
 
 ### Runtime behavior
 
 | Constraint | Hot rows | Cold rows | Normal DML checks cold? |
 |------------|----------|-----------|-------------------------|
-| Primary key | Yes | Logical winner via merge | No; the native check is hot-only |
-| `UNIQUE` (non-PK) | Yes | No | No |
+| Primary key | Yes | Logical winner via merge | Insert guard (`INSERT` only) |
+| `UNIQUE` (non-PK) | Yes | Yes | Yes, via the write guard |
 | Foreign keys | Yes | No | No |
 
-Example after flush:
-
-```text
-cold row:  id=1, email='a@x.com'
-hot heap:  (no row with email='a@x.com')
-INSERT INTO users (id=2, email='a@x.com')  → succeeds on hot path
-merge scan: can return two rows with the same email
-```
-
-The same boundary applies to foreign keys: a child row can reference a parent
-that exists only in cold storage, or miss a parent that was flushed, because
-native FK checks inspect the hot heap only.
+A foreign key can still reference a parent that exists only in cold storage, or
+miss a parent that was flushed, because native FK checks inspect the hot heap only.
 
 ### `manage_table` validation
 
 When `hot_row_limit` is set (flush enabled), `koldstore.manage_table` fails fast
-before creating mirrors or migration jobs if the table has:
-
-- non-primary-key `UNIQUE` constraints or unique indexes
-- inbound or outbound foreign keys
-
-The error lists the constraint names and columns involved.
+before creating mirrors or migration jobs if the table has inbound or outbound
+foreign keys, unless `options.allow_fk_hot_only = true`. The error lists the
+constraint names and columns involved.
 
 Hot-only management (`hot_row_limit` omitted) keeps native PostgreSQL constraint
 semantics because flushed rows are not expected to leave the hot heap.
 
-### What manifest metadata cannot do today
-
-Segment `row_count`, manifest generation state, and per-column min/max stats can
-help pruning and `koldstore.table_status`, but they cannot reliably answer
-“does this unique value already exist in cold storage?” on the insert path.
-Min/max stats can only prove absence when a value falls outside every cold
-segment range; values inside the observed range still require a future dedicated
-cold constraint index or a Parquet read.
-
-Until that layer exists, treat global uniqueness and referential integrity
-across hot and cold as an explicit non-goal.
+Global foreign-key enforcement (outbound, then inbound) is a planned follow-up.
 
 ## Custom and Extension Indexes
 
@@ -428,7 +426,7 @@ and a small-host checklist.
 |---------|----------|-----------|
 | Supported `SELECT` shapes | Yes | Yes, through `KoldMergeScan` |
 | Primary key enforcement | Yes | No global enforcement; winner resolution only |
-| `UNIQUE` (non-PK) | Yes | No |
+| `UNIQUE` (non-PK) | Yes | Yes (write guard; partial/expression indexes hot-only) |
 | Foreign keys | Yes | No |
 | PostgreSQL custom indexes | Yes | No |
 | pgvector index search | Yes | No |

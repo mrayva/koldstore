@@ -415,6 +415,29 @@ pub(crate) fn plan_insert_guard(source: &koldstore_common::QualifiedTableName) -
     let source_quoted = source.quoted();
     let table_display = source.quoted();
 
+    // Non-primary-key UNIQUE constraints are enforced globally (hot + cold) by the same trigger,
+    // which then also fires on UPDATE. The constraint list is baked into the function body, so
+    // the plan is regenerated whenever constraints change (see `refresh_unique_guard`).
+    let specs = unique_specs_for(source);
+    let (body, events) = if specs.is_empty() {
+        (
+            format!(
+                "    PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {});",
+                quote_sql_literal(&table_display)
+            ),
+            "INSERT",
+        )
+    } else {
+        (
+            format!(
+                "    IF TG_OP = 'INSERT' THEN\n        PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {table});\n    END IF;\n    PERFORM koldstore._cold_unique_guard_check(TG_RELID, to_jsonb(NEW), \
+                 CASE WHEN TG_OP = 'UPDATE' THEN to_jsonb(OLD) END, {specs}::jsonb, {table});",
+                table = quote_sql_literal(&table_display),
+                specs = quote_sql_literal(&serde_json::to_string(&specs).unwrap_or_else(|_| "[]".to_string())),
+            ),
+            "INSERT OR UPDATE",
+        )
+    };
     let function_sql = format!(
         r#"
 CREATE OR REPLACE FUNCTION {function_name}()
@@ -424,15 +447,14 @@ SECURITY DEFINER
 SET search_path = pg_catalog, koldstore
 AS $$
 BEGIN
-    PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {table_literal});
+{body}
     RETURN NEW;
 END;
 $$
-"#,
-        table_literal = quote_sql_literal(&table_display),
+"#
     );
     let trigger_sql = format!(
-        "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {source_quoted} \
+        "CREATE TRIGGER {trigger_name} BEFORE {events} ON {source_quoted} \
          FOR EACH ROW EXECUTE FUNCTION {function_name}()"
     );
     let mut statements = legacy_teardown_sql(&names, &source_quoted);
@@ -441,6 +463,43 @@ $$
     statements.push(function_sql);
     statements.push(trigger_sql);
     statements
+}
+
+/// The enforceable non-PK unique constraints of `source` (empty when it cannot be resolved).
+/// Partial/expression unique indexes cannot be enforced against cold rows and are reported.
+#[cfg(feature = "pg")]
+fn unique_specs_for(source: &koldstore_common::QualifiedTableName) -> Vec<super::unique_guard::UniqueSpec> {
+    let oid = pgrx::Spi::get_one::<pgrx::pg_sys::Oid>(&format!("SELECT {}::regclass::oid", quote_sql_literal(&source.quoted())))
+        .ok()
+        .flatten();
+    let Some(oid) = oid else { return Vec::new() };
+    match super::unique_guard::unique_specs(oid) {
+        Ok((specs, skipped)) => {
+            if !skipped.is_empty() {
+                pgrx::warning!(
+                    "koldstore: {} has partial/expression unique indexes ({}) that are enforced on hot rows only",
+                    source.quoted(),
+                    skipped.join(", ")
+                );
+            }
+            specs
+        }
+        Err(error) => pgrx::error!("koldstore: could not read unique constraints of {}: {error}", source.quoted()),
+    }
+}
+
+/// Re-plans one managed table's guard after DDL changed its unique constraints. A failure
+/// is a warning: the user's DDL already succeeded.
+#[cfg(feature = "pg")]
+pub(crate) fn refresh_insert_guard(table_oid: pgrx::pg_sys::Oid) {
+    let result = super::qualified_relation(table_oid).and_then(|source| {
+        plan_insert_guard(&source)
+            .iter()
+            .try_for_each(|statement| pgrx::Spi::run(statement).map_err(|error| error.to_string()))
+    });
+    if let Err(error) = result {
+        pgrx::warning!("koldstore: could not refresh the unique-constraint guard: {error}");
+    }
 }
 
 /// Installs (or refreshes) the insert guard on every active managed table.

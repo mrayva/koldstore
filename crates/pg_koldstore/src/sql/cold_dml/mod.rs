@@ -61,6 +61,7 @@ use pgrx::datum::DatumWithOid;
 pub(crate) mod guard;
 pub(crate) mod key_lock;
 pub(crate) mod purge;
+pub(crate) mod unique_guard;
 
 /// Resolves `table_oid` to a safely quotable schema-qualified name.
 #[cfg(feature = "pg")]

@@ -135,6 +135,7 @@ column storage.updated_at timestamp with time zone not null
 column table_cancel_requests.requested_at timestamp with time zone not null
 column table_cancel_requests.table_oid oid not null
 function _cold_insert_guard_check(table_oid oid, "row" jsonb, table_name text) returns void [cold_insert_guard_check_pg_wrapper]
+function _cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text) returns void [cold_unique_guard_check_pg_wrapper]
 function alter_storage_credentials(name text, credentials jsonb) returns void security definer [alter_storage_credentials_pg_wrapper]
 function alter_storage_location(name text, base_path text, config jsonb, "check" boolean DEFAULT true) returns text security definer [alter_storage_location_pg_wrapper]
 function async_mirror_status() returns jsonb [async_mirror_status_wrapper]

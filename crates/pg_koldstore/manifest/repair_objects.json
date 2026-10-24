@@ -1156,6 +1156,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore._cold_insert_guard_check(table_oid oid, \"row\" jsonb, table_name text)\n RETURNS void\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$cold_insert_guard_check_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function _cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text) returns void [cold_unique_guard_check_pg_wrapper]": {
+            "add": "koldstore._cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text)",
+            "name": "_cold_unique_guard_check",
+            "create": "CREATE OR REPLACE FUNCTION koldstore._cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text)\n RETURNS void\n LANGUAGE c\nAS '$libdir/koldstore', $function$cold_unique_guard_check_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function backup_manifest(table_name regclass DEFAULT NULL::regclass) returns jsonb security definer [backup_manifest_pg_wrapper]": {
             "add": "koldstore.backup_manifest(table_name regclass)",
             "name": "backup_manifest",

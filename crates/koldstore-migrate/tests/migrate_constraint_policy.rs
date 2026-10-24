@@ -4,7 +4,7 @@ use koldstore_migrate::constraints::{
 };
 
 #[test]
-fn flush_enabled_tables_reject_non_primary_unique_constraints_with_column_details() {
+fn flush_enabled_tables_accept_non_primary_unique_constraints() {
     let catalog = ManageTableConstraintsCatalog {
         unique_constraints: vec![
             UniqueConstraintShape {
@@ -19,15 +19,9 @@ fn flush_enabled_tables_reject_non_primary_unique_constraints_with_column_detail
         foreign_keys: Vec::new(),
     };
 
-    let error = catalog
+    catalog
         .validate_hot_cold_policy(true, false)
-        .expect_err("unique constraints should be rejected when flush is enabled");
-
-    let message = error.to_string();
-    assert!(message.contains("users_email_key"));
-    assert!(message.contains("email"));
-    assert!(message.contains("users_username_idx"));
-    assert!(message.contains("username"));
+        .expect("unique constraints are enforced globally by the write guard");
 }
 
 #[test]
@@ -105,7 +99,7 @@ fn migration_validation_records_fk_hot_only_override() {
 }
 
 #[test]
-fn migration_validation_rejects_unique_constraints_when_flush_is_enabled() {
+fn migration_validation_accepts_unique_constraints_when_flush_is_enabled() {
     let mut input = MigrationValidationInput::minimal_shared();
     input.flush_enabled = true;
     input.unique_constraints = vec![UniqueConstraintShape {
@@ -113,9 +107,7 @@ fn migration_validation_rejects_unique_constraints_when_flush_is_enabled() {
         columns: vec!["email".to_string()],
     }];
 
-    let error = input
+    input
         .validate()
-        .expect_err("unique constraints should fail");
-    assert!(error.to_string().contains("users_email_key"));
-    assert!(error.to_string().contains("email"));
+        .expect("unique constraints are enforced globally by the write guard");
 }

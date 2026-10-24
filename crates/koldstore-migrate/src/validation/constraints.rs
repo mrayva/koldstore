@@ -103,14 +103,6 @@ pub enum MigrationConstraintError {
     /// Storage registration lookup failed.
     #[error("storage registration must exist before migration")]
     MissingStorage,
-    /// Non-primary-key unique constraints are unsafe once flush moves rows cold.
-    #[error(
-        "flush-enabled managed tables cannot preserve global uniqueness; koldstore enforces unique constraints on hot rows only: {constraints}"
-    )]
-    UnsupportedUniqueConstraints {
-        /// Human-readable unique constraint listing.
-        constraints: String,
-    },
     /// Foreign keys need explicit hot-only acceptance when flush is enabled.
     #[error(
         "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces foreign keys on hot rows only. Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
@@ -234,12 +226,6 @@ pub struct UniqueConstraintShape {
     pub columns: Vec<String>,
 }
 
-impl UniqueConstraintShape {
-    fn display_label(&self) -> String {
-        format!("{} (columns: {})", self.name, self.columns.join(", "))
-    }
-}
-
 /// Foreign-key shape relevant to hot-only migration policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKeyShape {
@@ -287,8 +273,9 @@ impl ManageTableConstraintsCatalog {
     ///
     /// # Errors
     ///
-    /// Returns an error when flush is enabled and unique or foreign-key constraints
-    /// cannot be preserved globally across hot and cold storage.
+    /// Returns an error when flush is enabled and foreign-key constraints cannot be
+    /// preserved globally across hot and cold storage. Non-primary-key unique constraints
+    /// are accepted: the write guard enforces them across hot and cold rows.
     pub fn validate_hot_cold_policy(
         &self,
         flush_enabled: bool,
@@ -297,22 +284,8 @@ impl ManageTableConstraintsCatalog {
         if !flush_enabled {
             return Ok(());
         }
-        self.validate_unique_constraints()?;
         self.validate_foreign_keys(allow_fk_hot_only)?;
         Ok(())
-    }
-
-    fn validate_unique_constraints(&self) -> ConstraintResult<()> {
-        if self.unique_constraints.is_empty() {
-            return Ok(());
-        }
-        let constraints = self
-            .unique_constraints
-            .iter()
-            .map(UniqueConstraintShape::display_label)
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(MigrationConstraintError::UnsupportedUniqueConstraints { constraints })
     }
 
     fn validate_foreign_keys(&self, allow_fk_hot_only: bool) -> ConstraintResult<()> {

@@ -286,17 +286,14 @@ fn unsupported_types_are_rejected_through_migration_validation() {
 }
 
 #[test]
-fn flush_constraint_policy_is_applied_by_the_entry_point() {
+fn flush_unique_constraints_are_accepted_by_the_entry_point() {
     let mut context = valid_context();
     context.migration.unique_constraints = vec![UniqueConstraintShape {
         name: "events_external_id_key".to_string(),
         columns: vec!["external_id".to_string()],
     }];
 
-    assert!(matches!(
-        validate_manage_table(context),
-        Err(MigrationConstraintError::UnsupportedUniqueConstraints { .. })
-    ));
+    assert!(validate_manage_table(context).is_ok());
 }
 
 #[test]

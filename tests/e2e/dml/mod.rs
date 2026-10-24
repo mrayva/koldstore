@@ -9,6 +9,7 @@ mod changes_since_latency;
 mod cold_dml_matrix;
 mod persistent_wal_applier;
 mod purge_where;
+mod unique_guard;
 mod pgoutput_old_row_cow;
 mod wal_applier_footprint;
 mod wal_only_seq_cursor;

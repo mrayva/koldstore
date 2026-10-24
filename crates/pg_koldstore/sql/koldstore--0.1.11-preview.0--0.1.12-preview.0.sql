@@ -56,6 +56,17 @@ STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'cold_insert_guard_check_pg_wrapper';
 
+-- Backing function of the unique-constraint half of the per-table guard trigger.
+CREATE FUNCTION koldstore."_cold_unique_guard_check"(
+	"table_oid" oid,
+	"new_row" jsonb,
+	"old_row" jsonb,
+	"specs" jsonb,
+	"table_name" TEXT
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'cold_unique_guard_check_pg_wrapper';
+
 -- Installs the BEFORE INSERT guard trigger on tables managed under 0.1.11.
 CREATE FUNCTION koldstore."internal_attach_insert_guards"() RETURNS bigint
 STRICT
