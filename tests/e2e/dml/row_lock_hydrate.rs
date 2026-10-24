@@ -102,3 +102,44 @@ async fn select_for_update_by_primary_key_hydrates_cold_row() -> Result<()> {
     }
     Ok(())
 }
+
+/// `SELECT ... FOR UPDATE/SHARE` through a partitioned parent: each managed leaf hydrates the cold
+/// rows the statement selects from it, then the native tuple locks land on real heap tuples.
+#[tokio::test]
+async fn select_for_update_through_a_partitioned_parent_hydrates_cold_leaf_rows() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "row_lock_partitioned").await?;
+    let schema = db.relation("x").split('.').next().unwrap().to_string();
+    let (parent, east, west) = (format!("{schema}.lp_sales"), format!("{schema}.lp_east"), format!("{schema}.lp_west"));
+    db.client
+        .batch_execute(&format!(
+            "CREATE TABLE {parent} (id bigint, region text NOT NULL, qty int NOT NULL, PRIMARY KEY (id, region)) PARTITION BY LIST (region); \
+             CREATE TABLE {east} PARTITION OF {parent} FOR VALUES IN ('east'); \
+             CREATE TABLE {west} PARTITION OF {parent} FOR VALUES IN ('west'); \
+             INSERT INTO {parent} SELECT g, 'east', g FROM generate_series(1, 6) g; \
+             INSERT INTO {parent} SELECT g, 'west', g FROM generate_series(1, 3) g"
+        ))
+        .await?;
+    db.manage_shared(&east, "id").await?;
+    db.flush_table(&east).await?;
+    common::fence_async_mirror(&db.client).await?;
+    db.client.batch_execute("SET koldstore.hydrate_on_write = on").await?;
+
+    // Through the parent, with and without partition pruning; east rows are cold-only.
+    let ids = |rows: Vec<tokio_postgres::Row>| rows.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>();
+    let rows = db.client.query(&format!("SELECT id FROM {parent} WHERE region = 'east' AND id <= 2 ORDER BY id FOR UPDATE"), &[]).await?;
+    ensure!(ids(rows) == vec![1, 2], "pruned partitioned lock returned wrong rows");
+    let rows = db.client.query(&format!("SELECT id FROM {parent} WHERE id = 5 ORDER BY region FOR SHARE"), &[]).await?;
+    ensure!(ids(rows) == vec![5], "unpruned partitioned lock returned wrong rows");
+    let rows = db.client.query(&format!("SELECT id FROM {parent} WHERE qty >= 3 ORDER BY region, id FOR UPDATE"), &[]).await?;
+    ensure!(ids(rows) == vec![3, 4, 5, 6, 3], "whole-parent lock returned wrong rows");
+
+    // The locks are real: a peer cannot take a locked cold-origin row.
+    let peer = common::connect_peer(&db).await?;
+    db.client.batch_execute("BEGIN").await?;
+    db.client.query(&format!("SELECT id FROM {parent} WHERE region = 'east' AND id = 4 FOR UPDATE"), &[]).await?;
+    let busy = peer.query(&format!("SELECT id FROM {east} WHERE id = 4 FOR UPDATE NOWAIT"), &[]).await.err();
+    db.client.batch_execute("COMMIT").await?;
+    ensure!(busy.is_some(), "a peer must not lock a row the partitioned lock holds");
+    Ok(())
+}

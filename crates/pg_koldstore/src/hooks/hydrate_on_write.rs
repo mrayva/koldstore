@@ -231,7 +231,19 @@ unsafe fn hydrate_row_lock_target(query_desc: *mut pg_sys::QueryDesc, eflags: st
             {
                 continue;
             }
-            let target = if isolation_blocks_hydration() { None } else { lock_target(query_desc, node, marks.len(), rti, table_oid) };
+            let is_leaf = (*mark).prti != (*mark).rti;
+            let target = if isolation_blocks_hydration() {
+                None
+            } else if is_leaf {
+                match leaf_lock_target(query_desc, node, rtable, table_oid) {
+                    // A leaf the plan never scans (pruned) has nothing to lock.
+                    Ok(None) => continue,
+                    Ok(Some(target)) => Some(target),
+                    Err(()) => None,
+                }
+            } else {
+                lock_target(query_desc, node, marks.len(), rti, table_oid)
+            };
             let Some(target) = target else {
                 pgrx::ereport!(
                     pgrx::PgLogLevel::ERROR,
@@ -284,6 +296,31 @@ unsafe fn lock_target(
         }
         let where_sql = crate::hooks::where_deparse::deparse_where(scan_parent, (*query_desc).params, table_oid)?;
         Some(HydrateTarget { table_oid, where_sql, params: Vec::new() })
+    }
+}
+
+/// The hydration target for a managed leaf of a partitioned/inherited `SELECT ... FOR UPDATE/SHARE`:
+/// the leaf's own scan filter, as `UPDATE`/`DELETE` use. `Ok(None)` for a leaf the plan does not
+/// scan; `Err` when the filter cannot be reproduced.
+unsafe fn leaf_lock_target(
+    query_desc: *mut pg_sys::QueryDesc,
+    lock_rows: *mut pg_sys::Plan,
+    rtable: *mut pg_sys::List,
+    table_oid: pg_sys::Oid,
+) -> Result<Option<HydrateTarget>, ()> {
+    unsafe {
+        // `deparse_where_for_leaf` reads the scans under the node's `lefttree`; step over any Sort.
+        let mut node = lock_rows;
+        while !(*node).lefttree.is_null() && (*(*node).lefttree).type_ == pg_sys::NodeTag::T_Sort {
+            node = (*node).lefttree;
+        }
+        match crate::hooks::where_deparse::deparse_where_for_leaf(node, rtable, (*query_desc).params, table_oid) {
+            crate::hooks::where_deparse::LeafWhere::Sql(where_sql) => {
+                Ok(Some(HydrateTarget { table_oid, where_sql, params: Vec::new() }))
+            }
+            crate::hooks::where_deparse::LeafWhere::Absent => Ok(None),
+            crate::hooks::where_deparse::LeafWhere::Unknown => Err(()),
+        }
     }
 }
 

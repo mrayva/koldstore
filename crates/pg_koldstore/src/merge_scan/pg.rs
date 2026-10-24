@@ -635,9 +635,18 @@ unsafe fn row_lock_hydratable(
     {
         return false;
     }
+    // The statement's own relation (`prti == rti`), or a leaf of a partitioned/inherited parent it
+    // locks through (`prti` is a parent mark); the executor hydrates each managed leaf separately.
     (0..list_len((*root).rowMarks)).any(|index| {
         let mark = list_nth_ptr((*root).rowMarks, index).cast::<pg_sys::PlanRowMark>();
-        !mark.is_null() && (*mark).rti == rti && (*mark).prti == rti
+        if mark.is_null() || (*mark).rti != rti {
+            return false;
+        }
+        (*mark).prti == rti
+            || (0..list_len((*root).rowMarks)).any(|other| {
+                let parent = list_nth_ptr((*root).rowMarks, other).cast::<pg_sys::PlanRowMark>();
+                !parent.is_null() && (*parent).rti == (*mark).prti && (*parent).isParent
+            })
     })
 }
 

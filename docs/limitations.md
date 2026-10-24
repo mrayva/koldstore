@@ -93,7 +93,9 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   then takes the native tuple locks: any single-table `WHERE` (primary key or not), and joins /
   sub-queries (the statement's own FROM/WHERE is re-run to find the locked table's cold rows). Every
   matching cold row is hydrated, so a `LIMIT` does not bound how many are copied into the heap (only
-  the returned rows are locked). Not covered: CTEs, partitioned tables, set operations, and a
+  the returned rows are locked). A partitioned or inherited parent works too: each managed leaf
+  hydrates the rows its own scan filter selects (pruned leaves are skipped); a join/sub-query across
+  partitions whose filter cannot be reproduced per leaf errors. Not covered: CTEs, set operations, and a
   `WHERE` with volatile functions or `CURRENT OF` (these error). Needs READ COMMITTED or REPEATABLE READ (or
   `reject_serializable_cold_reads = off`); otherwise, and when this transaction already wrote the
   table, it errors rather than skipping the cold row. A second session locking a key the first is
