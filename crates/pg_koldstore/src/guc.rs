@@ -90,6 +90,9 @@ static JOB_RETENTION_DAYS: GucSetting<i32> =
 static COLD_OBJECT_RETENTION_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_COLD_OBJECT_RETENTION_SECONDS);
 #[cfg(feature = "pg")]
+static CDC_RETENTION_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_CDC_RETENTION_SECONDS);
+#[cfg(feature = "pg")]
 static FLUSH_EXECUTION: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"queue"));
 #[cfg(feature = "pg")]
@@ -402,6 +405,16 @@ pub fn define_gucs() {
         flags,
     );
     GucRegistry::define_int_guc(
+        c"koldstore.cdc_retention_seconds",
+        c"Seconds of superseded cold row versions and delete markers compaction keeps for changes_since.",
+        c"0 (default): compaction collapses every key to its newest version and changes_since refuses cursors older than what it dropped. A positive value makes compaction move the versions newer than this window into history segments (invisible to queries, read only by changes_since) and purge history segments once they fall out of the window, so a cursor within the window keeps working across compaction. Superuser-only. Clamped to 0..=315360000.",
+        &CDC_RETENTION_SECONDS,
+        settings::MIN_CDC_RETENTION_SECONDS,
+        settings::MAX_CDC_RETENTION_SECONDS,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
         c"koldstore.max_scopes_per_flush",
         c"Most distinct scopes one flush pass writes per-scope segments for.",
         c"A user-scoped table flushes one segment group per scope. When a single pass touches more distinct scopes than this, it is written as ordinary table-wide segments instead, so a flush across very many scopes does not scatter into very many tiny objects. 0 disables the limit. Superuser-only.",
@@ -673,6 +686,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
         },
         GucDefinition {
             name: settings::COLD_OBJECT_RETENTION_SECONDS_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
+            name: settings::CDC_RETENTION_SECONDS_GUC,
             internal: false,
             default_value: "0",
         },
@@ -1233,6 +1251,20 @@ pub fn cold_object_retention_seconds() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_COLD_OBJECT_RETENTION_SECONDS
+    }
+}
+
+/// Seconds of superseded cold versions kept for `changes_since` (`0` = collapse, the default).
+#[must_use]
+pub fn cdc_retention_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_cdc_retention_seconds(CDC_RETENTION_SECONDS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_CDC_RETENTION_SECONDS
     }
 }
 

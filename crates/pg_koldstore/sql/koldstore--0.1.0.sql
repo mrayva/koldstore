@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   row_group_row_counts bigint[] NOT NULL,
   row_group_min_seqs bigint[] NOT NULL,
   row_group_max_seqs bigint[] NOT NULL,
-  status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
+  status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted', 'history')),
   -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
   checksum text NOT NULL,
   object_etag text,

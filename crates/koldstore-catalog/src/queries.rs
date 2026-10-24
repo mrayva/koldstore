@@ -1029,6 +1029,60 @@ ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
     )
 }
 
+/// Retained-history cold segments (`status = 'history'`, written by compaction under
+/// `koldstore.cdc_retention_seconds`) of one table, oldest first. Columns: full object path,
+/// byte size, schema version, min seq, max seq, physical column names (JSON text), segment id.
+/// They are invisible to every scan; only `changes_since` reads them.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_history_segment_listing() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list retained-history cold segments for changes_since",
+        &format!(
+            r#"
+WITH table_prefix AS (
+    SELECT {SQL_TABLE_PREFIX} AS prefix
+    FROM koldstore.schemas s
+    JOIN koldstore.storage st ON st.id = s.storage_id
+    JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE s.table_oid = $1::oid
+      AND s.active
+      AND s.initialization_state = 'complete'
+    ORDER BY s.version DESC
+    LIMIT 1
+),
+versions AS (
+    SELECT cs.schema_version, {SQL_PHYSICAL_NAMES_ALL} AS physical_names
+    FROM (
+        SELECT DISTINCT table_oid, schema_version
+        FROM koldstore.cold_segments
+        WHERE table_oid = $1::oid AND scope_key = '' AND status = 'history'
+    ) cs
+)
+SELECT
+    CASE WHEN COALESCE(pref.prefix, '') = '' THEN cs.path ELSE pref.prefix || cs.path END,
+    cs.byte_size,
+    cs.schema_version,
+    cs.min_seq,
+    cs.max_seq,
+    v.physical_names::text,
+    cs.segment_id
+FROM koldstore.cold_segments cs
+LEFT JOIN versions v ON v.schema_version = cs.schema_version
+LEFT JOIN table_prefix pref ON true
+WHERE cs.table_oid = $1::oid
+  AND cs.scope_key = ''
+  AND cs.status = 'history'
+ORDER BY cs.min_seq, cs.max_seq, cs.segment_id
+"#
+        ),
+        [SqlParamType::Oid],
+    )
+}
+
 /// One row per active shared-scope segment with its key box: the whole-segment Sort Key V1
 /// `min_value` / `max_value` of each key column, as parallel arrays in key order (`NULL` elements, or
 /// arrays shorter than the key, mean a column has no usable bounds), ordered by the first column's

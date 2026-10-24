@@ -791,6 +791,15 @@ flush lock, so it fails fast when a flush is running and flushes skip the table 
 (`compacted`, `units`, `segments_replaced`, `segments_written`, `rows_read`, `rows_written`,
 `versions_and_markers_dropped`, `bytes_replaced`, `bytes_written`, `reaped_segments`, ...).
 
+Compaction collapses a key's cold history, so by default `koldstore.changes_since` refuses a cursor older than
+what was dropped ("predates compaction"). Set `koldstore.cdc_retention_seconds` (superuser, default `0`) to keep
+that history for a window instead: compaction then writes the superseded versions and delete markers newer than
+the window into separate `history` segments, which queries never read and `changes_since` merges into its feed, so
+a cursor within the window keeps working across compaction. History segments are purged (and
+`history_floor_seq` raised first) by the next `compact_table` / `reap_compacted_segments` call or the maintenance
+worker once their newest row is older than the window; setting the window back to `0` purges all of it. History
+segments are not part of backups, and user-scoped tables are not compacted.
+
 Replaced segments are marked `compacted` and keep their objects for `grace_seconds` (default 600) so queries
 planned on the previous layout finish; the next `compact_table` call, `koldstore.reap_compacted_segments`, or
 the maintenance worker deletes them afterwards. The grace is never shorter than

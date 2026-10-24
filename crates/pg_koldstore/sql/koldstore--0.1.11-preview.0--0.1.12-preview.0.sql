@@ -90,6 +90,12 @@ CREATE FUNCTION koldstore."_cold_fk_child_hydrate"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'cold_fk_child_hydrate_pg_wrapper';
 
+-- Cold segments with status 'history' hold the superseded versions compaction retains for
+-- changes_since (koldstore.cdc_retention_seconds); no query plan reads them.
+ALTER TABLE koldstore.cold_segments DROP CONSTRAINT IF EXISTS cold_segments_status_check;
+ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_status_check
+  CHECK (status = ANY (ARRAY['pending'::text, 'active'::text, 'compacted'::text, 'deleted'::text, 'history'::text]));
+
 -- Installs the BEFORE INSERT guard trigger on tables managed under 0.1.11.
 CREATE FUNCTION koldstore."internal_attach_insert_guards"() RETURNS bigint
 STRICT

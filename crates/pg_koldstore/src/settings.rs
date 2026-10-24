@@ -232,6 +232,27 @@ pub const MIN_COLD_OBJECT_RETENTION_SECONDS: i32 = 0;
 /// Upper bound for `koldstore.cold_object_retention_seconds` (10 years).
 pub const MAX_COLD_OBJECT_RETENTION_SECONDS: i32 = 315_360_000;
 
+/// GUC name: seconds of superseded cold versions kept as history for `changes_since`.
+pub const CDC_RETENTION_SECONDS_GUC: &str = "koldstore.cdc_retention_seconds";
+/// Default CDC retention (`0` = compaction keeps no history).
+pub const DEFAULT_CDC_RETENTION_SECONDS: i32 = 0;
+/// Lower bound for `koldstore.cdc_retention_seconds`.
+pub const MIN_CDC_RETENTION_SECONDS: i32 = 0;
+/// Upper bound for `koldstore.cdc_retention_seconds` (10 years).
+pub const MAX_CDC_RETENTION_SECONDS: i32 = 315_360_000;
+
+/// Validates and clamps `koldstore.cdc_retention_seconds` (`0` = no history).
+#[must_use]
+pub const fn bounded_cdc_retention_seconds(value: i32) -> i32 {
+    if value < MIN_CDC_RETENTION_SECONDS {
+        MIN_CDC_RETENTION_SECONDS
+    } else if value > MAX_CDC_RETENTION_SECONDS {
+        MAX_CDC_RETENTION_SECONDS
+    } else {
+        value
+    }
+}
+
 /// Validates and clamps `koldstore.cold_object_retention_seconds` (`0` = no retention).
 #[must_use]
 pub const fn bounded_cold_object_retention_seconds(value: i32) -> i32 {

@@ -365,7 +365,9 @@ SELECT generation FROM cas
 ///
 /// Parameters: table OID, expected generation, new generation, segment count after the swap,
 /// `max_seq`, new (pending) segment ids, replaced (active) segment ids, history floor (highest `seq`
-/// of a version or delete marker the rewrite dropped; `changes_since` refuses older cursors). Returns the new
+/// of a version or delete marker the rewrite dropped for good; `changes_since` refuses older cursors),
+/// and the ids of pending segments that hold the retained history (`koldstore.cdc_retention_seconds`)
+/// and become `history` instead of `active`. Returns the new
 /// generation, or no row when the CAS lost. A replaced segment that is no longer active (a
 /// concurrent change) makes the caller abort, because the rewrite no longer matches the catalog.
 ///
@@ -416,10 +418,21 @@ activated AS (
       AND segment_id = ANY($6::uuid[])
       AND EXISTS (SELECT 1 FROM cas)
     RETURNING segment_id
+),
+history AS (
+    UPDATE koldstore.cold_segments
+    SET status = 'history'
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND status = 'pending'
+      AND segment_id = ANY($9::uuid[])
+      AND EXISTS (SELECT 1 FROM cas)
+    RETURNING segment_id
 )
 SELECT CASE
          WHEN (SELECT count(*) FROM retired) = cardinality($7::uuid[])
           AND (SELECT count(*) FROM activated) = cardinality($6::uuid[])
+          AND (SELECT count(*) FROM history) = cardinality($9::uuid[])
          THEN (SELECT generation FROM cas)
        END
 "#

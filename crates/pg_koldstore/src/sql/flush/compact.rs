@@ -331,34 +331,51 @@ fn compact_unit(
     let rows_read: i64 = i64::try_from(rows.len()).unwrap_or(i64::MAX);
 
     // Newest version of each key wins; a winning delete marker removes the key altogether.
-    // `history_floor` is the highest seq of a version this pass drops (`changes_since` can no
-    // longer report it, so it refuses cursors below it).
+    // A dropped version or marker newer than `retain_from` is moved to history segments
+    // (`koldstore.cdc_retention_seconds`); `history_floor` is the highest seq of one dropped for
+    // good (`changes_since` can no longer report it, so it refuses cursors below it).
+    let retain_from = history_horizon();
     let mut history_floor = 0_i64;
+    let mut history: Vec<koldstore_parquet::CleanColdRow> = Vec::new();
+    let mut drop_version = |row: koldstore_parquet::CleanColdRow, floor: &mut i64| {
+        if row.seq >= retain_from {
+            history.push(row);
+        } else {
+            *floor = (*floor).max(row.seq);
+        }
+    };
     let mut winners: HashMap<String, koldstore_parquet::CleanColdRow> =
         HashMap::with_capacity(rows.len());
     for row in rows {
         let key = row.pk_json.to_string();
-        match winners.get(&key) {
+        match winners.remove(&key) {
             Some(existing) if existing.seq >= row.seq => {
-                history_floor = history_floor.max(row.seq);
+                winners.insert(key, existing);
+                drop_version(row, &mut history_floor);
             }
             Some(existing) => {
-                history_floor = history_floor.max(existing.seq);
                 winners.insert(key, row);
+                drop_version(existing, &mut history_floor);
             }
             None => {
                 winners.insert(key, row);
             }
         }
     }
-    history_floor = winners
-        .values()
-        .filter(|row| row.deleted)
-        .fold(history_floor, |floor, row| floor.max(row.seq));
     // A winning delete marker may only be dropped when nothing outside this unit's scope group can
     // still hold an older version of its key (see `compact_locked`).
     if !drop_markers && winners.values().any(|row| row.deleted) {
         return Ok(None);
+    }
+    let marker_keys: Vec<String> = winners
+        .iter()
+        .filter(|(_, row)| row.deleted)
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in marker_keys {
+        if let Some(marker) = winners.remove(&key) {
+            drop_version(marker, &mut history_floor);
+        }
     }
     let key_names: Vec<&String> = catalog
         .primary_key
@@ -372,26 +389,27 @@ fn compact_unit(
         .segment_order_column_id
         .and_then(|column_id| catalog.column_by_id(column_id))
         .map(|column| &column.name);
-    let mut kept: Vec<koldstore_parquet::CleanColdRow> = winners
-        .into_values()
-        .filter(|row| !row.deleted)
-        .collect();
+    let mut kept: Vec<koldstore_parquet::CleanColdRow> = winners.into_values().collect();
     let null = CellValue::Null;
     let cell = |row: &koldstore_parquet::CleanColdRow, name: &String| -> CellValue {
         row.row_image.get(name).cloned().unwrap_or_else(|| null.clone())
     };
     // Same order a flush produces: the segment-order column, then the key columns in key order.
-    kept.sort_by(|left, right| {
-        let by_order = order_name.map_or(std::cmp::Ordering::Equal, |name| {
-            cmp_cells(&cell(left, name), &cell(right, name))
+    let sort_rows = |rows: &mut Vec<koldstore_parquet::CleanColdRow>| {
+        rows.sort_by(|left, right| {
+            let by_order = order_name.map_or(std::cmp::Ordering::Equal, |name| {
+                cmp_cells(&cell(left, name), &cell(right, name))
+            });
+            key_names
+                .iter()
+                .fold(by_order, |ordering, name| {
+                    ordering.then_with(|| cmp_cells(&cell(left, name), &cell(right, name)))
+                })
+                .then(left.seq.cmp(&right.seq))
         });
-        key_names
-            .iter()
-            .fold(by_order, |ordering, name| {
-                ordering.then_with(|| cmp_cells(&cell(left, name), &cell(right, name)))
-            })
-            .then(left.seq.cmp(&right.seq))
-    });
+    };
+    sort_rows(&mut kept);
+    sort_rows(&mut history);
     // A single-column key ordered by itself always ends up key-disjoint, which is worth publishing
     // even when no row is dropped. Otherwise (composite key, or ordered by another column) the
     // rewritten segments' key boxes may still touch, so publish only when it removes rows or merges
@@ -406,22 +424,27 @@ fn compact_unit(
         }
     }
     let sorted_by_key = ctx.snapshot.segment_order_column_id.is_some();
-    let mirror_rows: Vec<FlushMirrorRow> = kept
-        .into_iter()
-        .map(|row| FlushMirrorRow {
-            seq: row.seq,
-            op: row.op,
-            values: catalog
-                .columns
-                .iter()
-                .map(|column| row.row_image.get(&column.name).cloned().unwrap_or(CellValue::Null))
-                .collect(),
-            // The encoder only checks the key is present (rows arrive sorted); paging below does
-            // not use it.
-            order_key: sorted_by_key.then(Vec::new),
-            scope: None,
-        })
-        .collect();
+    let to_mirror_rows = |rows: Vec<koldstore_parquet::CleanColdRow>| -> Vec<FlushMirrorRow> {
+        rows.into_iter()
+            .map(|row| FlushMirrorRow {
+                seq: row.seq,
+                op: row.op,
+                values: catalog
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        row.row_image.get(&column.name).cloned().unwrap_or(CellValue::Null)
+                    })
+                    .collect(),
+                // The encoder only checks the key is present (rows arrive sorted); paging below
+                // does not use it.
+                order_key: sorted_by_key.then(Vec::new),
+                scope: None,
+            })
+            .collect()
+    };
+    let mirror_rows = to_mirror_rows(kept);
+    let history_rows = to_mirror_rows(history);
     let max_seq = mirror_rows.iter().map(|row| row.seq).max().unwrap_or(0);
 
     let table_prefix = render_regular_table_prefix(
@@ -430,46 +453,60 @@ fn compact_unit(
         &ctx.relation.name,
     )?;
     let manifest_path = manifest_object_key(&table_prefix);
-    let (mut encode_input, _) = build_stream_encode_input(ctx, max_seq, None)?;
-    // Compaction keeps every row of a unit in the unit's scope (set per chunk below).
-    encode_input.scope_column_index = None;
-    let fetch_batch_size = usize::try_from(encode_input.fetch_batch_size)
-        .unwrap_or(1)
-        .max(1);
     let mut batch_number = next_flush_batch_number(table_oid)?;
     let pass_id = uuid::Uuid::new_v4();
-    let (mut total_rows, mut last_max_seq) = (0_i64, 0_i64);
-    let mut pending: Vec<PendingFlushSegmentRef> = Vec::new();
-    let mut next = 0_usize;
-    koldstore_flush::stream_flush_chunks(
-        &encode_input,
-        |_statement, _max_seq, _cursor| {
-            let end = (next + fetch_batch_size).min(mirror_rows.len());
-            let page = mirror_rows[next..end].to_vec();
-            next = end;
-            Ok(page)
-        },
-        |mut chunk| {
-            chunk.scope = scope.map(str::to_string);
-            write_streamed_chunk(
-                client,
-                ctx,
-                pass_id,
-                &table_prefix,
-                table_oid,
-                FlushCommitStyle::Nested,
-                &mut batch_number,
-                &mut total_rows,
-                &mut last_max_seq,
-                &mut pending,
-                chunk,
-                started,
-            )
-        },
-    )?;
-    drop(mirror_rows);
+    // Streams `rows` out as pending segments; returns them with the row count written.
+    let mut write_rows = |rows: Vec<FlushMirrorRow>,
+                          rows_max_seq: i64|
+     -> Result<(Vec<PendingFlushSegmentRef>, i64), String> {
+        let (mut encode_input, _) = build_stream_encode_input(ctx, rows_max_seq, None)?;
+        // Compaction keeps every row of a unit in the unit's scope (set per chunk below).
+        encode_input.scope_column_index = None;
+        let fetch_batch_size = usize::try_from(encode_input.fetch_batch_size)
+            .unwrap_or(1)
+            .max(1);
+        let (mut total_rows, mut last_max_seq) = (0_i64, 0_i64);
+        let mut pending: Vec<PendingFlushSegmentRef> = Vec::new();
+        let mut next = 0_usize;
+        koldstore_flush::stream_flush_chunks(
+            &encode_input,
+            |_statement, _max_seq, _cursor| {
+                let end = (next + fetch_batch_size).min(rows.len());
+                let page = rows[next..end].to_vec();
+                next = end;
+                Ok(page)
+            },
+            |mut chunk| {
+                chunk.scope = scope.map(str::to_string);
+                write_streamed_chunk(
+                    client,
+                    ctx,
+                    pass_id,
+                    &table_prefix,
+                    table_oid,
+                    FlushCommitStyle::Nested,
+                    &mut batch_number,
+                    &mut total_rows,
+                    &mut last_max_seq,
+                    &mut pending,
+                    chunk,
+                    started,
+                )
+            },
+        )?;
+        Ok((pending, total_rows))
+    };
+    let (pending, total_rows) = write_rows(mirror_rows, max_seq)?;
+    let history_max_seq = history_rows.iter().map(|row| row.seq).max().unwrap_or(0);
+    let history_pending = if history_rows.is_empty() {
+        Vec::new()
+    } else {
+        write_rows(history_rows, history_max_seq)?.0
+    };
 
     let source_ids: Vec<uuid::Uuid> = members.iter().map(|segment| segment.segment_id).collect();
+    let history_ids: Vec<uuid::Uuid> =
+        history_pending.iter().map(|segment| segment.segment_id).collect();
     let new_ids: Vec<uuid::Uuid> = pending.iter().map(|segment| segment.segment_id).collect();
     let bytes_written = pending
         .iter()
@@ -483,7 +520,7 @@ fn compact_unit(
         &ctx.relation,
         &ctx.snapshot,
         ctx.storage.schema_version,
-        &source_ids,
+        &[source_ids.as_slice(), history_ids.as_slice()].concat(),
     )?;
     write_manifest_with_client(client, &manifest_path, &manifest)?;
 
@@ -506,6 +543,7 @@ fn compact_unit(
             DatumWithOid::from(to_pg(&new_ids)),
             DatumWithOid::from(to_pg(&source_ids)),
             DatumWithOid::from(history_floor),
+            DatumWithOid::from(to_pg(&history_ids)),
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -528,6 +566,69 @@ fn compact_unit(
         rows_written: total_rows,
         bytes_written,
     }))
+}
+
+/// Retained-history segments of `table_oid` (see [`history_horizon`]) as scan hints, oldest first.
+/// Only `changes_since` reads them; no query plan includes them.
+pub(crate) fn history_segment_hints(
+    table_oid: pgrx::pg_sys::Oid,
+    current_schema_version: i32,
+) -> Result<Vec<SegmentStatsHint>, String> {
+    let statement = koldstore_catalog::queries::plan_history_segment_listing()
+        .map_err(|error| error.to_string())?;
+    let args = [DatumWithOid::from(table_oid)];
+    crate::catalog::owner::with_extension_owner(|| {
+        crate::spi::execute_prepared(&statement, &args, |tuples| {
+            let mut out = Vec::new();
+            for tuple in tuples {
+                let (Some(object_path), Some(min_seq), Some(max_seq)) = (
+                    tuple.get::<String>(1)?,
+                    tuple.get::<i64>(4)?,
+                    tuple.get::<i64>(5)?,
+                ) else {
+                    continue;
+                };
+                let physical_names: BTreeMap<i16, String> = tuple
+                    .get::<String>(6)?
+                    .map(|json| serde_json::from_str(&json).unwrap_or_default())
+                    .unwrap_or_default();
+                let to_seq = |raw: i64| {
+                    SeqId::new(raw).map_err(|error| {
+                        pgrx::spi::SpiError::DatumError(
+                            pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
+                                "invalid seq {raw}: {error}"
+                            )),
+                        )
+                    })
+                };
+                out.push(SegmentStatsHint {
+                    object_path,
+                    schema_version: tuple.get::<i32>(3)?.unwrap_or(current_schema_version),
+                    physical_names,
+                    byte_size: tuple.get::<i64>(2)?.and_then(|size| u64::try_from(size).ok()),
+                    min_seq: to_seq(min_seq)?,
+                    max_seq: to_seq(max_seq)?,
+                    selected_row_groups: None,
+                    scope_id: None,
+                });
+            }
+            Ok(out)
+        })
+        .map_err(|error| error.to_string())
+    })?
+}
+
+/// First `seq` compaction keeps as history: versions at or after it are moved to history segments
+/// instead of dropped. `i64::MAX` (keep nothing) when `koldstore.cdc_retention_seconds` is 0.
+fn history_horizon() -> i64 {
+    let retention = i64::from(crate::guc::cdc_retention_seconds());
+    if retention == 0 {
+        return i64::MAX;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
+    koldstore_common::minimum_id_at_unix_millis(now.saturating_sub(retention * 1000)).unwrap_or(1)
 }
 
 /// Orders key cells the way their Sort Key V1 encodings order. Only the types that have a bounds
@@ -652,6 +753,7 @@ pub(crate) fn reap_compacted_segments(
     // operator's retention window (`koldstore.cold_object_retention_seconds`, which exists to keep
     // such backups restorable) is a floor for the grace.
     let grace_seconds = grace_seconds.max(crate::guc::cold_object_retention_seconds());
+    let purged_history = purge_history_segments(table_oid, client)?;
     let statement = koldstore_catalog::queries::plan_compacted_segments_past_grace()
         .map_err(|error| error.to_string())?;
     let args = [
@@ -681,15 +783,75 @@ pub(crate) fn reap_compacted_segments(
         }
     }
     if done.is_empty() {
-        return Ok(0);
+        return Ok(purged_history);
     }
-    let reaped = i64::try_from(done.len()).unwrap_or(i64::MAX);
+    let reaped = purged_history + i64::try_from(done.len()).unwrap_or(i64::MAX);
     pgrx::Spi::run_with_args(
         "DELETE FROM koldstore.cold_segments WHERE segment_id = ANY($1) AND status = 'compacted'",
         &[DatumWithOid::from(done)],
     )
     .map_err(|error| error.to_string())?;
     Ok(reaped)
+}
+
+/// Deletes the retained-history segments (see [`history_horizon`]) whose newest row has fallen out
+/// of `koldstore.cdc_retention_seconds` (all of them when it is 0), raising the manifest's
+/// `history_floor_seq` first so `changes_since` refuses the cursors that can no longer be served.
+/// Returns how many segments were purged.
+fn purge_history_segments(
+    table_oid: pgrx::pg_sys::Oid,
+    client: &koldstore_storage::ObjectStoreClient,
+) -> Result<i64, String> {
+    let statement = koldstore_catalog::queries::plan_history_segment_listing()
+        .map_err(|error| error.to_string())?;
+    let args = [DatumWithOid::from(table_oid)];
+    let horizon = history_horizon();
+    let due: Vec<(pgrx::Uuid, String, i64)> = crate::catalog::owner::with_extension_owner(|| {
+        crate::spi::execute_prepared(&statement, &args, |tuples| {
+            let mut out = Vec::new();
+            for tuple in tuples {
+                let (key, max_seq, id) = (
+                    tuple.get::<String>(1)?,
+                    tuple.get::<i64>(5)?,
+                    tuple.get::<pgrx::Uuid>(7)?,
+                );
+                if let (Some(key), Some(max_seq), Some(id)) = (key, max_seq, id) {
+                    if max_seq < horizon {
+                        out.push((id, key, max_seq));
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .map_err(|error| error.to_string())
+    })??;
+    if due.is_empty() {
+        return Ok(0);
+    }
+    let floor = due.iter().map(|(_, _, max_seq)| *max_seq).max().unwrap_or(0);
+    pgrx::Spi::run_with_args(
+        "UPDATE koldstore.manifest SET history_floor_seq = GREATEST(history_floor_seq, $2::bigint) \
+         WHERE table_oid = $1::oid AND scope_key = ''",
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(floor)],
+    )
+    .map_err(|error| error.to_string())?;
+    let mut done: Vec<pgrx::Uuid> = Vec::with_capacity(due.len());
+    for (segment_id, key, _) in due {
+        match client.delete(&key) {
+            Ok(()) => done.push(segment_id),
+            Err(error) => pgrx::warning!("koldstore history purge: could not delete {key}: {error}"),
+        }
+    }
+    let purged = i64::try_from(done.len()).unwrap_or(i64::MAX);
+    if purged > 0 {
+        pgrx::Spi::run_with_args(
+            "DELETE FROM koldstore.cold_segments WHERE segment_id = ANY($1) AND status = 'history'",
+            &[DatumWithOid::from(done)],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::catalog::cache::invalidate_table_globally(table_oid);
+    }
+    Ok(purged)
 }
 
 /// `koldstore.reap_compacted_segments` / maintenance entry: opens the table's storage and reaps.
@@ -719,12 +881,13 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
         client
             .select(
                 "SELECT DISTINCT table_oid FROM koldstore.cold_segments \
-                 WHERE status = 'compacted' \
+                 WHERE (status = 'compacted' \
                    AND created_at <= now() - make_interval(secs => $1::double precision) \
-                   AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < created_at) \
+                   AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < created_at)) \
+                    OR (status = 'history' AND max_seq < $2::bigint) \
                  LIMIT 5",
                 None,
-                &[DatumWithOid::from(f64::from(grace))],
+                &[DatumWithOid::from(f64::from(grace)), DatumWithOid::from(history_horizon())],
             )?
             .map(|row| {
                 Ok(row

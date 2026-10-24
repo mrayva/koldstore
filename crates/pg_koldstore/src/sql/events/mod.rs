@@ -224,6 +224,13 @@ fn fetch_since_seq_page(
         .as_ref()
         .map(|ctx| ctx.segments.as_slice())
         .unwrap_or(&[]);
+    // Versions compaction moved aside (`koldstore.cdc_retention_seconds`) are part of the feed too.
+    let mut with_history: Vec<SegmentStatsHint> = segments.to_vec();
+    with_history.extend(crate::sql::flush::compact::history_segment_hints(
+        targets.table_oid,
+        targets.snapshot.schema_version,
+    )?);
+    let segments = with_history.as_slice();
     let oldest_cold = segments.iter().map(|segment| segment.min_seq.get()).min();
     let newest_cold = segments.iter().map(|segment| segment.max_seq.get()).max();
 

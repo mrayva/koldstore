@@ -89,7 +89,7 @@
                 "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_min_seqs_check CHECK ((array_position(row_group_min_seqs, NULL::bigint) IS NULL))",
                 "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_row_counts_check CHECK ((array_position(row_group_row_counts, NULL::bigint) IS NULL))",
                 "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_row_group_row_counts_check1 CHECK ((0 < ALL (row_group_row_counts)))",
-                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'active'::text, 'compacted'::text, 'deleted'::text])))"
+                "ALTER TABLE koldstore.cold_segments ADD CONSTRAINT cold_segments_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'active'::text, 'compacted'::text, 'deleted'::text, 'history'::text])))"
             ],
             "foreign_keys": [
             ]
