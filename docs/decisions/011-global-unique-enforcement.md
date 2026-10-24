@@ -40,4 +40,20 @@ upgrade, DDL refresh and teardown share one path); the parent-side objects are f
 teardown by the child oid baked into the function body. The merge-scan planner hook plans the
 RI trigger's `SELECT 1 FROM ONLY child x … FOR KEY SHARE OF x` probe hot-only instead of
 refusing it (#125). A foreign key to a managed parent needs cold-row locking or a child-side
-check against the parent's merged view and stays refused (inbound slice).
+check against the parent's merged view and stays refused.
+
+## Addendum: inbound foreign keys
+
+`child -> managed` (child unmanaged, FK onto the managed table's primary key, `NO ACTION`/
+`RESTRICT`) is handled by *hydrating on child write* rather than teaching RI to read cold
+rows: a `BEFORE INSERT OR UPDATE OF <fk>` trigger on the child calls
+`koldstore._cold_fk_child_hydrate`, which hydrates the parent key (job lock + key lock, same
+path as `hydrate_pk`) if it has no hot row, so the native probe finds and locks a heap row.
+Because that probe (`SELECT 1 FROM ONLY parent x … FOR KEY SHARE`) is now planned hot-only,
+this hydration is what keeps cold parents visible. Cold deletes that bypass the heap
+(`purge_where`) check the children explicitly; `delete_row`/`update_row` hydrate first, so
+native RI covers them. Flush already prunes with `session_replication_role = replica`, so
+hydrated parents are not pinned in the heap. Rejected: stripping row marks so the probe runs
+unlocked on the merged view (fragile with the junk ctid column) and `NOT ENFORCED` FKs (too
+invasive). Child-side guards are found for teardown by the parent oid in the function body and
+re-planned from the DDL hook when a child gains a foreign key.

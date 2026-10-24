@@ -62,6 +62,7 @@ pub(crate) mod guard;
 pub(crate) mod key_lock;
 pub(crate) mod purge;
 pub(crate) mod fk_guard;
+pub(crate) mod inbound_fk;
 pub(crate) mod unique_guard;
 
 /// Resolves `table_oid` to a safely quotable schema-qualified name.
@@ -403,6 +404,21 @@ pub(crate) fn hydrate_rows(table_oid: pgrx::pg_sys::Oid, rows: &[serde_json::Val
     Ok(done.rows_affected)
 }
 
+/// Hydrates one cold-only primary key under the table job lock and the per-key lock, with this
+/// table's own write guard suspended. Shared by `hydrate_pk` and the inbound-FK child guard.
+#[cfg(feature = "pg")]
+pub(crate) fn hydrate_pk_locked(table_oid: pgrx::pg_sys::Oid, pk: &serde_json::Value) -> Result<u64, String> {
+    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
+        .map_err(|error| format!("hydrate_pk failed to acquire table lock: {error}"))?;
+    // Serialize with any other session hydrating this key, so a delete another transaction just
+    // committed is not undone by re-hydrating its stale cold copy.
+    key_lock::lock_keys_bounded(table_oid, &[key_lock::key_of_pk_json(table_oid, pk).map_err(|error| format!("hydrate_pk: {error}"))?])
+        .map_err(|error| format!("hydrate_pk: {error}"))?;
+    // The materializing INSERT would otherwise trip this table's own BEFORE INSERT write guard,
+    // which exists to catch callers duplicating a cold PK, not this deliberate materialization.
+    guard::with_guard_suspended(|| hydrate_pk_impl(table_oid, pk).map_err(|error| format!("hydrate_pk failed: {error}")))
+}
+
 /// Hydrates a cold-only primary key back into the heap.
 ///
 /// SQL contract: `koldstore.hydrate_pk(table_name regclass, pk jsonb) → jsonb`.
@@ -422,23 +438,7 @@ pub fn hydrate_pk_pg(table_name: pgrx::PgRelation, pk: pgrx::JsonB) -> pgrx::Jso
     let table_oid = table_name.oid();
     crate::security::require_relation_owner_or_superuser(table_oid, "hydrate a row for this table");
     drop(table_name);
-    let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(table_oid, crate::sql::job_lock::WRITE_LOCK_TIMEOUT)
-        .unwrap_or_else(|error| pgrx::error!("hydrate_pk failed to acquire table lock: {error}"));
-    // Serialize with any other session hydrating this key, so a delete another transaction just
-    // committed is not undone by re-hydrating its stale cold copy.
-    key_lock::lock_keys_bounded(
-        table_oid,
-        &[key_lock::key_of_pk_json(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("hydrate_pk: {error}"))],
-    )
-    .unwrap_or_else(|error| pgrx::error!("hydrate_pk: {error}"));
-    // The materializing INSERT below would otherwise trip this table's own
-    // BEFORE INSERT cold-DML write guard (see `guard::plan_insert_guard`) --
-    // that guard exists to catch *callers* duplicating a cold PK via plain
-    // SQL, not this function's own, deliberate, correctness-preserving
-    // materialization of the same PK.
-    let affected = guard::with_guard_suspended(|| {
-        hydrate_pk_impl(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("hydrate_pk failed: {error}"))
-    });
+    let affected = hydrate_pk_locked(table_oid, &pk.0).unwrap_or_else(|error| pgrx::error!("{error}"));
     pgrx::JsonB(serde_json::json!({
         "affected_rows": affected,
         "hydrated": affected > 0,

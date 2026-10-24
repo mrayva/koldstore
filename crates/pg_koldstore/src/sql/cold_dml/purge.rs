@@ -192,6 +192,7 @@ fn purge_where_impl(table_oid: pgrx::pg_sys::Oid, predicate: &str) -> Result<ser
         if merged.is_empty() {
             return Ok(merged);
         }
+        super::inbound_fk::ensure_no_children(table_oid, predicate)?;
         let hot = {
             let _hot_only = crate::merge_scan::pg::HotOnlyRelation::new(table_oid);
             crate::txn_writes::with_check_suppressed(|| fetch_matches(&quoted, &pk_columns, &target, predicate))?

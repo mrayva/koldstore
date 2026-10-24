@@ -97,6 +97,8 @@ mod process_utility {
             let mut truncate_oids = Vec::new();
             let mut refresh_oid = None;
             let mut unique_guard_oid = None;
+            // Table whose foreign keys may now point at a managed table.
+            let mut fk_child_relation: Option<*mut pg_sys::RangeVar> = None;
             let mut renamed_schema = None;
             let mut copy_from_oid = None;
             // Partitions created or attached by this statement; a partition template manages them.
@@ -106,6 +108,7 @@ mod process_utility {
                     pg_sys::NodeTag::T_CreateStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::CreateStmt>();
                         reject_create_in_managed_hierarchy(stmt);
+                        fk_child_relation = Some((*stmt).relation);
                         if !(*stmt).partbound.is_null() {
                             new_partitions.push((*stmt).relation);
                         }
@@ -118,6 +121,7 @@ mod process_utility {
                         has_standard_actions = !(*stmt).cmds.is_null();
                         refresh_oid = relation_oid_from_range_var((*stmt).relation);
                         unique_guard_oid = refresh_oid;
+                        fk_child_relation = Some((*stmt).relation);
                     }
                     pg_sys::NodeTag::T_IndexStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::IndexStmt>();
@@ -231,6 +235,14 @@ mod process_utility {
                     // New or dropped UNIQUE constraints change what the write guard enforces.
                     pg_sys::CommandCounterIncrement();
                     crate::sql::cold_dml::guard::refresh_insert_guard(table_oid);
+                }
+            }
+            if let Some(relation) = fk_child_relation {
+                if crate::catalog::cache::managed_catalog_ready() {
+                    if let Some(child_oid) = relation_oid_from_range_var(relation) {
+                        pg_sys::CommandCounterIncrement();
+                        crate::sql::cold_dml::guard::refresh_guards_of_referenced_managed(child_oid);
+                    }
                 }
             }
             if let Some(schema_name) = renamed_schema {

@@ -1162,6 +1162,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore._cold_fk_parent_guard_check(child_oid oid, parent_oid oid, fk_cols jsonb, ref_cols jsonb, old_row jsonb, new_row jsonb, constraint_name text)\n RETURNS void\n LANGUAGE c\nAS '$libdir/koldstore', $function$cold_fk_parent_guard_check_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function _cold_fk_child_hydrate(parent_oid oid, fk_cols jsonb, ref_cols jsonb, new_row jsonb) returns void [cold_fk_child_hydrate_pg_wrapper]": {
+            "add": "koldstore._cold_fk_child_hydrate(parent_oid oid, fk_cols jsonb, ref_cols jsonb, new_row jsonb)",
+            "name": "_cold_fk_child_hydrate",
+            "create": "CREATE OR REPLACE FUNCTION koldstore._cold_fk_child_hydrate(parent_oid oid, fk_cols jsonb, ref_cols jsonb, new_row jsonb)\n RETURNS void\n LANGUAGE c\nAS '$libdir/koldstore', $function$cold_fk_child_hydrate_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function _cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text) returns void [cold_unique_guard_check_pg_wrapper]": {
             "add": "koldstore._cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text)",
             "name": "_cold_unique_guard_check",

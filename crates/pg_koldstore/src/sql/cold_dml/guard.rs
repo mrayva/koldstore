@@ -463,6 +463,7 @@ $$
     statements.push(function_sql);
     statements.push(trigger_sql);
     statements.extend(super::fk_guard::plan_fk_parent_guards(source, true));
+    statements.extend(super::inbound_fk::plan_fk_child_guards(source, true));
     statements
 }
 
@@ -500,6 +501,25 @@ pub(crate) fn refresh_insert_guard(table_oid: pgrx::pg_sys::Oid) {
     });
     if let Err(error) = result {
         pgrx::warning!("koldstore: could not refresh the unique-constraint guard: {error}");
+    }
+}
+
+/// Re-plans the write guard of every managed table that `child_oid` references through a foreign
+/// key, so a foreign key added to (or dropped from) an unmanaged table is guarded on the parent.
+pub(crate) fn refresh_guards_of_referenced_managed(child_oid: pgrx::pg_sys::Oid) {
+    let sql = "SELECT DISTINCT c.confrelid FROM pg_catalog.pg_constraint c \
+               WHERE c.conrelid = $1 AND c.contype = 'f' \
+                 AND EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active)";
+    let args = [pgrx::datum::DatumWithOid::from(child_oid)];
+    let parents: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
+        client
+            .select(sql, None, &args)?
+            .map(|row| Ok(row.get::<pgrx::pg_sys::Oid>(1)?.unwrap_or(pgrx::pg_sys::InvalidOid)))
+            .collect::<Result<Vec<_>, pgrx::spi::Error>>()
+    })
+    .unwrap_or_default();
+    for parent in parents {
+        refresh_insert_guard(parent);
     }
 }
 
@@ -559,6 +579,7 @@ pub(crate) fn plan_insert_guard_teardown(source: &koldstore_common::QualifiedTab
     statements.push(drop_trigger_if_present_sql(&names.trigger, &source_quoted));
     statements.push(format!("DROP FUNCTION IF EXISTS {}()", names.function.quoted()));
     statements.extend(super::fk_guard::plan_fk_parent_guards(source, false));
+    statements.extend(super::inbound_fk::plan_fk_child_guards(source, false));
     statements
 }
 

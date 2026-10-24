@@ -80,6 +80,16 @@ CREATE FUNCTION koldstore."_cold_fk_parent_guard_check"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'cold_fk_parent_guard_check_pg_wrapper';
 
+-- Child-side guard trigger for inbound foreign keys: hydrates a cold-only parent row.
+CREATE FUNCTION koldstore."_cold_fk_child_hydrate"(
+	"parent_oid" oid,
+	"fk_cols" jsonb,
+	"ref_cols" jsonb,
+	"new_row" jsonb
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'cold_fk_child_hydrate_pg_wrapper';
+
 -- Installs the BEFORE INSERT guard trigger on tables managed under 0.1.11.
 CREATE FUNCTION koldstore."internal_attach_insert_guards"() RETURNS bigint
 STRICT

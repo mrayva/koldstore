@@ -282,7 +282,20 @@ SELECT jsonb_build_object(
                       ON a.attrelid = c.conrelid
                      AND a.attnum = key_position.attnum
                 ),
-                'related_relation', format('%I.%I', src_ns.nspname, src_class.relname)
+                'related_relation', format('%I.%I', src_ns.nspname, src_class.relname),
+                'globally_enforced', (
+                    c.confdeltype IN ('a', 'r')
+                    AND c.confupdtype IN ('a', 'r')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM koldstore.schemas ks
+                        WHERE ks.table_oid = c.conrelid AND ks.active
+                    )
+                    AND ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = (
+                        SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x)
+                        FROM pg_index i
+                        WHERE i.indrelid = c.confrelid AND i.indisprimary
+                    )
+                )
             ) AS entry
             FROM pg_constraint c
             JOIN pg_class src_class ON src_class.oid = c.conrelid
