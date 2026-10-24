@@ -70,7 +70,8 @@ PostgreSQL operation keeps its normal semantics across both tiers.
     `DO NOTHING` merges, and single-row merges by primary key, are unaffected.
 
   Change a cold row with `koldstore.update_row()` / `delete_row()`, which act on
-  one primary key at a time.
+  one primary key at a time, or `koldstore.purge_where()` to delete many rows (hot and cold)
+  matching a predicate.
 - Cold rows have no heap `ctid`, `xmin`, tuple lock, or SSI predicate lock.
   When cold data can contribute, `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY
   SHARE`, `TABLESAMPLE` and system-column projections (`ctid`, `xmin`, ...) are

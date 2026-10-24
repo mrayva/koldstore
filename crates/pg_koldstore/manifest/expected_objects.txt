@@ -165,6 +165,7 @@ function manage_table(table_name regclass, storage text, hot_row_limit bigint, m
 function preload_status() returns jsonb [preload_status_pg_wrapper]
 function purge_deferred_cold_objects(batch_limit integer DEFAULT 1000, older_than_seconds integer DEFAULT NULL::integer, dry_run boolean DEFAULT false) returns jsonb security definer [purge_deferred_cold_objects_pg_wrapper]
 function purge_old_jobs(batch_limit integer DEFAULT 100) returns bigint security definer [purge_old_jobs_pg_wrapper]
+function purge_where(table_name regclass, predicate text) returns jsonb [purge_where_pg_wrapper]
 function reap_compacted_segments(table_name regclass, grace_seconds integer DEFAULT 600) returns bigint security definer [reap_compacted_segments_pg_wrapper]
 function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]
 function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]

@@ -53,6 +53,8 @@ static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Opt
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
+static MAX_PURGE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
+#[cfg(feature = "pg")]
 static INSERT_GUARD_FENCE: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static HYDRATE_SLOT_LOCK_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
@@ -274,6 +276,16 @@ pub fn define_gucs() {
         &MAX_HYDRATE_ROWS,
         1,
         10_000_000,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_purge_rows",
+        c"Most cold-only rows one koldstore.purge_where call may tombstone.",
+        c"A purge matching more cold-only rows is rejected; narrow the predicate or purge in batches.",
+        &MAX_PURGE_ROWS,
+        1,
+        100_000_000,
         GucContext::Userset,
         flags,
     );
@@ -570,6 +582,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "10000",
         },
         GucDefinition {
+            name: MAX_PURGE_ROWS_GUC,
+            internal: false,
+            default_value: "1000000",
+        },
+        GucDefinition {
             name: INSERT_GUARD_FENCE_GUC,
             internal: false,
             default_value: "on",
@@ -719,6 +736,7 @@ pub const ALLOW_SAME_TXN_COLD_READS_GUC: &str = "koldstore.allow_same_txn_cold_r
 pub const GUARD_SCAN_WRITES_GUC: &str = "koldstore.guard_scan_writes";
 pub const HYDRATE_ON_WRITE_GUC: &str = "koldstore.hydrate_on_write";
 pub const MAX_HYDRATE_ROWS_GUC: &str = "koldstore.max_hydrate_rows";
+pub const MAX_PURGE_ROWS_GUC: &str = "koldstore.max_purge_rows";
 /// SQL name of [`insert_guard_fence`].
 pub const INSERT_GUARD_FENCE_GUC: &str = "koldstore.insert_guard_fence";
 pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_poll_ms";
@@ -889,6 +907,20 @@ pub fn insert_guard_fence() -> bool {
     #[cfg(not(feature = "pg"))]
     {
         true
+    }
+}
+
+/// Most cold-only rows a single `koldstore.purge_where` call may tombstone.
+#[must_use]
+pub fn max_purge_rows() -> usize {
+    #[cfg(feature = "pg")]
+    {
+        usize::try_from(MAX_PURGE_ROWS.get()).unwrap_or(1_000_000)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        1_000_000
     }
 }
 

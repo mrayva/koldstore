@@ -902,6 +902,15 @@ change a cold-only key are rejected rather than silently matching nothing
 (upstream #122). Rows changed in a transaction are visible to later reads only
 after `COMMIT`; see `koldstore.allow_same_txn_cold_reads` above.
 
+To delete many rows at once, cold ones included, use
+`koldstore.purge_where(table, predicate) → {purged_cold, deleted_hot}`. The predicate is a boolean
+expression over the table aliased `t`, e.g. `t.created_at < now() - interval '2 years'`. Owner or
+superuser only; requires `READ COMMITTED` and a transaction that has not yet written the table. It
+blocks concurrent writes and flushes of that table until it commits, and refuses (without changing
+anything) a predicate matching more than `koldstore.max_purge_rows` (default 1,000,000) cold-only
+rows. Reads stop returning the purged rows immediately; the next flush records the deletes in cold
+storage. Plain `DELETE` is unchanged.
+
 ## Changes and Operations
 
 ### `koldstore.changes_since`

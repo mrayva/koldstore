@@ -147,7 +147,21 @@ Costs and honest limits:
 - **Unchanged limits:** statements the probe cannot reproduce (volatile
   functions, CTEs, `CURRENT OF`, no primary key) stay rejected.
 
-## Option C: both (later, only if needed)
+## Option C: both (implemented 2026-10-24 as `koldstore.purge_where`)
+
+Implemented as the isolated bulk purge described below: `koldstore.purge_where(table, predicate)`
+(predicate over the table aliased `t`). Owner/superuser, `READ COMMITTED`, and the transaction
+must not already have written the table. It takes the table job lock (no flush) and a
+`SHARE ROW EXCLUSIVE` table lock (no concurrent DML, which also avoids a per-key advisory lock per
+purged row), does a *recorded* mirror catch-up so a later applier replay cannot hand an old event a
+seq above the tombstones, then writes `op = 3` mirror rows for the cold-only matches with seqs above
+both the mirror's max and the durable watermark (and raises the watermark), and deletes the hot
+matches natively. The predicate and every mirror value are computed as the invoking role; only the
+fixed mirror `INSERT`/watermark `UPDATE` run as the extension owner, and they consume only `jsonb`.
+Capped by `koldstore.max_purge_rows` (default 1,000,000). Plain `DELETE` is unchanged and stays on
+hydrate-on-write.
+
+Original rationale:
 
 Option B covers correctness. If very large cold deletes matter, add a *bulk
 purge* as a separate, explicitly-named operation that runs under the apply lock

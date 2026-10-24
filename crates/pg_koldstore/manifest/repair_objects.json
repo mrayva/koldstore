@@ -1192,6 +1192,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$delete_row_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function purge_where(table_name regclass, predicate text) returns jsonb [purge_where_pg_wrapper]": {
+            "add": "koldstore.purge_where(table_name regclass, predicate text)",
+            "name": "purge_where",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.purge_where(table_name regclass, predicate text)\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$purge_where_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]": {
             "add": "koldstore.recover_segments(table_name regclass, dry_run boolean)",
             "name": "recover_segments",

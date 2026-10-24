@@ -38,6 +38,14 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'delete_row_pg_wrapper';
 
+CREATE FUNCTION koldstore."purge_where"(
+	"table_name" regclass,
+	"predicate" TEXT
+) RETURNS jsonb
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'purge_where_pg_wrapper';
+
 -- Backing function of the per-table BEFORE INSERT guard trigger.
 CREATE FUNCTION koldstore."_cold_insert_guard_check"(
 	"table_oid" oid,
