@@ -255,12 +255,11 @@ backend's own thread (plain SQL in the session) when they touch managed tables.
 
 ## Unique and Foreign Key Constraints
 
-Non-primary-key `UNIQUE` constraints, **outbound foreign keys to an unmanaged parent**
-and **foreign keys onto a managed table's primary key** (from an unmanaged or a managed
-child) are enforced **globally across hot and cold rows**. Every other foreign key (onto a
-non-primary-key unique constraint) is still enforced on the **hot heap only**: after
-flush, PostgreSQL removes the flushed rows' index and constraint entries from the hot
-table.
+Non-primary-key `UNIQUE` constraints and **foreign keys** (outbound to an unmanaged or a
+managed parent, inbound from an unmanaged or a managed child; onto the primary key or any
+other unique key) are enforced **globally across hot and cold rows**. (Flush removes the
+flushed rows' index and constraint entries from the hot table, so PostgreSQL alone would see
+the hot heap only.)
 
 ### Global `UNIQUE` enforcement
 
@@ -317,13 +316,14 @@ while *cold* child rows still reference it (SQLSTATE `23503`). Notes:
   parent guard covers the cold side.
 - A foreign key to a *managed* parent's primary key is enforced globally as well; see
   "Inbound foreign keys" (the parent is hydrated for child writes, and this guard covers its
-  cold children). Referencing a managed parent through a non-primary-key unique constraint
-  still requires `allow_fk_hot_only`.
+  cold children). The referenced key may also be a non-primary-key unique constraint: the
+  parent is then looked up by those columns, and changing the referenced value is covered
+  like a delete (refused, or applied to cold children, per the `ON UPDATE` action).
 
 ### Inbound foreign keys
 
 For `child -> managed` with an **unmanaged** child that references the managed table's
-**primary key** (any `ON DELETE` action; the child may itself be managed):
+**primary key or another unique key** (any `ON DELETE` action; the child may itself be managed):
 
 - A guard trigger on the child hydrates a cold-only parent row (as `koldstore.hydrate_pk`
   does) before a write, so the native check finds and locks a hot parent. Flush prunes hot
@@ -334,10 +334,10 @@ For `child -> managed` with an **unmanaged** child that references the managed t
   (`CASCADE`/`SET NULL`/`SET DEFAULT`). `koldstore.purge_where` does the same for the
   referencing rows of the purged cold rows: it applies `CASCADE`/`SET NULL`/`SET DEFAULT`, and
   with `NO ACTION`/`RESTRICT` it refuses (`23503`) when any matching row is referenced.
-  Managed tables do not support primary-key updates, so `ON UPDATE` actions never fire.
+  Managed tables do not support primary-key updates, so `ON UPDATE` actions only matter for
+  a key onto a non-primary-key unique constraint, whose value can change.
 - The guard is created by `manage_table`, re-planned when a foreign key is added by
   `CREATE TABLE`/`ALTER TABLE` on the child, and removed by `unmanage_table`.  Dropping the child table or the constraint removes the guard.
-- Foreign keys onto a non-primary-key unique constraint still require `allow_fk_hot_only`.
 - For a managed child, `purge_where` on the parent hydrates the matching cold children before
   applying `CASCADE`/`SET NULL`/`SET DEFAULT`, and `delete_row` on the parent runs the
   parent-side guard (refusing, or hydrating cold children for the native action).
@@ -345,10 +345,8 @@ For `child -> managed` with an **unmanaged** child that references the managed t
 
 ### `manage_table` validation
 
-When `hot_row_limit` is set (flush enabled), `koldstore.manage_table` fails fast
-before creating mirrors or migration jobs if the table has inbound or outbound
-foreign keys, unless `options.allow_fk_hot_only = true`. The error lists the
-constraint names and columns involved.
+Every foreign key shape is now enforced globally, so `koldstore.manage_table` no longer
+needs `options.allow_fk_hot_only = true` for any of them; the option is still accepted.
 
 Hot-only management (`hot_row_limit` omitted) keeps native PostgreSQL constraint
 semantics because flushed rows are not expected to leave the hot heap.
@@ -489,7 +487,7 @@ and a small-host checklist.
 | Supported `SELECT` shapes | Yes | Yes, through `KoldMergeScan` |
 | Primary key enforcement | Yes | No global enforcement; winner resolution only |
 | `UNIQUE` (non-PK) | Yes | Yes (write guard; partial/expression indexes hot-only) |
-| Foreign keys | Yes | Outbound to an unmanaged parent and any FK onto a managed table's PK: yes; onto a non-PK unique: no |
+| Foreign keys | Yes | Yes (outbound, inbound, managed or not; onto the PK or a non-PK unique key) |
 | PostgreSQL custom indexes | Yes | No |
 | pgvector index search | Yes | No |
 | ParadeDB/BM25 index search | Yes | No, unless separately indexed |

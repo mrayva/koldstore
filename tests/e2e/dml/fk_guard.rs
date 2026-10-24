@@ -178,3 +178,80 @@ async fn managed_child_with_managed_parents_enforces_fks_across_cold() -> Result
     assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE b_id = 2")).await?, 0);
     Ok(())
 }
+
+/// A foreign key may reference a non-primary-key unique column of a managed parent: children
+/// (managed or not) find cold parents by that column, and parent changes reach cold children.
+#[tokio::test]
+async fn fks_onto_a_non_pk_unique_key_are_enforced_across_cold() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "fk_non_pk_unique").await?;
+    let parent = db.create_indexed_items_table("nu_p", 4).await?;
+    let child = db.create_indexed_items_table("nu_c", 8).await?;
+    let (pp, relation) = (&parent.relation, &child.relation);
+    let schema = relation.split('.').next().unwrap();
+    let plain = format!("{schema}.nu_u");
+    db.client
+        .batch_execute(&format!(
+            "ALTER TABLE {pp} ADD COLUMN code text; UPDATE {pp} SET code = 'c' || id; \
+             ALTER TABLE {pp} ADD CONSTRAINT nu_p_code_key UNIQUE (code); \
+             ALTER TABLE {relation} ADD COLUMN pcode text REFERENCES {pp}(code) ON DELETE CASCADE; \
+             UPDATE {relation} SET pcode = 'c' || (1 + id % 2); \
+             CREATE TABLE {plain} (id int PRIMARY KEY, pcode text REFERENCES {pp}(code))"
+        ))
+        .await?;
+    // No allow_fk_hot_only: the keys are enforced globally.
+    for table in [pp, relation] {
+        db.manage_shared(table, "id").await?;
+        db.flush_table(table).await?;
+    }
+    common::fence_async_mirror(&db.client).await?;
+    let count = |sql: String| {
+        let db = &db;
+        async move { anyhow::Ok(db.client.query_one(&sql, &[]).await?.get::<_, i64>(0)) }
+    };
+
+    // Children find cold parents by the unique column, managed or not.
+    db.client
+        .batch_execute(&format!(
+            "INSERT INTO {relation} (id, account_id, title, qty, category, pcode) VALUES (100, 1, 't', 1, 'x', 'c3'); \
+             INSERT INTO {plain} VALUES (1, 'c2')"
+        ))
+        .await?;
+    for sql in [
+        format!("INSERT INTO {relation} (id, account_id, title, qty, category, pcode) VALUES (101, 1, 't', 1, 'x', 'zz')"),
+        format!("INSERT INTO {plain} VALUES (2, 'zz')"),
+    ] {
+        let err = fails_with(&db, &sql).await?.expect("orphan child must be refused");
+        assert!(err.starts_with("23503"), "{err}");
+    }
+
+    // An unmanaged child still referencing the cold parent blocks its removal.
+    let err = fails_with(&db, &format!("SELECT koldstore.delete_row('{pp}'::regclass, '{{\"id\": 2}}'::jsonb)"))
+        .await?
+        .expect("referenced parent must not be deleted");
+    assert!(err.starts_with("23503"), "{err}");
+
+    // The referenced column itself can change (it is not the primary key): ON UPDATE NO ACTION
+    // refuses while cold children still reference the old value.
+    let err = fails_with(&db, &format!("SELECT koldstore.update_row('{pp}'::regclass, '{{\"id\": 3}}'::jsonb, '{{\"code\": \"c33\"}}'::jsonb)"))
+        .await?
+        .expect("changing a referenced key must be refused");
+    assert!(err.starts_with("23503"), "{err}");
+
+    // CASCADE reaches the cold children of a cold parent.
+    assert!(count(format!("SELECT count(*) FROM {relation} WHERE pcode = 'c1'")).await? > 0);
+    db.client.batch_execute(&format!("SELECT koldstore.delete_row('{pp}'::regclass, '{{\"id\": 1}}'::jsonb)")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE pcode = 'c1'")).await?, 0);
+
+    // purge_where applies the same rules.
+    db.flush_table(pp).await?;
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    let err = fails_with(&db, &format!("SELECT koldstore.purge_where('{pp}'::regclass, 't.id = 2')")).await?.expect("must be refused");
+    assert!(err.starts_with("23503"), "{err}");
+    db.client.batch_execute(&format!("SELECT koldstore.purge_where('{pp}'::regclass, 't.id = 3')")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE pcode = 'c3'")).await?, 0);
+    Ok(())
+}

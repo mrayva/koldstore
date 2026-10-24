@@ -9,7 +9,7 @@
 //! With `CASCADE`/`SET NULL`/`SET DEFAULT` the guard instead hydrates the cold children (the
 //! trigger is `BEFORE`, so this runs ahead of the native action): they become ordinary hot rows
 //! and the native referential action then fires on them like on any other child. The parent may
-//! itself be managed when the key references its primary key: the child-side guard of
+//! itself be managed (the key may reference its primary key or any other unique key): the child-side guard of
 //! `inbound_fk` hydrates a cold parent for a child write, and this guard covers the cold children.
 
 use pgrx::datum::DatumWithOid;
@@ -74,10 +74,6 @@ fn outbound_fks(child_oid: pgrx::pg_sys::Oid) -> Result<Vec<OutboundFk>, String>
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) \
                FROM pg_catalog.pg_constraint c \
                WHERE c.conrelid = $1 AND c.contype = 'f' \
-                 AND (NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active) \
-                      OR ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = \
-                         (SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x) FROM pg_catalog.pg_index i \
-                           WHERE i.indrelid = c.confrelid AND i.indisprimary)) \
                ORDER BY c.oid";
     let args = [DatumWithOid::from(child_oid)];
     pgrx::Spi::connect(|client| -> Result<Vec<OutboundFk>, String> {
@@ -260,13 +256,24 @@ fn hydrate_cold_children(
 /// locks and a fresh mirror view, so that an ordinary statement (or the native referential
 /// action) reaches them.
 pub(crate) fn hydrate_cold_matching(child_oid: pgrx::pg_sys::Oid, where_sql: &str) -> Result<(), String> {
+    hydrate_cold_matching_impl(child_oid, where_sql, true)
+}
+
+/// Like [`hydrate_cold_matching`] for a parent row a child write needs: it only materializes the
+/// referenced row, so earlier writes of this transaction to the table do not matter (the same
+/// leniency `hydrate_pk_locked` has) and the table is not counted as written afterwards.
+pub(crate) fn hydrate_cold_parent_matching(parent_oid: pgrx::pg_sys::Oid, where_sql: &str) -> Result<(), String> {
+    hydrate_cold_matching_impl(parent_oid, where_sql, false)
+}
+
+fn hydrate_cold_matching_impl(child_oid: pgrx::pg_sys::Oid, where_sql: &str, strict: bool) -> Result<(), String> {
     let fetch = || super::guard::cold_only_matching_rows_with_params(child_oid, where_sql, &[]);
     // A stale mirror can only over-report cold rows, so a plain look settles the common case.
     let probe = fetch()?;
     if probe.is_empty() {
         return Ok(());
     }
-    if crate::txn_writes::was_written(child_oid) {
+    if strict && crate::txn_writes::was_written(child_oid) {
         return Err(format!(
             "cannot apply the foreign key action to cold rows of {}: this transaction already modified the table, \
              so they cannot be hydrated safely; run the parent change in its own transaction",
@@ -288,6 +295,8 @@ pub(crate) fn hydrate_cold_matching(child_oid: pgrx::pg_sys::Oid, where_sql: &st
     super::key_lock::lock_keys_bounded(child_oid, &extra)?;
     let rows: Vec<serde_json::Value> = rows.into_iter().map(|(_, row)| row).collect();
     super::hydrate_rows(child_oid, &rows)?;
-    crate::txn_writes::record_managed_write(child_oid);
+    if strict {
+        crate::txn_writes::record_managed_write(child_oid);
+    }
     Ok(())
 }

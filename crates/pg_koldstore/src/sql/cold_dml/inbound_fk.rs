@@ -42,9 +42,6 @@ pub(crate) fn inbound_fks(parent_oid: pgrx::pg_sys::Oid) -> Result<Vec<InboundFk
                       c.confdeltype::text, c.conrelid::int8 \
                FROM pg_catalog.pg_constraint c \
                WHERE c.confrelid = $1 AND c.contype = 'f' \
-                 AND ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = \
-                     (SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x) FROM pg_catalog.pg_index i \
-                       WHERE i.indrelid = c.confrelid AND i.indisprimary) \
                ORDER BY c.oid";
     let args = [DatumWithOid::from(parent_oid)];
     pgrx::Spi::connect(|client| -> Result<Vec<InboundFk>, String> {
@@ -164,15 +161,28 @@ pub fn cold_fk_child_hydrate_pg(parent_oid: pgrx::pg_sys::Oid, fk_cols: pgrx::Js
     }
     let pk = serde_json::Value::Object(pk);
     let fail = |e: String| -> ! { pgrx::error!("cold-DML FK guard failed: {e}") };
-    if hot_exists(parent_oid, &pk).unwrap_or_else(|e| fail(e)) {
+    if hot_exists(parent_oid, &pk, &ref_cols).unwrap_or_else(|e| fail(e)) {
         return;
     }
-    super::hydrate_pk_locked(parent_oid, &pk).unwrap_or_else(|e| fail(e));
+    let pk_columns = super::primary_key_columns(parent_oid).unwrap_or_else(|e| fail(e));
+    if pk_columns.len() == ref_cols.len() && pk_columns.iter().all(|col| ref_cols.contains(col)) {
+        super::hydrate_pk_locked(parent_oid, &pk).unwrap_or_else(|e| fail(e));
+        return;
+    }
+    // The key references a non-PK unique key: find the cold parent by those columns.
+    let quoted = super::qualified_relation(parent_oid).unwrap_or_else(|e| fail(e)).quoted();
+    let quote = koldstore_common::sql::ident::quote_ident;
+    let on = ref_cols.iter().map(|c| format!("t.{0} = p.{0}", quote(c))).collect::<Vec<_>>().join(" AND ");
+    let where_sql = format!(
+        "EXISTS (SELECT 1 FROM jsonb_populate_record(NULL::{quoted}, {}::jsonb) AS p WHERE {on})",
+        quote_sql_literal(&pk.to_string())
+    );
+    super::fk_guard::hydrate_cold_parent_matching(parent_oid, &where_sql).unwrap_or_else(|e| fail(e));
 }
 
-fn hot_exists(table_oid: pgrx::pg_sys::Oid, pk: &serde_json::Value) -> Result<bool, String> {
+fn hot_exists(table_oid: pgrx::pg_sys::Oid, pk: &serde_json::Value, ref_cols: &[String]) -> Result<bool, String> {
     let quoted = super::qualified_relation(table_oid)?.quoted();
-    let predicate = super::pk_join_predicate(&super::primary_key_columns(table_oid)?);
+    let predicate = super::pk_join_predicate(ref_cols);
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM {quoted} AS t, jsonb_populate_record(NULL::{quoted}, $1) AS pk WHERE {predicate})"
     );

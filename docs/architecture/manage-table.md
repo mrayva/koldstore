@@ -115,8 +115,9 @@ Introspection returns **JSON text** over SPI, decoded in
 | PK shape | `[{column, ordinal, type_oid, type_name, typmod, collation?, domain_identity?, not_null}]` | `PrimaryKeyShape` |
 | Constraints (if flush enabled) | `{unique_constraints, foreign_keys}` | `ManageTableConstraintsCatalog` |
 
-When flush is enabled, non-PK `UNIQUE` constraints and foreign keys are
-rejected unless `allow_fk_hot_only = true`.
+When flush is enabled, non-PK `UNIQUE` constraints and foreign keys are enforced globally
+across hot and cold rows by koldstore's guards (`allow_fk_hot_only` is still accepted but no
+longer needed).
 
 ---
 
