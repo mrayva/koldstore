@@ -6,8 +6,10 @@
 //! heap. A guard trigger on `P` (planned alongside `T`'s write guard, see
 //! `guard::plan_insert_guard`) closes that gap by looking for cold children in the merged view.
 //!
-//! Foreign keys to a managed parent, and `CASCADE`/`SET NULL`/`SET DEFAULT` actions, stay
-//! unsupported: they need row locks or writes on cold rows.
+//! With `CASCADE`/`SET NULL`/`SET DEFAULT` the guard instead hydrates the cold children (the
+//! trigger is `BEFORE`, so this runs ahead of the native action): they become ordinary hot rows
+//! and the native referential action then fires on them like on any other child. Foreign keys to
+//! a managed parent stay unsupported.
 
 use pgrx::datum::DatumWithOid;
 
@@ -70,7 +72,7 @@ fn outbound_fks(child_oid: pgrx::pg_sys::Oid) -> Result<Vec<OutboundFk>, String>
                       (SELECT jsonb_agg(a.attname::text ORDER BY k.ord) FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord) \
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) \
                FROM pg_catalog.pg_constraint c \
-               WHERE c.conrelid = $1 AND c.contype = 'f' AND c.confdeltype IN ('a', 'r') AND c.confupdtype IN ('a', 'r') \
+               WHERE c.conrelid = $1 AND c.contype = 'f' \
                  AND NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active) \
                ORDER BY c.oid";
     let args = [DatumWithOid::from(child_oid)];
@@ -195,6 +197,10 @@ pub fn cold_fk_parent_guard_check_pg(
     }
     let written_earlier = crate::txn_writes::was_written(child_oid);
     let fail = |e: String| -> ! { pgrx::error!("cold-DML FK guard failed: {e}") };
+    if referential_action_applies(child_oid, constraint_name, new_row.is_some()) {
+        hydrate_cold_children(child_oid, parent_oid, &fk_cols, &ref_cols, &old_row.0).unwrap_or_else(|e| fail(e));
+        return;
+    }
     let mut count = cold_children(child_oid, parent_oid, &fk_cols, &ref_cols, &old_row.0).unwrap_or_else(|e| fail(e));
     if count > 0 && !written_earlier && crate::guc::insert_guard_fence() && crate::guc::hydrate_fence_mirror() {
         count = super::key_lock::with_current_view(|| cold_children(child_oid, parent_oid, &fk_cols, &ref_cols, &old_row.0))
@@ -210,4 +216,68 @@ pub fn cold_fk_parent_guard_check_pg(
             )
         );
     }
+}
+
+/// True when the constraint's `ON DELETE` (or, for a key change, `ON UPDATE`) action is
+/// `CASCADE`, `SET NULL` or `SET DEFAULT` rather than `NO ACTION`/`RESTRICT`.
+fn referential_action_applies(child_oid: pgrx::pg_sys::Oid, constraint_name: &str, is_update: bool) -> bool {
+    let column = if is_update { "confupdtype" } else { "confdeltype" };
+    let sql = format!(
+        "SELECT {column}::text IN ('c', 'n', 'd') FROM pg_catalog.pg_constraint WHERE conrelid = $1 AND conname = $2 AND contype = 'f'"
+    );
+    let args = [DatumWithOid::from(child_oid), DatumWithOid::from(constraint_name)];
+    pgrx::Spi::get_one_with_args::<bool>(&sql, &args).ok().flatten().unwrap_or(false)
+}
+
+/// Moves the cold children of `parent_row` into the heap so the native referential action
+/// (which fires after this `BEFORE` trigger) reaches them.
+fn hydrate_cold_children(
+    child_oid: pgrx::pg_sys::Oid,
+    parent_oid: pgrx::pg_sys::Oid,
+    fk_cols: &[String],
+    ref_cols: &[String],
+    parent_row: &serde_json::Value,
+) -> Result<(), String> {
+    let parent = super::qualified_relation(parent_oid)?.quoted();
+    let quote = koldstore_common::sql::ident::quote_ident;
+    let join = fk_cols
+        .iter()
+        .zip(ref_cols)
+        .map(|(f, r)| format!("t.{} = p.{}", quote(f), quote(r)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let where_sql = format!(
+        "EXISTS (SELECT 1 FROM jsonb_populate_record(NULL::{parent}, {}::jsonb) AS p WHERE {join})",
+        quote_sql_literal(&parent_row.to_string())
+    );
+    let fetch = || super::guard::cold_only_matching_rows_with_params(child_oid, &where_sql, &[]);
+    // A stale mirror can only over-report cold rows, so a plain look settles the common case.
+    let probe = fetch()?;
+    if probe.is_empty() {
+        return Ok(());
+    }
+    if crate::txn_writes::was_written(child_oid) {
+        return Err(format!(
+            "cannot apply the foreign key action to cold rows of {}: this transaction already modified the table, \
+             so they cannot be hydrated safely; run the parent change in its own transaction",
+            crate::txn_writes::relation_display_name(child_oid)
+        ));
+    }
+    let keys: Vec<String> = probe.iter().map(|(key, _)| key.clone()).collect();
+    super::key_lock::lock_keys_bounded(child_oid, &keys)?;
+    let rows = super::key_lock::with_current_view(fetch)?;
+    let cap = crate::guc::max_hydrate_rows();
+    if rows.len() > cap {
+        return Err(format!(
+            "the foreign key action reaches {} cold row(s) of {}, more than koldstore.max_hydrate_rows ({cap})",
+            rows.len(),
+            crate::txn_writes::relation_display_name(child_oid)
+        ));
+    }
+    let extra: Vec<String> = rows.iter().map(|(key, _)| key.clone()).filter(|key| !keys.contains(key)).collect();
+    super::key_lock::lock_keys_bounded(child_oid, &extra)?;
+    let rows: Vec<serde_json::Value> = rows.into_iter().map(|(_, row)| row).collect();
+    super::hydrate_rows(child_oid, &rows)?;
+    crate::txn_writes::record_managed_write(child_oid);
+    Ok(())
 }

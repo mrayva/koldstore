@@ -255,9 +255,7 @@ SELECT jsonb_build_object(
                 ),
                 'related_relation', format('%I.%I', ref_ns.nspname, ref_class.relname),
                 'globally_enforced', (
-                    c.confdeltype IN ('a', 'r')
-                    AND c.confupdtype IN ('a', 'r')
-                    AND NOT EXISTS (
+                    NOT EXISTS (
                         SELECT 1 FROM koldstore.schemas ks
                         WHERE ks.table_oid = c.confrelid AND ks.active
                     )

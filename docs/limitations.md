@@ -292,7 +292,7 @@ min/max statistics and reads only the surviving row groups.
 |------------|----------|-----------|-------------------------|
 | Primary key | Yes | Logical winner via merge | Insert guard (`INSERT` only) |
 | `UNIQUE` (non-PK) | Yes | Yes | Yes, via the write guard |
-| Outbound FK to an unmanaged parent (`NO ACTION`/`RESTRICT`) | Yes | Yes | Yes, via the parent-side guard |
+| Outbound FK to an unmanaged parent (any action) | Yes | Yes | Yes, via the parent-side guard |
 | Inbound FK from an unmanaged child onto the PK (any `ON DELETE` action) | Yes | Yes | Yes, via the child-side guard and hydration |
 | Other foreign keys | Yes | No | No |
 
@@ -303,9 +303,12 @@ still checks every hot child write exactly. `manage_table` additionally installs
 trigger on the **parent** that refuses a `DELETE`, or an `UPDATE` of the referenced key,
 while *cold* child rows still reference it (SQLSTATE `23503`). Notes:
 
-- Only `ON DELETE/UPDATE NO ACTION` and `RESTRICT` are enforced globally; `CASCADE`,
-  `SET NULL` and `SET DEFAULT` cannot reach cold rows and still require
-  `options.allow_fk_hot_only`.
+- `NO ACTION`/`RESTRICT` refuse while cold children exist. `CASCADE`, `SET NULL` and
+  `SET DEFAULT` (on delete, and on update of the referenced key) are applied to cold children
+  too: the guard first hydrates them into the heap (at most `koldstore.max_hydrate_rows`; the
+  statement is refused beyond that, or when this transaction already wrote the child table),
+  and the native action then fires on them. Hydrated children are flushed back to cold storage
+  by the next flush.
 - The parent's owner must be the user running `manage_table` (a trigger is created on it).
   The guard is re-planned on `ALTER TABLE` of the child and removed by `unmanage_table`.
 - PostgreSQL's own parent-side check probes the child with `SELECT … FOR KEY SHARE`, which

@@ -54,3 +54,58 @@ async fn outbound_fk_blocks_parent_changes_that_orphan_cold_children() -> Result
     }
     Ok(())
 }
+
+/// `ON DELETE/UPDATE CASCADE` and `SET NULL` from a managed child act on its cold rows too: the
+/// parent-side guard hydrates them so the native action fires.
+#[tokio::test]
+async fn outbound_fk_cascade_and_set_null_reach_cold_children() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "fk_cascade").await?;
+    let table = db.create_indexed_items_table("fkc_items", 12).await?;
+    let relation = &table.relation;
+    let schema = relation.split('.').next().unwrap();
+    let (pdel, pnull, pupd) = (format!("{schema}.fkc_del"), format!("{schema}.fkc_null"), format!("{schema}.fkc_upd"));
+    db.client
+        .batch_execute(&format!(
+            "CREATE TABLE {pdel} (id int PRIMARY KEY); CREATE TABLE {pnull} (id int PRIMARY KEY); \
+             CREATE TABLE {pupd} (id int PRIMARY KEY); \
+             INSERT INTO {pdel} VALUES (1), (2); INSERT INTO {pnull} VALUES (1), (2); INSERT INTO {pupd} VALUES (1), (2); \
+             ALTER TABLE {relation} ADD COLUMN d_id int REFERENCES {pdel}(id) ON DELETE CASCADE, \
+                                    ADD COLUMN n_id int REFERENCES {pnull}(id) ON DELETE SET NULL, \
+                                    ADD COLUMN u_id int REFERENCES {pupd}(id) ON UPDATE CASCADE; \
+             UPDATE {relation} SET d_id = 1, n_id = 1, u_id = 1 WHERE id <= 6; \
+             UPDATE {relation} SET d_id = 2, n_id = 2, u_id = 2 WHERE id > 6"
+        ))
+        .await?;
+    // No allow_fk_hot_only needed.
+    db.manage_shared(relation, "id").await?;
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    let count = |sql: String| {
+        let db = &db;
+        async move { anyhow::Ok(db.client.query_one(&sql, &[]).await?.get::<_, i64>(0)) }
+    };
+
+    // Every child row is cold now; deleting the parent cascades to them.
+    db.client.batch_execute(&format!("DELETE FROM {pdel} WHERE id = 1")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE d_id = 1")).await?, 0);
+    assert_eq!(count(format!("SELECT count(*) FROM {relation}")).await?, 6);
+
+    db.client.batch_execute(&format!("DELETE FROM {pnull} WHERE id = 2")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE n_id IS NULL AND id > 6")).await?, 6);
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE n_id = 1")).await?, count(format!("SELECT count(*) FROM {relation} WHERE n_id = 1 AND id <= 6")).await?);
+
+    db.client.batch_execute(&format!("UPDATE {pupd} SET id = 20 WHERE id = 2")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE u_id = 20")).await?, 6);
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE u_id = 2")).await?, 0);
+
+    // The hydrated-then-changed rows survive a flush with their new values.
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE u_id = 20")).await?, 6);
+    assert_eq!(count(format!("SELECT count(*) FROM {relation}")).await?, 6);
+    Ok(())
+}
