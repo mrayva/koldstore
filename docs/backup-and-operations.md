@@ -68,13 +68,15 @@ with `unsupported storage_type`. Use `PG_OPTS` to point the drill at a staged bu
 
 ## Not covered
 
-- A **logical** dump (`pg_dump` of the database) is not a backup of a managed table. For a managed
-  table that has cold data, `pg_dump` fails outright: the plain-table `COPY ... TO` it issues is
-  refused by the [#126](https://github.com/kalamdb/koldstore/issues/126) guard (verified: `pg_dump:
-  error: query failed: ERROR: koldstore: refusing COPY public.t TO ...`). Even where a dump succeeds
-  (a schema-only dump, or a table with no cold data yet), the KoldStore catalog tables are not
-  registered with `pg_extension_config_dump`, so the dump carries no cold-tier metadata and the
-  restored database does not know the table is managed. Use the physical procedure above.
+- A **logical** dump (`pg_dump` of the database) is a *data* export, not a backup of the managed
+  setup. The plain-table `COPY ... TO` that `pg_dump` issues is rewritten to
+  `COPY (SELECT ... FROM table) TO ...` for a table with cold data, so the dump carries hot **and**
+  cold rows (verified end to end: dump, restore into a fresh database, `manage_table` again). The
+  KoldStore catalog tables are not registered with `pg_extension_config_dump`, so the dump carries no
+  cold-tier metadata: the restored table is an ordinary table with every row in the heap (plus the
+  per-table guard triggers and change-log table, which are harmless), and is not managed until you
+  register a storage and run `manage_table` on it again (it reuses the leftover change-log table).
+  Use the physical procedure above to keep the cold tier and its history.
 - `koldstore.validate_cold_storage` does not report *unreferenced* objects (use
   `recover_segments(..., dry_run => true)`). The retention guard defers deletion by a fixed window; it
   does not know which backups still exist, so size the window to your backup retention. It does not
@@ -86,10 +88,9 @@ with `unsupported storage_type`. Use `PG_OPTS` to point the drill at a staged bu
 
 These commands do not all enter the planner in the same way:
 
-- `pg_dump --data-only -t managed_table` reads the physical heap and therefore
-  omits rows that exist only in cold storage.
-- `COPY managed_table TO ...` likewise exports the heap relation and can omit
-  cold-only rows.
+- `pg_dump` and `COPY managed_table TO ...` (the plain table form) are rewritten to
+  `COPY (SELECT ... FROM managed_table) TO ...` when the table has cold data, so they export the merged
+  hot+cold rows instead of only the heap (see "Not covered" for what a dump does not carry).
 - `COPY (SELECT ... FROM managed_table) TO ...` plans the query and can use
   `KoldMergeScan`, so it includes cold rows for query shapes within the
   supported scan contract.

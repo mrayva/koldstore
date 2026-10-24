@@ -173,7 +173,7 @@ mod process_utility {
                         if !stmt.is_null() && (*stmt).is_from {
                             copy_from_oid = relation_oid_from_range_var((*stmt).relation);
                         } else {
-                            reject_copy_table_to_with_cold_data(stmt);
+                            rewrite_copy_table_to_with_cold_data(stmt);
                         }
                     }
                     pg_sys::NodeTag::T_TruncateStmt => {
@@ -431,11 +431,13 @@ mod process_utility {
     }
 
     /// `COPY <table> TO ...` (upstream #126): unlike `COPY (SELECT ...) TO`, the plain table form
-    /// never goes through the planner, so it can never enter `KoldMergeScan` -- it exports the hot
-    /// heap only, silently omitting cold rows. Refused only when the table actually has cold data;
-    /// a `COPY (query) TO` (the `relation` field is null, `query` is set instead) is unaffected --
-    /// it plans normally and does see cold data.
-    unsafe fn reject_copy_table_to_with_cold_data(stmt: *mut pg_sys::CopyStmt) {
+    /// never goes through the planner, so it can never enter `KoldMergeScan` -- on its own it would
+    /// export the hot heap only, silently omitting cold rows. For a table that actually has cold
+    /// data the statement is rewritten to `COPY (SELECT <columns> FROM table) TO ...`, which plans
+    /// normally and exports the merged hot+cold rows. This is also what `pg_dump` issues for every
+    /// table's data, so a logical dump carries the cold rows too (as ordinary rows: restore them,
+    /// then `manage_table` again). A `COPY (query) TO` (`relation` null, `query` set) is unaffected.
+    unsafe fn rewrite_copy_table_to_with_cold_data(stmt: *mut pg_sys::CopyStmt) {
         unsafe {
             if stmt.is_null() || !(*stmt).query.is_null() {
                 return;
@@ -443,15 +445,33 @@ mod process_utility {
             let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) else {
                 return;
             };
-            if managed_with_cold_data(table_oid) {
-                let name = crate::txn_writes::relation_display_name(table_oid);
-                pgrx::error!(
-                    "koldstore: refusing COPY {name} TO ... -- the plain table form of COPY exports \
-                     the hot heap only, so it would silently omit this managed table's cold-only rows \
-                     (upstream issue #126). Use COPY (SELECT * FROM {name}) TO ..., which plans \
-                     normally and sees cold data too"
-                );
+            if !managed_with_cold_data(table_oid) {
+                return;
             }
+            let name = match crate::catalog::resolve::qualified_relation_name(table_oid) {
+                Ok(name) => name,
+                Err(error) => pgrx::error!("koldstore: cannot export {table_oid:?} with COPY: {error}"),
+            };
+            let columns = crate::merge_scan::pg::literals::list_node_pointers((*stmt).attlist)
+                .into_iter()
+                .map(|node| {
+                    let value = node.cast::<pg_sys::String>();
+                    koldstore_common::sql::ident::quote_ident(
+                        &std::ffi::CStr::from_ptr((*value).sval).to_string_lossy(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let columns = if columns.is_empty() { "*".to_string() } else { columns.join(", ") };
+            let sql = std::ffi::CString::new(format!("SELECT {columns} FROM {name}"))
+                .unwrap_or_else(|_| pgrx::error!("koldstore: invalid relation name"));
+            let parsed = pg_sys::raw_parser(sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let raw = crate::merge_scan::pg::literals::list_node_pointers(parsed);
+            let Some(raw) = raw.first().copied().map(|node| node.cast::<pg_sys::RawStmt>()) else {
+                pgrx::error!("koldstore: could not build the merged-view query for COPY");
+            };
+            (*stmt).query = (*raw).stmt;
+            (*stmt).relation = std::ptr::null_mut();
+            (*stmt).attlist = std::ptr::null_mut();
         }
     }
 

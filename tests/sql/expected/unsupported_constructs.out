@@ -127,7 +127,13 @@ INSERT 0 2
  t
 (1 row)
 
-psql:<PATH>: ERROR:  koldstore: refusing COPY sqlreg.u1 TO ... -- the plain table form of COPY exports the hot heap only, so it would silently omit this managed table's cold-only rows (upstream issue #126). Use COPY (SELECT * FROM sqlreg.u1) TO ..., which plans normally and sees cold data too
+100	hot
+1	c1
+2	c2
+3	c3
+4	c4
+5	c5
+6	c6
 1
 2
 7

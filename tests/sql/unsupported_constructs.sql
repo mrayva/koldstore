@@ -99,7 +99,7 @@ SELECT to_regclass('sqlreg.u_child') IS NOT NULL AS child_still_there;
 -- --------------------------------------------------------------------- COPY
 -- `COPY <table> TO ...` never goes through the planner, so it can never enter
 -- KoldMergeScan and exports the hot heap only (upstream #126); `COPY (query) TO`
--- plans normally and is unaffected.
+-- plans normally and is unaffected. The plain form is rewritten to the merged view when the table has cold data.
 CREATE TABLE sqlreg.u3 (id bigint PRIMARY KEY);
 INSERT INTO sqlreg.u3 VALUES (1), (2);
 SELECT koldstore.manage_table(

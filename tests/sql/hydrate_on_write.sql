@@ -240,10 +240,9 @@ SELECT koldstore.update_row('sqlreg.h1'::regclass, '{"id": 17}', '{"val": "expli
 SELECT op, id FROM sqlreg.h_log ORDER BY op, id;
 DROP TRIGGER h_after ON sqlreg.h1;
 
--- foreign keys. A flush-enabled manage_table() refuses a table with an existing foreign key by
--- default (upstream #122: koldstore enforces FKs on hot rows only, and a flush can silently move
--- either side to cold storage, out of PostgreSQL's own FK triggers' reach); allow_fk_hot_only
--- accepts that risk explicitly.
+-- foreign keys. An outbound FK is now enforced globally across hot and cold rows (the
+-- `cold_dml::fk_guard`), so manage_table() accepts it by default; the allow_fk_hot_only opt-in that
+-- used to be required is then redundant (the second call reports the table as already managed).
 CREATE TABLE sqlreg.h_fk_p (id bigint PRIMARY KEY);
 CREATE TABLE sqlreg.h_fk_c (id bigint PRIMARY KEY, pid bigint REFERENCES sqlreg.h_fk_p (id));
 SELECT sqlreg.try($$SELECT koldstore.manage_table(table_name => 'sqlreg.h_fk_c'::regclass, storage => 'sqlreg_fs', hot_row_limit => 10, min_flush_rows => 1, max_rows_per_file => 10, migration_order_by => 'id')::text$$, true) AS fk_refused_by_default;

@@ -10,6 +10,7 @@ mod changes_since_latency;
 mod cold_dml_matrix;
 mod persistent_wal_applier;
 mod fk_guard;
+mod copy_to_cold;
 mod inbound_fk_guard;
 mod purge_where;
 mod row_lock_hydrate;

@@ -402,16 +402,12 @@ TRUNCATE TABLE
 DROP TRIGGER
 CREATE TABLE
 CREATE TABLE
-                                                                                                                                      fk_refused_by_default
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: migrate table failed: flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces foreign keys on hot rows only. Foreign keys: h_fk_c_pid_fkey outbound (columns: pid) -> sqlreg.h_fk_p. Drop or relocate them, or set options.allow_fk_hot_only = true
+ fk_refused_by_default
+-----------------------
+ ok: 1
 (1 row)
 
- fk_allowed_opt_in
--------------------
- t
-(1 row)
-
+psql:<PATH>: ERROR:  migrate table failed: table is already managed
 CREATE TABLE
 INSERT 0 2
 CREATE TABLE
@@ -432,9 +428,9 @@ INSERT 0 30
 (1 row)
 
 ALTER TABLE
-                                                                               delete_parent_with_cold_children
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ERROR: koldstore: row-level locking (SELECT ... FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE) is not supported on managed table sqlreg.h_child while it has cold data (upstream issue #125)
+                                                                  delete_parent_with_cold_children
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ ERROR: update or delete on table violates foreign key constraint "h_child_pid_fk": 30 archived (cold) row(s) of a koldstore-managed table still reference this key
 (1 row)
 
 BEGIN
