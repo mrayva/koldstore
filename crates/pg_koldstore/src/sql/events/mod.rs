@@ -109,6 +109,24 @@ fn changes_since_pg_impl(
         return Err("managed table is not active".to_string());
     }
 
+    if since_seq > 0 {
+        // Compaction collapses a key's cold history to its newest version; a cursor older than what
+        // it dropped would silently miss those versions, so fail closed instead.
+        let floor = pgrx::Spi::get_one_with_args::<i64>(
+            "SELECT history_floor_seq FROM koldstore.manifest WHERE table_oid = $1 AND scope_key = ''",
+            &[pgrx::datum::DatumWithOid::from(table_oid)],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+        if since_seq < floor {
+            return Err(format!(
+                "since_seq {since_seq} predates compaction: cold history up to seq {floor} was collapsed to the \
+                 newest version of each key, so intermediate versions and deletes can no longer be replayed; \
+                 resync from the current state (since_seq => 0) and resume from the last returned seq"
+            ));
+        }
+    }
+
     let mirror = QualifiedTableName::from_table_name(&snapshot.mirror_relation);
     let pk_names: Vec<String> = snapshot
         .primary_key_columns

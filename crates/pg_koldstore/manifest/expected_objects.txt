@@ -84,6 +84,7 @@ column jobs.updated_at timestamp with time zone not null
 column manifest.cold_row_count bigint not null
 column manifest.etag text
 column manifest.generation bigint not null
+column manifest.history_floor_seq bigint not null
 column manifest.hot_row_count bigint not null
 column manifest.last_error text
 column manifest.max_seq bigint not null

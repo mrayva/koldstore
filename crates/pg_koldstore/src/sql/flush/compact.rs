@@ -14,8 +14,9 @@
 //! their object for a grace period (readers planned on the previous generation may still be
 //! reading them) and are reaped afterwards.
 //!
-//! The cold history of a key collapses to its newest version, so `changes_since` over cold data no
-//! longer reports the overwritten versions. Scoped (per-user) tables are not handled yet.
+//! The cold history of a key collapses to its newest version, so `changes_since` over cold data can no
+//! longer replay the overwritten versions. The highest dropped `seq` is stored as the manifest's
+//! `history_floor_seq` in the activation statement, and `changes_since` refuses older cursors. Scoped (per-user) tables are not handled yet.
 //!
 //! Output rows are sorted like a flush sorts them: by the segment-order column when the table has
 //! one, then by the key columns in key order. Two segments can share a composite key only if their
@@ -330,17 +331,30 @@ fn compact_unit(
     let rows_read: i64 = i64::try_from(rows.len()).unwrap_or(i64::MAX);
 
     // Newest version of each key wins; a winning delete marker removes the key altogether.
+    // `history_floor` is the highest seq of a version this pass drops (`changes_since` can no
+    // longer report it, so it refuses cursors below it).
+    let mut history_floor = 0_i64;
     let mut winners: HashMap<String, koldstore_parquet::CleanColdRow> =
         HashMap::with_capacity(rows.len());
     for row in rows {
         let key = row.pk_json.to_string();
         match winners.get(&key) {
-            Some(existing) if existing.seq >= row.seq => {}
-            _ => {
+            Some(existing) if existing.seq >= row.seq => {
+                history_floor = history_floor.max(row.seq);
+            }
+            Some(existing) => {
+                history_floor = history_floor.max(existing.seq);
+                winners.insert(key, row);
+            }
+            None => {
                 winners.insert(key, row);
             }
         }
     }
+    history_floor = winners
+        .values()
+        .filter(|row| row.deleted)
+        .fold(history_floor, |floor, row| floor.max(row.seq));
     // A winning delete marker may only be dropped when nothing outside this unit's scope group can
     // still hold an older version of its key (see `compact_locked`).
     if !drop_markers && winners.values().any(|row| row.deleted) {
@@ -491,6 +505,7 @@ fn compact_unit(
             DatumWithOid::from(manifest.max_seq),
             DatumWithOid::from(to_pg(&new_ids)),
             DatumWithOid::from(to_pg(&source_ids)),
+            DatumWithOid::from(history_floor),
         ],
     )
     .map_err(|error| error.to_string())?;

@@ -468,6 +468,10 @@ AS 'MODULE_PATHNAME', 'unregister_backup_pg_wrapper';
 ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS key_min bytea;
 ALTER TABLE koldstore.cold_segment_index ADD COLUMN IF NOT EXISTS key_max bytea;
 
+-- Compaction collapses a key's cold history; the highest seq it dropped, so changes_since can refuse cursors
+-- that would silently miss the dropped versions.
+ALTER TABLE koldstore.manifest ADD COLUMN IF NOT EXISTS history_floor_seq bigint NOT NULL DEFAULT 0;
+
 -- Scoped cold storage (ADR-010, slice 1): the scope a segment's rows belong to; NULL = table-wide.
 ALTER TABLE koldstore.cold_segments ADD COLUMN IF NOT EXISTS scope_id text;
 

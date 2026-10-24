@@ -55,7 +55,7 @@
             ]
         },
         "manifest": {
-            "create": "CREATE TABLE koldstore.manifest (table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, etag text, generation bigint DEFAULT 0 NOT NULL, sync_state text NOT NULL, segment_count integer DEFAULT 0 NOT NULL, max_seq bigint DEFAULT 0 NOT NULL, hot_row_count bigint DEFAULT 0 NOT NULL, mirror_row_count bigint DEFAULT 0 NOT NULL, cold_row_count bigint DEFAULT 0 NOT NULL, last_error text, updated_at timestamp with time zone DEFAULT now() NOT NULL)",
+            "create": "CREATE TABLE koldstore.manifest (table_oid oid NOT NULL, scope_key text DEFAULT ''::text NOT NULL, etag text, generation bigint DEFAULT 0 NOT NULL, sync_state text NOT NULL, segment_count integer DEFAULT 0 NOT NULL, max_seq bigint DEFAULT 0 NOT NULL, hot_row_count bigint DEFAULT 0 NOT NULL, mirror_row_count bigint DEFAULT 0 NOT NULL, cold_row_count bigint DEFAULT 0 NOT NULL, last_error text, updated_at timestamp with time zone DEFAULT now() NOT NULL, history_floor_seq bigint DEFAULT 0 NOT NULL)",
             "indexes": [
                 "CREATE INDEX manifest_dirty_idx ON koldstore.manifest USING btree (sync_state, updated_at, table_oid, scope_key) WHERE (sync_state = ANY (ARRAY['pending_write'::text, 'stale'::text, 'error'::text]))",
                 "CREATE INDEX manifest_scope_lookup_idx ON koldstore.manifest USING btree (scope_key, table_oid) WHERE (scope_key <> ''::text)"
@@ -383,6 +383,12 @@
         "column cold_segments.writer_job_id uuid": {
             "add": "ALTER TABLE koldstore.cold_segments ADD COLUMN writer_job_id uuid",
             "table": "cold_segments",
+            "unsupported": false,
+            "needs_default": false
+        },
+        "column manifest.history_floor_seq bigint not null": {
+            "add": "ALTER TABLE koldstore.manifest ADD COLUMN history_floor_seq bigint DEFAULT 0 NOT NULL",
+            "table": "manifest",
             "unsupported": false,
             "needs_default": false
         },

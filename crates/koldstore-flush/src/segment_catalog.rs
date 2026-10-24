@@ -364,7 +364,8 @@ SELECT generation FROM cas
 /// one statement under the same manifest-generation CAS as a flush.
 ///
 /// Parameters: table OID, expected generation, new generation, segment count after the swap,
-/// `max_seq`, new (pending) segment ids, replaced (active) segment ids. Returns the new
+/// `max_seq`, new (pending) segment ids, replaced (active) segment ids, history floor (highest `seq`
+/// of a version or delete marker the rewrite dropped; `changes_since` refuses older cursors). Returns the new
 /// generation, or no row when the CAS lost. A replaced segment that is no longer active (a
 /// concurrent change) makes the caller abort, because the rewrite no longer matches the catalog.
 ///
@@ -387,6 +388,7 @@ WITH cas AS (
         sync_state = '{in_sync}',
         segment_count = $4::integer,
         max_seq = GREATEST(max_seq, $5::bigint),
+        history_floor_seq = GREATEST(history_floor_seq, $8::bigint),
         last_error = NULL,
         updated_at = now()
     WHERE table_oid = $1::oid

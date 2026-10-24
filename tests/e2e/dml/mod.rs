@@ -4,6 +4,7 @@ mod aaa_changes_since_latency_diagnostics;
 mod async_change_log_mirror;
 mod async_mirror_worker;
 mod change_feed;
+mod changes_since_compaction;
 mod change_log_mirror;
 mod changes_since_latency;
 mod cold_dml_matrix;

@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS koldstore.manifest (
   cold_row_count bigint NOT NULL DEFAULT 0,
   last_error text,
   updated_at timestamptz NOT NULL DEFAULT now(),
+  -- Highest seq compaction dropped; changes_since refuses older cursors.
+  history_floor_seq bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (table_oid, scope_key)
 );
 
