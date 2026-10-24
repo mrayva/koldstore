@@ -1,5 +1,5 @@
-//! Global enforcement of inbound foreign keys: an unmanaged table `C` referencing a managed
-//! table `T`'s primary key with `NO ACTION`/`RESTRICT` actions.
+//! Global enforcement of inbound foreign keys: a table `C` (unmanaged, or managed) referencing a
+//! managed table `T`'s primary key.
 //!
 //! The native checks only see `T`'s heap, so two things are missing for cold parent rows:
 //!
@@ -15,14 +15,14 @@
 //! ordinary heap statement on the hydrated row, so the native action fires, and `purge_where`
 //! applies the action to the referencing rows itself before it tombstones the parents.
 //!
-//! Referencing a managed table through a non-primary-key unique constraint and a managed
-//! referencing table stay unsupported.
+//! Referencing a managed table through a non-primary-key unique constraint stays unsupported.
 
 use pgrx::datum::DatumWithOid;
 
 use super::guard::{bounded_identifier, quote_sql_literal};
 
 pub(crate) struct InboundFk {
+    pub child_oid: u32,
     pub conoid: u32,
     pub name: String,
     pub child: String,
@@ -39,10 +39,9 @@ pub(crate) fn inbound_fks(parent_oid: pgrx::pg_sys::Oid) -> Result<Vec<InboundFk
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum), \
                       (SELECT jsonb_agg(a.attname::text ORDER BY k.ord) FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord) \
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum), \
-                      c.confdeltype::text \
+                      c.confdeltype::text, c.conrelid::int8 \
                FROM pg_catalog.pg_constraint c \
                WHERE c.confrelid = $1 AND c.contype = 'f' \
-                 AND NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.conrelid AND ks.active) \
                  AND ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = \
                      (SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x) FROM pg_catalog.pg_index i \
                        WHERE i.indrelid = c.confrelid AND i.indisprimary) \
@@ -62,6 +61,7 @@ pub(crate) fn inbound_fks(parent_oid: pgrx::pg_sys::Oid) -> Result<Vec<InboundFk
                 child: row.get(3).map_err(|e| e.to_string())?.unwrap_or_default(),
                 fk_cols: cols(4)?,
                 ref_cols: cols(5)?,
+                child_oid: u32::try_from(row.get::<i64>(7).map_err(|e| e.to_string())?.unwrap_or_default()).map_err(|e| e.to_string())?,
                 on_delete: row.get::<String>(6).map_err(|e| e.to_string())?.and_then(|c| c.chars().next()).unwrap_or('a'),
             });
         }
@@ -220,10 +220,30 @@ pub(crate) fn apply_purge_fk_actions(table_oid: pgrx::pg_sys::Oid, predicate: &s
         };
         let args = [DatumWithOid::from(pgrx::JsonB(keys.0.clone()))];
         if let Some(action) = action {
+            // A managed child's cold rows are out of reach of a plain DELETE/UPDATE: hydrate them first.
+            let child_oid = pgrx::pg_sys::Oid::from(fk.child_oid);
+            if is_managed(child_oid) {
+                let on = fk
+                    .fk_cols
+                    .iter()
+                    .zip(&fk.ref_cols)
+                    .map(|(f, r)| format!("t.{} = p.{}", quote(f), quote(r)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let where_sql = format!(
+                    "EXISTS (SELECT 1 FROM jsonb_populate_recordset(NULL::{quoted}, {}::jsonb) AS p WHERE {on})",
+                    quote_sql_literal(&keys.0.to_string())
+                );
+                super::fk_guard::hydrate_cold_matching(child_oid, &where_sql)?;
+            }
             crate::txn_writes::with_check_suppressed(|| pgrx::Spi::run_with_args(&action, &args)).map_err(|e| e.to_string())?;
             continue;
         }
-        let sql = format!("SELECT EXISTS (SELECT 1 FROM {} AS c WHERE {referencing})", fk.child);
+        // An explicit join (not the EXISTS above): the merged scan of a managed child prunes on it.
+        let sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM {} AS c, jsonb_populate_recordset(NULL::{quoted}, $1) AS t WHERE {join})",
+            fk.child
+        );
         let found = crate::txn_writes::with_check_suppressed(|| pgrx::Spi::get_one_with_args::<bool>(&sql, &args))
             .map_err(|e| e.to_string())?
             .unwrap_or(false);
@@ -240,4 +260,15 @@ pub(crate) fn apply_purge_fk_actions(table_oid: pgrx::pg_sys::Oid, predicate: &s
         }
     }
     Ok(())
+}
+
+fn is_managed(table_oid: pgrx::pg_sys::Oid) -> bool {
+    let args = [DatumWithOid::from(table_oid)];
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+        &args,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }

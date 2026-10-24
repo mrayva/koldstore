@@ -259,6 +259,11 @@ SELECT jsonb_build_object(
                         SELECT 1 FROM koldstore.schemas ks
                         WHERE ks.table_oid = c.confrelid AND ks.active
                     )
+                    OR ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = (
+                        SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x)
+                        FROM pg_index i
+                        WHERE i.indrelid = c.confrelid AND i.indisprimary
+                    )
                 )
             ) AS entry
             FROM pg_constraint c
@@ -282,11 +287,7 @@ SELECT jsonb_build_object(
                 ),
                 'related_relation', format('%I.%I', src_ns.nspname, src_class.relname),
                 'globally_enforced', (
-                    NOT EXISTS (
-                        SELECT 1 FROM koldstore.schemas ks
-                        WHERE ks.table_oid = c.conrelid AND ks.active
-                    )
-                    AND ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = (
+                    ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = (
                         SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x)
                         FROM pg_index i
                         WHERE i.indrelid = c.confrelid AND i.indisprimary

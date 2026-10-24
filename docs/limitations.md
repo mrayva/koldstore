@@ -256,9 +256,9 @@ backend's own thread (plain SQL in the session) when they touch managed tables.
 ## Unique and Foreign Key Constraints
 
 Non-primary-key `UNIQUE` constraints, **outbound foreign keys to an unmanaged parent**
-and **inbound foreign keys from an unmanaged table onto the primary key** are enforced
-**globally across hot and cold rows**. Every other foreign key (to a managed parent, or
-inbound onto a non-primary-key) is still enforced on the **hot heap only**: after
+and **foreign keys onto a managed table's primary key** (from an unmanaged or a managed
+child) are enforced **globally across hot and cold rows**. Every other foreign key (onto a
+non-primary-key unique constraint) is still enforced on the **hot heap only**: after
 flush, PostgreSQL removes the flushed rows' index and constraint entries from the hot
 table.
 
@@ -294,6 +294,7 @@ min/max statistics and reads only the surviving row groups.
 | `UNIQUE` (non-PK) | Yes | Yes | Yes, via the write guard |
 | Outbound FK to an unmanaged parent (any action) | Yes | Yes | Yes, via the parent-side guard |
 | Inbound FK from an unmanaged child onto the PK (any `ON DELETE` action) | Yes | Yes | Yes, via the child-side guard and hydration |
+| FK between two managed tables onto the parent's PK (any action) | Yes | Yes | Yes, via both guards |
 | Other foreign keys | Yes | No | No |
 
 ### Outbound foreign keys
@@ -314,13 +315,15 @@ while *cold* child rows still reference it (SQLSTATE `23503`). Notes:
 - PostgreSQL's own parent-side check probes the child with `SELECT … FOR KEY SHARE`, which
   koldstore refuses on a table with cold data; that exact probe is planned hot-only and the
   parent guard covers the cold side.
-- A foreign key to a managed parent is still refused with flush enabled unless
-  `allow_fk_hot_only` is set.
+- A foreign key to a *managed* parent's primary key is enforced globally as well; see
+  "Inbound foreign keys" (the parent is hydrated for child writes, and this guard covers its
+  cold children). Referencing a managed parent through a non-primary-key unique constraint
+  still requires `allow_fk_hot_only`.
 
 ### Inbound foreign keys
 
 For `child -> managed` with an **unmanaged** child that references the managed table's
-**primary key** (any `ON DELETE` action):
+**primary key** (any `ON DELETE` action; the child may itself be managed):
 
 - A guard trigger on the child hydrates a cold-only parent row (as `koldstore.hydrate_pk`
   does) before a write, so the native check finds and locks a hot parent. Flush prunes hot
@@ -334,8 +337,10 @@ For `child -> managed` with an **unmanaged** child that references the managed t
   Managed tables do not support primary-key updates, so `ON UPDATE` actions never fire.
 - The guard is created by `manage_table`, re-planned when a foreign key is added by
   `CREATE TABLE`/`ALTER TABLE` on the child, and removed by `unmanage_table`.  Dropping the child table or the constraint removes the guard.
-- Foreign keys onto a non-primary-key unique constraint and managed children still require
-  `allow_fk_hot_only`.
+- Foreign keys onto a non-primary-key unique constraint still require `allow_fk_hot_only`.
+- For a managed child, `purge_where` on the parent hydrates the matching cold children before
+  applying `CASCADE`/`SET NULL`/`SET DEFAULT`, and `delete_row` on the parent runs the
+  parent-side guard (refusing, or hydrating cold children for the native action).
 - Each child write against a cold parent pays one hydration (a heap insert of the row).
 
 ### `manage_table` validation
@@ -484,7 +489,7 @@ and a small-host checklist.
 | Supported `SELECT` shapes | Yes | Yes, through `KoldMergeScan` |
 | Primary key enforcement | Yes | No global enforcement; winner resolution only |
 | `UNIQUE` (non-PK) | Yes | Yes (write guard; partial/expression indexes hot-only) |
-| Foreign keys | Yes | Outbound to an unmanaged parent and inbound onto the PK from unmanaged tables: yes; otherwise no |
+| Foreign keys | Yes | Outbound to an unmanaged parent and any FK onto a managed table's PK: yes; onto a non-PK unique: no |
 | PostgreSQL custom indexes | Yes | No |
 | pgvector index search | Yes | No |
 | ParadeDB/BM25 index search | Yes | No, unless separately indexed |

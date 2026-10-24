@@ -8,8 +8,9 @@
 //!
 //! With `CASCADE`/`SET NULL`/`SET DEFAULT` the guard instead hydrates the cold children (the
 //! trigger is `BEFORE`, so this runs ahead of the native action): they become ordinary hot rows
-//! and the native referential action then fires on them like on any other child. Foreign keys to
-//! a managed parent stay unsupported.
+//! and the native referential action then fires on them like on any other child. The parent may
+//! itself be managed when the key references its primary key: the child-side guard of
+//! `inbound_fk` hydrates a cold parent for a child write, and this guard covers the cold children.
 
 use pgrx::datum::DatumWithOid;
 
@@ -73,7 +74,10 @@ fn outbound_fks(child_oid: pgrx::pg_sys::Oid) -> Result<Vec<OutboundFk>, String>
                         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) \
                FROM pg_catalog.pg_constraint c \
                WHERE c.conrelid = $1 AND c.contype = 'f' \
-                 AND NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active) \
+                 AND (NOT EXISTS (SELECT 1 FROM koldstore.schemas ks WHERE ks.table_oid = c.confrelid AND ks.active) \
+                      OR ARRAY(SELECT x FROM unnest(c.confkey) x ORDER BY x) = \
+                         (SELECT ARRAY(SELECT x FROM unnest(i.indkey::int2[]) x ORDER BY x) FROM pg_catalog.pg_index i \
+                           WHERE i.indrelid = c.confrelid AND i.indisprimary)) \
                ORDER BY c.oid";
     let args = [DatumWithOid::from(child_oid)];
     pgrx::Spi::connect(|client| -> Result<Vec<OutboundFk>, String> {
@@ -182,9 +186,8 @@ pub fn cold_fk_parent_guard_check_pg(
     new_row: Option<pgrx::JsonB>,
     constraint_name: &str,
 ) {
-    if super::guard::suspended() {
-        return;
-    }
+    // Deliberately not skipped while this table's write guard is suspended (`delete_row`,
+    // `update_row`): those run ordinary DELETE/UPDATE statements whose cold children still count.
     let fk_cols: Vec<String> = serde_json::from_value(fk_cols.0).unwrap_or_else(|e| pgrx::error!("cold-DML FK guard failed: {e}"));
     let ref_cols: Vec<String> = serde_json::from_value(ref_cols.0).unwrap_or_else(|e| pgrx::error!("cold-DML FK guard failed: {e}"));
     if ref_cols.iter().any(|col| old_row.0.get(col).is_none_or(serde_json::Value::is_null)) {
@@ -250,7 +253,14 @@ fn hydrate_cold_children(
         "EXISTS (SELECT 1 FROM jsonb_populate_record(NULL::{parent}, {}::jsonb) AS p WHERE {join})",
         quote_sql_literal(&parent_row.to_string())
     );
-    let fetch = || super::guard::cold_only_matching_rows_with_params(child_oid, &where_sql, &[]);
+    hydrate_cold_matching(child_oid, &where_sql)
+}
+
+/// Hydrates the cold-only rows of managed `child_oid` matching `where_sql` (over alias `t`), under key
+/// locks and a fresh mirror view, so that an ordinary statement (or the native referential
+/// action) reaches them.
+pub(crate) fn hydrate_cold_matching(child_oid: pgrx::pg_sys::Oid, where_sql: &str) -> Result<(), String> {
+    let fetch = || super::guard::cold_only_matching_rows_with_params(child_oid, where_sql, &[]);
     // A stale mirror can only over-report cold rows, so a plain look settles the common case.
     let probe = fetch()?;
     if probe.is_empty() {

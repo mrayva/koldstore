@@ -109,3 +109,72 @@ async fn outbound_fk_cascade_and_set_null_reach_cold_children() -> Result<()> {
     assert_eq!(count(format!("SELECT count(*) FROM {relation}")).await?, 6);
     Ok(())
 }
+
+/// A managed child referencing managed parents: child writes find cold parents, and a parent
+/// change sees cold children (refused for NO ACTION, applied for CASCADE).
+#[tokio::test]
+async fn managed_child_with_managed_parents_enforces_fks_across_cold() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "fk_managed_parent").await?;
+    let parent_a = db.create_indexed_items_table("mp_a", 4).await?;
+    let parent_b = db.create_indexed_items_table("mp_b", 4).await?;
+    let child = db.create_indexed_items_table("mp_child", 12).await?;
+    let (pa, pb, relation) = (&parent_a.relation, &parent_b.relation, &child.relation);
+    db.client
+        .batch_execute(&format!(
+            "ALTER TABLE {relation} ADD COLUMN a_id int REFERENCES {pa}(id), \
+                                    ADD COLUMN b_id int REFERENCES {pb}(id) ON DELETE CASCADE; \
+             UPDATE {relation} SET a_id = 1 + id % 2, b_id = 1 + id % 2"
+        ))
+        .await?;
+    for table in [pa, pb, relation] {
+        db.manage_shared(table, "id").await?;
+        db.flush_table(table).await?;
+    }
+    common::fence_async_mirror(&db.client).await?;
+    let count = |sql: String| {
+        let db = &db;
+        async move { anyhow::Ok(db.client.query_one(&sql, &[]).await?.get::<_, i64>(0)) }
+    };
+
+    // Everything is cold. A child write against cold parents succeeds (parents get hydrated)...
+    db.client
+        .batch_execute(&format!(
+            "INSERT INTO {relation} (id, account_id, title, qty, category, a_id, b_id) VALUES (100, 1, 't', 1, 'x', 3, 3)"
+        ))
+        .await?;
+    // ...and a missing parent is still refused.
+    let err = fails_with(
+        &db,
+        &format!("INSERT INTO {relation} (id, account_id, title, qty, category, a_id) VALUES (101, 1, 't', 1, 'x', 99)"),
+    )
+    .await?
+    .expect("orphan child must be refused");
+    assert!(err.starts_with("23503"), "{err}");
+
+    // Cold parent 1 of the NO ACTION key has cold children: deleting it is refused.
+    let err = fails_with(&db, &format!("SELECT koldstore.delete_row('{pa}'::regclass, '{{\"id\": 1}}'::jsonb)")).await?.expect("must be refused");
+    assert!(err.starts_with("23503"), "{err}");
+    // A parent without children can go.
+    db.client.batch_execute(&format!("SELECT koldstore.delete_row('{pa}'::regclass, '{{\"id\": 4}}'::jsonb)")).await?;
+
+    // CASCADE reaches the cold children of a cold parent.
+    let before = count(format!("SELECT count(*) FROM {relation} WHERE b_id = 1")).await?;
+    assert!(before > 0);
+    db.client.batch_execute(&format!("SELECT koldstore.delete_row('{pb}'::regclass, '{{\"id\": 1}}'::jsonb)")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE b_id = 1")).await?, 0);
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE b_id = 2")).await?, 6);
+
+    // purge_where applies the same rules to a managed parent's cold rows.
+    db.flush_table(pa).await?;
+    db.flush_table(pb).await?;
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    let err = fails_with(&db, &format!("SELECT koldstore.purge_where('{pa}'::regclass, 't.id = 2')")).await?.expect("must be refused");
+    assert!(err.starts_with("23503"), "{err}");
+    db.client.batch_execute(&format!("SELECT koldstore.purge_where('{pb}'::regclass, 't.id = 2')")).await?;
+    common::fence_async_mirror(&db.client).await?;
+    assert_eq!(count(format!("SELECT count(*) FROM {relation} WHERE b_id = 2")).await?, 0);
+    Ok(())
+}

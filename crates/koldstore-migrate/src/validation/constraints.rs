@@ -105,7 +105,7 @@ pub enum MigrationConstraintError {
     MissingStorage,
     /// Foreign keys need explicit hot-only acceptance when flush is enabled.
     #[error(
-        "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces these foreign keys on hot rows only (outbound foreign keys to an unmanaged parent with NO ACTION/RESTRICT are enforced globally). Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
+        "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces these foreign keys on hot rows only. Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
     )]
     ForeignKeyRequiresHotOnlyOverride {
         /// Human-readable foreign-key listing.
