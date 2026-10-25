@@ -213,7 +213,8 @@ any row or object is changed.
 |-----------|----------|------|
 | `SELECT` hot + cold, `ORDER BY` (incl. composite primary key) | supported | `merge_order_composite_pk`, `query_semantics` |
 | Read of a table written in the same transaction | refused when cold data is consulted | `txn_local_visibility` |
-| User-scoped tables: cold segments per scope | one segment group and folder per scope (`{scopeId}/…`); delete markers table-wide; reads still consider every segment (ADR-010) | `scoped_cold_layout` |
+| User-scoped tables: cold segments per scope | one segment group and folder per scope (`{scopeId}/…`); delete markers follow their row into its scope; a read with a resolvable scope (RLS role or equality / `IN` on the scope column) opens only that scope's segments plus table-wide ones (ADR-010) | `scoped_cold_layout` |
+| `UPDATE` changing a scoped table's scope column | refused (SQLSTATE `0A000`); a key has one scope for life | `scope` |
 | `UPDATE`/`DELETE` matching cold rows after an earlier write to the table in the same transaction | refused (it cannot hydrate them safely; it used to skip them silently) | `same_txn_cold_dml` |
 | `SELECT ... FOR UPDATE / SHARE` | refused when cold data can contribute | `unsupported_constructs` |
 | `TABLESAMPLE` | refused when cold data can contribute | `unsupported_constructs` |

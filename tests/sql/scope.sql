@@ -57,3 +57,10 @@ SELECT id, title FROM sqlreg.scope_notes ORDER BY id;
 RESET koldstore.user_id;
 SELECT count(*)::bigint AS missing_scope_count FROM sqlreg.scope_notes;
 RESET ROLE;
+
+-- A key has one scope for life: moving a row to another scope is refused, other edits are not.
+-- (Cold rows are refused earlier by the cold-DML guard, so use a freshly inserted hot row.)
+INSERT INTO sqlreg.scope_notes (id, user_id, title) VALUES (6, 'user-a', 'a3');
+UPDATE sqlreg.scope_notes SET user_id = user_id, title = 'a3-edited' WHERE id = 6;
+SELECT id, user_id, title FROM sqlreg.scope_notes WHERE id = 6;
+UPDATE sqlreg.scope_notes SET user_id = 'user-b' WHERE id = 6;

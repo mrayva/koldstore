@@ -416,6 +416,31 @@ pub(crate) fn insert_guard_names(source: &koldstore_common::QualifiedTableName) 
 #[cfg(feature = "pg")]
 #[must_use]
 pub(crate) fn plan_insert_guard(source: &koldstore_common::QualifiedTableName) -> Vec<String> {
+    plan_insert_guard_with_scope(source, scope_column_of(source).as_deref())
+}
+
+/// The active scope column of an already-registered managed table, if it has one.
+#[cfg(feature = "pg")]
+fn scope_column_of(source: &koldstore_common::QualifiedTableName) -> Option<String> {
+    pgrx::Spi::get_one::<String>(&format!(
+        "SELECT scope_column::text FROM koldstore.schemas \
+         WHERE table_oid = {}::regclass::oid AND active",
+        quote_sql_literal(&source.quoted())
+    ))
+    .ok()
+    .flatten()
+}
+
+/// [`plan_insert_guard`] for a table whose scope column is already known (`manage_table` plans
+/// the guard before the catalog row exists). A scoped table also refuses any `UPDATE` that
+/// changes the scope column: a key has exactly one scope, so its cold segments, delete markers
+/// and scope-pruned reads all assume the value never moves.
+#[cfg(feature = "pg")]
+#[must_use]
+pub(crate) fn plan_insert_guard_with_scope(
+    source: &koldstore_common::QualifiedTableName,
+    scope_column: Option<&str>,
+) -> Vec<String> {
     let names = insert_guard_names(source);
     let function_name = names.function.quoted();
     let trigger_name = koldstore_common::sql::ident::quote_ident(&names.trigger);
@@ -426,24 +451,34 @@ pub(crate) fn plan_insert_guard(source: &koldstore_common::QualifiedTableName) -
     // which then also fires on UPDATE. The constraint list is baked into the function body, so
     // the plan is regenerated whenever constraints change (see `refresh_unique_guard`).
     let specs = unique_specs_for(source);
-    let (body, events) = if specs.is_empty() {
-        (
-            format!(
-                "    PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {});",
-                quote_sql_literal(&table_display)
-            ),
-            "INSERT",
-        )
+    let insert_check = format!(
+        "PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {});",
+        quote_sql_literal(&table_display)
+    );
+    let on_update = !specs.is_empty() || scope_column.is_some();
+    let (body, events) = if !on_update {
+        (format!("    {insert_check}"), "INSERT")
     } else {
-        (
-            format!(
-                "    IF TG_OP = 'INSERT' THEN\n        PERFORM koldstore._cold_insert_guard_check(TG_RELID, to_jsonb(NEW), {table});\n    END IF;\n    PERFORM koldstore._cold_unique_guard_check(TG_RELID, to_jsonb(NEW), \
+        let mut body = format!("    IF TG_OP = 'INSERT' THEN\n        {insert_check}\n    END IF;");
+        if let Some(column) = scope_column {
+            let quoted = koldstore_common::sql::ident::quote_ident(column);
+            body.push_str(&format!(
+                "\n    IF TG_OP = 'UPDATE' AND NEW.{quoted} IS DISTINCT FROM OLD.{quoted} THEN\n        \
+                 RAISE EXCEPTION 'koldstore: the scope column {} of % cannot be changed once the row exists', {}\n            \
+                 USING ERRCODE = 'feature_not_supported';\n    END IF;",
+                column.replace('\'', "''").replace('%', "%%"),
+                quote_sql_literal(&table_display),
+            ));
+        }
+        if !specs.is_empty() {
+            body.push_str(&format!(
+                "\n    PERFORM koldstore._cold_unique_guard_check(TG_RELID, to_jsonb(NEW), \
                  CASE WHEN TG_OP = 'UPDATE' THEN to_jsonb(OLD) END, {specs}::jsonb, {table});",
                 table = quote_sql_literal(&table_display),
                 specs = quote_sql_literal(&serde_json::to_string(&specs).unwrap_or_else(|_| "[]".to_string())),
-            ),
-            "INSERT OR UPDATE",
-        )
+            ));
+        }
+        (body, "INSERT OR UPDATE")
     };
     let function_sql = format!(
         r#"

@@ -17,7 +17,7 @@ single user's query pays a footer read per segment of the whole table.
   but nothing rewrites them).
 * Limited multitenancy: tens to a few hundred scopes per table, not millions. A scope usually has enough rows to fill a
   segment over time.
-* A scope value never changes for a row (it backs the RLS policy), and a primary key is unique table-wide, so a key lives in
+* A scope value never changes for a row (it backs the RLS policy; the write guard now refuses an `UPDATE` that changes it), and a primary key is unique table-wide, so a key lives in
   exactly one scope.
 * Priority is read latency and scan cost; write amplification and object count are secondary but bounded.
 

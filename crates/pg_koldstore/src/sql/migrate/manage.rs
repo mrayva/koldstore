@@ -228,7 +228,10 @@ pub(crate) fn manage_table_pg_impl(
         }
         ensure_mirror_scope_column(&mirror_plan.mirror_table, empty_plan.effective_scope_column.as_deref())
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
+        for statement in crate::sql::cold_dml::guard::plan_insert_guard_with_scope(
+            &empty_plan.table,
+            empty_plan.effective_scope_column.as_deref(),
+        ) {
             pgrx::Spi::run(&statement)
                 .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         }
@@ -300,7 +303,10 @@ pub(crate) fn manage_table_pg_impl(
     }
     ensure_mirror_scope_column(&mirror_plan.mirror_table, empty_plan.effective_scope_column.as_deref())
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    for statement in crate::sql::cold_dml::guard::plan_insert_guard(&empty_plan.table) {
+    for statement in crate::sql::cold_dml::guard::plan_insert_guard_with_scope(
+            &empty_plan.table,
+            empty_plan.effective_scope_column.as_deref(),
+        ) {
         pgrx::Spi::run(&statement)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     }

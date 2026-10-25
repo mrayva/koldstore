@@ -50,3 +50,12 @@ RESET
 (1 row)
 
 RESET
+INSERT 0 1
+UPDATE 1
+ id | user_id |   title
+----+---------+-----------
+  6 | user-a  | a3-edited
+(1 row)
+
+psql:<PATH>: ERROR:  koldstore: the scope column user_id of "sqlreg"."scope_notes" cannot be changed once the row exists
+CONTEXT:  PL/pgSQL function sqlreg_scope_notes__cold_ins_guard() line 7 at RAISE

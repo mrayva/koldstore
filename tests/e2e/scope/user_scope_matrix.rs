@@ -214,29 +214,23 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
                 relation = table.relation,
             ))
             .await?;
-        // Move cold row 1 to another scope. A scope-changing re-insert over the existing cold key
-        // is refused by the cold-insert guard (#122), so hydrate it into the heap and update it.
+        // A row cannot change scope in place (the write guard refuses it), so retire cold row 1
+        // by hydrating and deleting it, then add the replacement under the other scope.
         common::hydrate_pk(&db.client, &table.relation, r#"{"id": 1}"#).await?;
-        let moved = db
-            .client
-            .execute(
-                &format!(
-                    "UPDATE {} SET user_id = 'user-b', title = 'moved-b', body = 'moved-hot' WHERE id = 1",
-                    table.relation
-                ),
-                &[],
-            )
+        db.client
+            .batch_execute(&format!(
+                "DELETE FROM {rel} WHERE id = 1; \
+                 INSERT INTO {rel} (id, user_id, title, body) \
+                 VALUES (100, 'user-b', 'moved-b', 'moved-hot');",
+                rel = table.relation
+            ))
             .await?;
-        anyhow::ensure!(
-            moved == 1,
-            "expected one scope-changing reinsert, moved {moved}"
-        );
         common::fence_async_mirror(&db.client).await?;
 
         db.client
             .batch_execute(&format!("SET ROLE {app_role}"))
             .await?;
-        assert_user_scope_visibility(&db.client, &table.relation, &[2, 4], &[1, 3, 5])
+        assert_user_scope_visibility(&db.client, &table.relation, &[2, 4], &[3, 5, 100])
             .await
             .context("hot+cold RLS visibility")?;
         db.client.batch_execute("RESET ROLE").await?;
@@ -298,9 +292,9 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
             db.flush_table(&relation).await? > 0,
             "expected text-PK flush"
         );
-        // Move the cold key to another scope: re-inserting over a cold key is refused by the
-        // cold-insert guard (#122), so hydrate it into the heap and update it. The key is built
-        // with serde_json because it deliberately contains quote characters.
+        // A key cannot change scope in place (the write guard refuses it): hydrate the cold key,
+        // delete it, and re-insert it under the other scope. The key is built with serde_json
+        // because it deliberately contains quote characters.
         common::hydrate_pk(
             &db.client,
             &relation,
@@ -308,9 +302,13 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
         )
         .await?;
         db.client
+            .execute(&format!("DELETE FROM {relation} WHERE id = $1"), &[&key])
+            .await?;
+        db.client
             .execute(
                 &format!(
-                    "UPDATE {relation} SET user_id = 'user-b', payload = 'hot-b' WHERE id = $1"
+                    "INSERT INTO {relation} (id, user_id, payload, migration_seq) \
+                     VALUES ($1, 'user-b', 'hot-b', 1000)"
                 ),
                 &[&key],
             )
