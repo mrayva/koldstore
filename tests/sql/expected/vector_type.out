@@ -1,0 +1,81 @@
+CREATE EXTENSION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 3
+SELECT 63
+ vec_managed
+-------------
+ t
+(1 row)
+
+ vec_flushed
+-------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+ id  |       emb
+-----+------------------
+   2 | [2,6,10.5]
+ 102 | [0,0,0]
+ 103 | [-1.5,2.25,1000]
+(3 rows)
+
+SET
+UPDATE 2
+UPDATE 2
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ vec_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ rows_after
+------------
+         62
+(1 row)
+
+ knn_l2_matches
+----------------
+ t
+(1 row)
+
+ knn_cosine_matches
+--------------------
+ t
+(1 row)
+
+ equal_matches
+---------------
+             2
+(1 row)
+

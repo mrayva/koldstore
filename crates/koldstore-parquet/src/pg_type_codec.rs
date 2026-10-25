@@ -57,6 +57,7 @@ pub const fn arrow_data_type(pg_type: PgType) -> DataType {
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
+        | PgType::Vector
         | PgType::Bytea => DataType::Utf8,
         PgType::Timestamptz | PgType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
         PgType::Date => DataType::Date32,
@@ -129,6 +130,7 @@ pub fn arrow_array_from_json(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
+        | PgType::Vector
         | PgType::Bytea => Arc::new(StringArray::from_iter(
             json_values
                 .iter()
@@ -199,6 +201,7 @@ pub fn cell_from_arrow_cell(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
+        | PgType::Vector
         | PgType::Bytea => Ok(CellValue::Utf8(
             array_for::<StringArray>(array, column_name)?
                 .value(row_index)
@@ -273,6 +276,7 @@ pub fn json_from_arrow_cell(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
+        | PgType::Vector
         | PgType::Bytea => Ok(serde_json::Value::String(
             array_for::<StringArray>(array, column_name)?
                 .value(row_index)

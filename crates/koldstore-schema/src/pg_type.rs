@@ -44,6 +44,8 @@ pub enum PgType {
     Date = 13,
     /// `timestamp` (without time zone)
     Timestamp = 14,
+    /// pgvector `vector(n)`; the type OID is assigned by `CREATE EXTENSION vector`, so it is resolved at runtime
+    Vector = 15,
 }
 
 /// PostgreSQL integer array type OID.
@@ -107,6 +109,7 @@ impl PgType {
             "timestamptz" => Ok(Self::Timestamptz),
             "date" => Ok(Self::Date),
             "timestamp" => Ok(Self::Timestamp),
+            "vector" => Ok(Self::Vector),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -136,6 +139,7 @@ impl PgType {
             12 => Some(Self::Timestamptz),
             13 => Some(Self::Date),
             14 => Some(Self::Timestamp),
+            15 => Some(Self::Vector),
             _ => None,
         }
     }
@@ -159,6 +163,7 @@ impl PgType {
             Self::Timestamptz => "timestamptz",
             Self::Date => "date",
             Self::Timestamp => "timestamp",
+            Self::Vector => "vector",
         }
     }
 
@@ -214,6 +219,8 @@ impl PgType {
             Self::Timestamptz => 1184,
             Self::Date => 1082,
             Self::Timestamp => 1114,
+            // Not a fixed OID: look it up from the column (`atttypid`) or `to_regtype('vector')`.
+            Self::Vector => 0,
         }
     }
 
@@ -357,6 +364,9 @@ mod tests {
             PgType::TextArray,
             PgType::Bytea,
             PgType::Timestamptz,
+            PgType::Date,
+            PgType::Timestamp,
+            PgType::Vector,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

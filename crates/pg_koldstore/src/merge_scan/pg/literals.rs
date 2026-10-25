@@ -152,6 +152,7 @@ unsafe fn datum_typed_sql(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
+        | PgType::Vector
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp
@@ -339,7 +340,29 @@ pub(crate) unsafe fn cstr_owned_pfree(ptr: *mut std::os::raw::c_char) -> Option<
 }
 
 fn column_type_oid(pg_type: PgType) -> pg_sys::Oid {
-    pg_sys::Oid::from(pg_type.type_oid())
+    match pg_type {
+        PgType::Vector => vector_type_oid(),
+        _ => pg_sys::Oid::from(pg_type.type_oid()),
+    }
+}
+
+/// pgvector's `vector` type OID: assigned by `CREATE EXTENSION vector`, so resolved by name.
+pub(crate) fn vector_type_oid() -> pg_sys::Oid {
+    let name = c"vector";
+    // SAFETY: `TypenameGetTypid` only reads the C string and the syscache.
+    let oid = unsafe { pg_sys::TypenameGetTypid(name.as_ptr()) };
+    if oid == pg_sys::InvalidOid {
+        pgrx::error!("the `vector` type is not installed: CREATE EXTENSION vector");
+    }
+    oid
+}
+
+/// Renders `datum` of type `oid` with the type's output function.
+pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -> Option<String> {
+    let mut typoutput = pg_sys::InvalidOid;
+    let mut typisvarlena = false;
+    pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
+    cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum))
 }
 
 pub(crate) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {

@@ -63,6 +63,7 @@ impl TypeMatrix {
             "timestamptz",
             "timestamp",
             "date",
+            "vector",
         ];
         Self {
             entries: supported

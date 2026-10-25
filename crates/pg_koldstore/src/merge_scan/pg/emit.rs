@@ -68,6 +68,7 @@ unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_s
             | PgType::Uuid
             | PgType::Jsonb
             | PgType::TextArray
+            | PgType::Vector
             | PgType::Bytea,
             _,
         ) => input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type),
@@ -123,6 +124,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Timestamptz
         | PgType::Timestamp
         | PgType::Date
+        | PgType::Vector
         | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),
@@ -163,7 +165,10 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
 }
 
 unsafe fn input_datum_from_text(text: &str, pg_type: PgType) -> Result<pg_sys::Datum, String> {
-    let type_oid = pg_sys::Oid::from(pg_type.type_oid());
+    let type_oid = match pg_type {
+        PgType::Vector => super::literals::vector_type_oid(),
+        _ => pg_sys::Oid::from(pg_type.type_oid()),
+    };
     let mut typinput = pg_sys::InvalidOid;
     let mut typioparam = pg_sys::InvalidOid;
     pg_sys::getTypeInputInfo(type_oid, &mut typinput, &mut typioparam);

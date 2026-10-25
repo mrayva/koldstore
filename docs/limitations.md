@@ -423,9 +423,14 @@ The result is intentionally strict:
 - Hot rows remain searchable through pgvector.
 - Cold rows are not part of pgvector HNSW or IVFFlat indexes after they are
   flushed.
-- Vector columns require explicit Kalam type support before they can be flushed
-  safely; v0.1 does not yet include pgvector's `vector` type in the supported
-  type matrix.
+- `vector(n)` columns are in the type matrix: they flush to Parquet (stored as
+  the vector's text form), hydrate back on write and re-flush losslessly
+  (`tests/sql/vector_type.sql`). The `vector` type must be installed
+  (`CREATE EXTENSION vector`) before a table with such a column is flushed or
+  read back from cold storage.
+- A distance query that the planner serves by a sequential scan or sort reads
+  cold rows too (exact results, no index); one served by an HNSW/IVFFlat index
+  scan sees hot rows only.
 
 For v1 behavior, vector search should be treated as hot-only unless a
 Kalam-managed cold-vector mode is explicitly enabled.
