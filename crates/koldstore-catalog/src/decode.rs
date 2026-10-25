@@ -74,6 +74,8 @@ pub struct FlushStorageContext {
     pub schema_version: i32,
     /// Configured Parquet compression codec.
     pub compression: String,
+    /// Object prefix pinned by a rename / schema move (`None` = derive from the current names).
+    pub pinned_prefix: Option<String>,
 }
 
 /// Decodes a relation context JSON payload.
@@ -344,6 +346,7 @@ pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageCo
             .to_string(),
         schema_version,
         compression: required_string(value, "compression")?.to_string(),
+        pinned_prefix: optional_string(value, "pinned_prefix").map(str::to_string),
     })
 }
 

@@ -82,15 +82,9 @@ pub(super) struct TableTarget {
 }
 
 pub(super) fn table_target(table_oid: pgrx::pg_sys::Oid) -> Result<TableTarget, String> {
-    use koldstore_storage::{PathTemplate, render_regular_table_prefix};
-
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-    let prefix = render_regular_table_prefix(
-        &PathTemplate::new(&storage.regular_path_tmpl),
-        &relation.namespace,
-        &relation.name,
-    )?;
+    let prefix = crate::catalog::resolve::table_object_prefix(&storage, &relation.namespace, &relation.name)?;
     Ok(TableTarget {
         namespace: relation.namespace,
         name: relation.name,

@@ -45,11 +45,7 @@ pub(super) fn unmanage_table_pg_impl(
         ColdArtifactAction::DeleteAfterRehydrate { .. } => {
             let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
             let relation = crate::catalog::resolve::relation_context(table_oid)?;
-            let prefix = koldstore_storage::render_regular_table_prefix(
-                &koldstore_storage::PathTemplate::new(&storage.regular_path_tmpl),
-                &relation.namespace,
-                &relation.name,
-            )?;
+            let prefix = crate::catalog::resolve::table_object_prefix(&storage, &relation.namespace, &relation.name)?;
             Some((storage, prefix))
         }
         ColdArtifactAction::Retain => None,

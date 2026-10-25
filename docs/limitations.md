@@ -169,15 +169,17 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   they had before. PostgreSQL's own 63-byte identifier limit still applies.
 
 - `ALTER TABLE ... RENAME TO`, `ALTER TABLE ... SET SCHEMA` and
-  `ALTER SCHEMA ... RENAME TO` are refused for a managed table (or a schema
-  containing one) that has published cold data, because object-store paths
-  are derived from the table and schema name and renaming would orphan the
-  segments already written under the old name
-  ([#123](https://github.com/kalamdb/koldstore/issues/123)). A managed table
-  with no cold data yet, and `RENAME COLUMN` on any managed table, are
-  unaffected. Other schema evolution can still apply in PostgreSQL before
-  KoldStore discovers it is unsupported; defaults and constraints are not
-  retroactively enforced on older Parquet rows.
+  `ALTER SCHEMA ... RENAME TO` work on managed tables. Object-store paths are
+  derived from the table and schema name, so the first such change pins the
+  table's current prefix in `koldstore.table_prefix_pins`: published cold
+  objects stay where they are, and later flushes and compactions keep writing
+  under the pinned prefix ([#123](https://github.com/kalamdb/koldstore/issues/123)).
+  A table created under a name whose prefix is still pinned by a renamed table
+  cannot be managed until that table is unmanaged or dropped. Exported table
+  metadata carries the prefix, and `import_table_metadata` re-pins it when the
+  restored table has a different name. Other schema evolution can still apply
+  in PostgreSQL before KoldStore discovers it is unsupported; defaults and
+  constraints are not retroactively enforced on older Parquet rows.
 - `COPY <table> TO ...` (the plain table form, including what `pg_dump` issues for table data)
   never goes through the planner, so on its own it would export the hot heap only
   ([#126](https://github.com/kalamdb/koldstore/issues/126)). When the table has cold data it is

@@ -133,6 +133,8 @@ pub(crate) fn manage_table_pg_impl(
     );
     let storage_id = crate::catalog::resolve::storage_id_by_name(storage_name)
         .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"));
+    crate::catalog::resolve::check_prefix_pin_collision(table_oid, storage_name)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let catalog = migration_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let constraints = manage_table_constraints_catalog(table_oid_u32)

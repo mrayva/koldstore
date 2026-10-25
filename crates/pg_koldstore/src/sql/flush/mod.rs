@@ -80,7 +80,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     };
     use koldstore_manifest::{try_load_manifest_with_client, CatalogManifestSegmentRow};
     use koldstore_storage::{
-        join_object_key, manifest_object_key, render_regular_table_prefix, PathTemplate,
+        join_object_key, manifest_object_key,
     };
     use pgrx::datum::DatumWithOid;
 
@@ -93,11 +93,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
         &storage.config,
     )
     .map_err(|error| error.to_string())?;
-    let prefix = render_regular_table_prefix(
-        &PathTemplate::new(&storage.regular_path_tmpl),
-        &relation.namespace,
-        &relation.name,
-    )?;
+    let prefix = crate::catalog::resolve::table_object_prefix(&storage, &relation.namespace, &relation.name)?;
     let manifest_path = manifest_object_key(&prefix);
     let mut referenced = HashSet::from([manifest_path.clone()]);
     if let Some(manifest) = try_load_manifest_with_client(&client, &manifest_path)? {

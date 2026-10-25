@@ -278,6 +278,8 @@ WITH deactivated AS (
     SET active = false
     WHERE table_oid = $1 AND active = true
     RETURNING 1
+), unpinned AS (
+    DELETE FROM koldstore.table_prefix_pins WHERE table_oid = $1
 )
 SELECT count(*)::bigint FROM deactivated
 "#,
@@ -294,7 +296,8 @@ pub fn plan_catalog_deactivation(table_oid: TableOid) -> Result<SqlStatement, De
     let _ = table_oid;
     SqlStatement::write(
         "demigrate deactivate catalog metadata",
-        "UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true",
+        "WITH unpinned AS (DELETE FROM koldstore.table_prefix_pins WHERE table_oid = $1) \
+         UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true",
     )
     .map_err(|error| DemigrationError::Spi(error.to_string()))
 }

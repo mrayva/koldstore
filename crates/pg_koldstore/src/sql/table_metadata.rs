@@ -288,6 +288,21 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
         &[oid(), json("manifests")],
     )
     .map_err(|error| error.to_string())?;
+    // The exported prefix may differ from the restored table's name-derived one (the source was renamed
+    // or moved, or the restore uses another name): pin it so the adopted segments stay reachable.
+    if let Some(exported) = metadata["prefix"].as_str() {
+        let relation = crate::catalog::resolve::relation_context(table_oid)?;
+        let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+        let derived = crate::catalog::resolve::table_object_prefix(&storage, &relation.namespace, &relation.name)?;
+        if derived != exported {
+            pgrx::Spi::run_with_args(
+                "INSERT INTO koldstore.table_prefix_pins (table_oid, prefix) VALUES ($1, $2)
+                 ON CONFLICT (table_oid) DO UPDATE SET prefix = EXCLUDED.prefix",
+                &[oid(), DatumWithOid::from(exported)],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
     crate::catalog::cache::invalidate_table_globally(table_oid);
 
     count(

@@ -142,7 +142,7 @@ mod process_utility {
                     pg_sys::NodeTag::T_RenameStmt => {
                         // `ALTER TABLE … RENAME COLUMN` is RenameStmt, not AlterTableStmt.
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::RenameStmt>();
-                        reject_rename_with_cold_data(stmt);
+                        pin_prefix_before_rename(stmt);
                         refresh_oid = rename_stmt_relation_oid(stmt);
                         renamed_schema = rename_stmt_schema_name(stmt);
                     }
@@ -151,7 +151,7 @@ mod process_utility {
                         let stmt = (*copied)
                             .utilityStmt
                             .cast::<pg_sys::AlterObjectSchemaStmt>();
-                        reject_set_schema_with_cold_data(stmt);
+                        pin_prefix_before_set_schema(stmt);
                         refresh_oid = alter_object_schema_relation_oid(stmt);
                     }
                     pg_sys::NodeTag::T_DropStmt => {
@@ -487,10 +487,11 @@ mod process_utility {
             )
     }
 
-    /// `ALTER TABLE ... RENAME TO` and `ALTER SCHEMA ... RENAME TO` on a managed table/schema with
-    /// cold data (upstream #123). `RENAME COLUMN` is unaffected -- only the table and schema name
-    /// feed the object-store path template, not column names.
-    unsafe fn reject_rename_with_cold_data(stmt: *mut pg_sys::RenameStmt) {
+    /// `ALTER TABLE ... RENAME TO` and `ALTER SCHEMA ... RENAME TO` on a managed table/schema
+    /// (upstream #123). Object-store paths derive from the table and schema names, so the current
+    /// prefix is pinned first and the published cold objects stay where they are. `RENAME COLUMN`
+    /// is unaffected -- column names do not feed the path template.
+    unsafe fn pin_prefix_before_rename(stmt: *mut pg_sys::RenameStmt) {
         unsafe {
             if stmt.is_null() {
                 return;
@@ -498,17 +499,7 @@ mod process_utility {
             match (*stmt).renameType {
                 pg_sys::ObjectType::OBJECT_TABLE => {
                     if let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) {
-                        if managed_with_cold_data(table_oid) {
-                            let name = crate::txn_writes::relation_display_name(table_oid);
-                            pgrx::error!(
-                                "koldstore: refusing to rename managed table {name} -- it has cold data \
-                                 already published under its current name, and object-store paths are \
-                                 derived from the table name (upstream issue #123: renaming would orphan \
-                                 those segments, making them invisible to future reads). Flush no more \
-                                 rows to it under the old name, or accept losing access to the existing \
-                                 cold data"
-                            );
-                        }
+                        pin_or_error(table_oid);
                     }
                 }
                 pg_sys::ObjectType::OBJECT_SCHEMA => {
@@ -518,16 +509,7 @@ mod process_utility {
                     for table_oid in
                         crate::hooks::drop_cleanup::active_managed_table_oids_in_schema(&old_name, true)
                     {
-                        if managed_with_cold_data(table_oid) {
-                            let name = crate::txn_writes::relation_display_name(table_oid);
-                            pgrx::error!(
-                                "koldstore: refusing to rename schema \"{old_name}\" -- managed table {name} \
-                                 in it has cold data already published under the current schema name \
-                                 (upstream issue #123: object-store paths are derived from the schema name, \
-                                 so renaming would orphan those segments). Unmanage or flush no more rows to \
-                                 that table first, or accept losing access to its existing cold data"
-                            );
-                        }
+                        pin_or_error(table_oid);
                     }
                 }
                 _ => {}
@@ -535,26 +517,23 @@ mod process_utility {
         }
     }
 
-    /// `ALTER TABLE ... SET SCHEMA` on a managed table with cold data (upstream #123): the same
-    /// path-derived-from-name risk as a plain rename, since the schema name feeds the same template.
-    unsafe fn reject_set_schema_with_cold_data(stmt: *mut pg_sys::AlterObjectSchemaStmt) {
+    /// `ALTER TABLE ... SET SCHEMA` on a managed table: the schema name feeds the same template as a
+    /// plain rename, so the current prefix is pinned first.
+    unsafe fn pin_prefix_before_set_schema(stmt: *mut pg_sys::AlterObjectSchemaStmt) {
         unsafe {
             if stmt.is_null() || (*stmt).objectType != pg_sys::ObjectType::OBJECT_TABLE {
                 return;
             }
-            let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) else {
-                return;
-            };
-            if managed_with_cold_data(table_oid) {
-                let name = crate::txn_writes::relation_display_name(table_oid);
-                pgrx::error!(
-                    "koldstore: refusing to move managed table {name} to another schema -- it has cold \
-                     data already published under its current schema (upstream issue #123: object-store \
-                     paths are derived from the schema name, so moving it would orphan those segments). \
-                     Flush no more rows to it under the current schema, or accept losing access to the \
-                     existing cold data"
-                );
+            if let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) {
+                pin_or_error(table_oid);
             }
+        }
+    }
+
+    fn pin_or_error(table_oid: pg_sys::Oid) {
+        if let Err(error) = crate::catalog::resolve::pin_table_prefix(table_oid) {
+            let name = crate::txn_writes::relation_display_name(table_oid);
+            pgrx::error!("koldstore: could not pin the object prefix of managed table {name} before the rename: {error}");
         }
     }
 

@@ -23,7 +23,7 @@ use koldstore_flush::{
     FlushWriteChunk, ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome,
 };
 use koldstore_manifest::write_manifest_with_client;
-use koldstore_storage::{manifest_object_key, render_regular_table_prefix, PathTemplate};
+use koldstore_storage::manifest_object_key;
 
 use super::jobs::{
     ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
@@ -378,11 +378,7 @@ fn stream_write_flush_batches(
     started: std::time::Instant,
 ) -> Result<StreamedFlushPass, String> {
     let stats = &selection.stats;
-    let table_prefix = render_regular_table_prefix(
-        &PathTemplate::new(&ctx.storage.regular_path_tmpl),
-        &ctx.relation.namespace,
-        &ctx.relation.name,
-    )?;
+    let table_prefix = crate::catalog::resolve::table_object_prefix(&ctx.storage, &ctx.relation.namespace, &ctx.relation.name)?;
     let manifest_path = manifest_object_key(&table_prefix);
     let mut batch_number = commit_style.run_spi(|| next_flush_batch_number(table_oid))?;
     let pass_id = uuid::Uuid::new_v4();

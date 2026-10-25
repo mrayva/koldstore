@@ -120,7 +120,8 @@ fn plan_delete_cold_segments() -> Result<SqlStatement, DropTableCleanupError> {
 fn plan_delete_manifest() -> Result<SqlStatement, DropTableCleanupError> {
     SqlStatement::write(
         "drop table delete manifest",
-        "DELETE FROM koldstore.manifest WHERE table_oid = $1::oid",
+        "WITH unpinned AS (DELETE FROM koldstore.table_prefix_pins WHERE table_oid = $1::oid) \
+         DELETE FROM koldstore.manifest WHERE table_oid = $1::oid",
     )
     .map_err(|error| DropTableCleanupError::Sql(error.to_string()))
 }

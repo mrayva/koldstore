@@ -21,7 +21,7 @@ use std::ffi::{CStr, CString};
 
 use koldstore_common::QualifiedTableName;
 use koldstore_migrate::drop_table::{plan_drop_table_cleanup, DropTableCleanupPolicy};
-use koldstore_storage::{render_regular_table_prefix, PathTemplate, StorageClient};
+use koldstore_storage::StorageClient;
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
 
@@ -106,11 +106,7 @@ fn cleanup_one_managed_table_before_drop(
             ));
         }
     }
-    let prefix = render_regular_table_prefix(
-        &PathTemplate::new(&storage.regular_path_tmpl),
-        &relation.namespace,
-        &relation.name,
-    )?;
+    let prefix = crate::catalog::resolve::table_object_prefix(&storage, &relation.namespace, &relation.name)?;
     let table = QualifiedTableName::new(Some(&relation.namespace), &relation.name)
         .map_err(|error| error.to_string())?;
 

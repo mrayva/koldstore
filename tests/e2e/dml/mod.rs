@@ -13,6 +13,7 @@ mod fk_guard;
 mod copy_to_cold;
 mod inbound_fk_guard;
 mod purge_where;
+mod rename_cold;
 mod row_lock_hydrate;
 mod table_metadata;
 mod unique_guard;

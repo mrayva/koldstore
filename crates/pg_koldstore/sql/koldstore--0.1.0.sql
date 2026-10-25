@@ -200,6 +200,13 @@ CREATE TABLE IF NOT EXISTS koldstore.backups (
   registered_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Object prefix pinned per table so ALTER TABLE ... RENAME / SET SCHEMA and ALTER SCHEMA ... RENAME never
+-- relocate published cold objects. No row = derive the prefix from the current schema/table name.
+CREATE TABLE IF NOT EXISTS koldstore.table_prefix_pins (
+  table_oid oid PRIMARY KEY,
+  prefix text NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
@@ -444,6 +451,7 @@ REVOKE ALL ON
   koldstore.table_cancel_requests,
   koldstore.partition_templates,
   koldstore.backups,
+  koldstore.table_prefix_pins,
   koldstore.cold_segments,
   koldstore.cold_segment_index,
   koldstore.cold_segment_order_index

@@ -17,6 +17,16 @@
             "foreign_keys": [
             ]
         },
+        "table_prefix_pins": {
+            "create": "CREATE TABLE koldstore.table_prefix_pins (table_oid oid NOT NULL, prefix text NOT NULL)",
+            "indexes": [
+            ],
+            "constraints": [
+                "ALTER TABLE koldstore.table_prefix_pins ADD CONSTRAINT table_prefix_pins_pkey PRIMARY KEY (table_oid)"
+            ],
+            "foreign_keys": [
+            ]
+        },
         "backups": {
             "create": "CREATE TABLE koldstore.backups (name text NOT NULL, taken_at timestamp with time zone DEFAULT now() NOT NULL, registered_at timestamp with time zone DEFAULT now() NOT NULL)",
             "indexes": [
@@ -253,6 +263,18 @@
             "table": "schemas",
             "unsupported": false,
             "needs_default": false
+        },
+        "column table_prefix_pins.table_oid oid not null": {
+            "add": "ALTER TABLE koldstore.table_prefix_pins ADD COLUMN table_oid oid",
+            "table": "table_prefix_pins",
+            "unsupported": false,
+            "needs_default": true
+        },
+        "column table_prefix_pins.prefix text not null": {
+            "add": "ALTER TABLE koldstore.table_prefix_pins ADD COLUMN prefix text",
+            "table": "table_prefix_pins",
+            "unsupported": false,
+            "needs_default": true
         },
         "column backups.name text not null": {
             "add": "ALTER TABLE koldstore.backups ADD COLUMN name text",

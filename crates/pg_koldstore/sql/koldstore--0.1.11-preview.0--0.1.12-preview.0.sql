@@ -455,6 +455,13 @@ CREATE TABLE IF NOT EXISTS koldstore.backups (
 );
 REVOKE ALL ON koldstore.backups FROM PUBLIC;
 
+-- Object prefix pinned per table so renames / schema moves never relocate published cold objects.
+CREATE TABLE IF NOT EXISTS koldstore.table_prefix_pins (
+  table_oid oid PRIMARY KEY,
+  prefix text NOT NULL
+);
+REVOKE ALL ON koldstore.table_prefix_pins FROM PUBLIC;
+
 CREATE FUNCTION koldstore."register_backup"(
 	"name" TEXT,
 	"taken_at" timestamptz DEFAULT now()

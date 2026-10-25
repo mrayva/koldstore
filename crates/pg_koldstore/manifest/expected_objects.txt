@@ -135,6 +135,8 @@ column storage.storage_type text not null
 column storage.updated_at timestamp with time zone not null
 column table_cancel_requests.requested_at timestamp with time zone not null
 column table_cancel_requests.table_oid oid not null
+column table_prefix_pins.prefix text not null
+column table_prefix_pins.table_oid oid not null
 function _cold_insert_guard_check(table_oid oid, "row" jsonb, table_name text) returns void [cold_insert_guard_check_pg_wrapper]
 function _cold_unique_guard_check(table_oid oid, new_row jsonb, old_row jsonb, specs jsonb, table_name text) returns void [cold_unique_guard_check_pg_wrapper]
 function _cold_fk_parent_guard_check(child_oid oid, parent_oid oid, fk_cols jsonb, ref_cols jsonb, old_row jsonb, new_row jsonb, constraint_name text) returns void [cold_fk_parent_guard_check_pg_wrapper]

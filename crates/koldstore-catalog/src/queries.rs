@@ -22,13 +22,13 @@ use koldstore_common::{SqlParamType, SqlResult, SqlStatement};
 ///
 /// This fragment is inserted via `{SQL_TABLE_PREFIX}` into outer `format!`
 /// templates, so braces here are copied verbatim into the emitted SQL.
-const SQL_TABLE_PREFIX: &str = r#"(SELECT CASE WHEN q.p = '' THEN '' ELSE q.p || '/' END
+const SQL_TABLE_PREFIX: &str = r#"COALESCE((SELECT p.prefix FROM koldstore.table_prefix_pins p WHERE p.table_oid = c.oid), (SELECT CASE WHEN q.p = '' THEN '' ELSE q.p || '/' END
       FROM (SELECT regexp_replace(
           replace(replace(st.regular_path_tmpl, '{namespace}', (SELECT COALESCE(string_agg(CASE WHEN g.b BETWEEN 48 AND 57 OR g.b BETWEEN 65 AND 90 OR g.b BETWEEN 97 AND 122 OR g.b IN (45, 95) THEN chr(g.b) ELSE '%' || lpad(upper(to_hex(g.b)), 2, '0') END, '' ORDER BY g.i), '') FROM (SELECT i, get_byte(convert_to(n.nspname, 'UTF8'), i) AS b FROM generate_series(0, octet_length(convert_to(n.nspname, 'UTF8')) - 1) AS i) AS g)), '{tableName}', (SELECT COALESCE(string_agg(CASE WHEN g.b BETWEEN 48 AND 57 OR g.b BETWEEN 65 AND 90 OR g.b BETWEEN 97 AND 122 OR g.b IN (45, 95) THEN chr(g.b) ELSE '%' || lpad(upper(to_hex(g.b)), 2, '0') END, '' ORDER BY g.i), '') FROM (SELECT i, get_byte(convert_to(c.relname, 'UTF8'), i) AS b FROM generate_series(0, octet_length(convert_to(c.relname, 'UTF8')) - 1) AS i) AS g)),
           '(^/+)|(/+$)',
           '',
           'g'
-      ) AS p) AS q)"#;
+      ) AS p) AS q))"#;
 
 /// `jsonb_object_agg(column_id → name)` over one historical schema version.
 ///
@@ -296,7 +296,8 @@ SELECT jsonb_build_object(
     'config', COALESCE(st.config, '{}'::jsonb),
     'regular_path_tmpl', st.regular_path_tmpl,
     'schema_version', s.version,
-    'compression', COALESCE(s.options->>'compression', 'zstd')
+    'compression', COALESCE(s.options->>'compression', 'zstd'),
+    'pinned_prefix', (SELECT p.prefix FROM koldstore.table_prefix_pins p WHERE p.table_oid = s.table_oid)
 )::text
 FROM koldstore.schemas s
 JOIN koldstore.storage st ON st.id = s.storage_id
