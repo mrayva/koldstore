@@ -102,8 +102,8 @@ What shipped, and where it differs from the sketch above:
 * **No per-scope manifest objects yet.** One table manifest lists every segment, scoped ones with their scope-prefixed relative
   paths. Per-scope manifests are only worth having once something reads them per scope.
 * **Compaction is already per scope** (slice 3's core): units never cross scopes, output keeps the unit's scope and folder, and the
-  table-wide group is skipped once scoped segments exist (a marker there may be masking an older version in a scoped group; rewriting
-  it needs a "keep markers" mode). Markers therefore accumulate in small table-wide segments for now.
+  table-wide group was skipped once scoped segments exist (a marker there may be masking an older version in a scoped group). Superseded:
+  see "Keep-markers compaction" below.
 * Reads are unchanged: all segments are candidates. Tests: `scoped_cold_layout` (SQL), encoder and manifest-path unit tests.
 
 Still open for slices 2 and 3: scope resolution in the scan and per-scope disjointness; the `max_scopes_per_flush` fallback; a
@@ -151,7 +151,7 @@ Slice 1 left delete markers table-wide because a marker has only the primary key
 * Flush selects `mirror.scope_id` (`FlushMirrorRow::scope`); `row_scope` uses it for a delete marker, so the marker is written to its
   row's scope group. Rows with no recorded scope (a mirror older than the column, a NULL scope) still go to the table-wide group.
 * Compaction may now drop a marker inside a scope group, because older versions of its key can only be in that group -- unless the
-  table-wide group is non-empty (it could hold one), in which case a unit with a marker is left alone.
+  table-wide group is non-empty (it could hold one), in which case a unit with a marker was left alone (superseded: see "Keep-markers compaction" below).
 
 Effect: a delete no longer poisons every scope's scan. Only the scope that holds the deleted row loses the retention-free scan (until
 compaction drops the marker); `scoped_cold_scan` shows an untouched scope scanning under a tiny key cap after another scope's deletes.
@@ -168,8 +168,18 @@ sketch above, which said "sorted by (scope, order)":
 * The fallback keeps the original `(order key, key, seq)` order. Scope-sorted table-wide segments would have to give up the segments' "sorted
   by the order key" claim that ordered scans rely on, so clustering by scope is not attempted; the fallback is simply the pre-scoping layout.
   A later flush below the limit is per-scope again, and the table then mixes both kinds, which readers and compaction already handle (the
-  table-wide group is read by every scope's scan and is left alone by compaction while scoped segments exist).
+  table-wide group is read by every scope's scan and is merged by compaction in keep-markers mode once scoped segments exist).
 * A pass is the unit, not the table: the limit bounds the scatter of one flush, and `max_rows_per_flush` already bounds a pass.
 
 The first version of the prefetch ran the mirror query with the merge-scan hook enabled and failed with `RefCell already borrowed`; it now
 runs inside `with_custom_scan_disabled` like the streaming fetch. Covered by `scoped_scope_limit`.
+
+## Keep-markers compaction (2026-10-25)
+
+Compaction resolves each unit with one of two marker policies. **Drop** (unscoped tables; a scope group while no table-wide segment
+exists): a winning delete marker removes the key and is dropped. **Keep** (the table-wide group once scoped segments exist; a scope group
+while the table-wide group is non-empty): the newest version of each key still wins and older versions inside the unit are dropped, but a
+winning marker is written out again, because it may still mask an older version outside the unit. So the table-wide group is merged like
+any other (small flush segments no longer accumulate), and a scope group's units are no longer left unmerged just because they hold a
+marker. A kept marker carries only its key (`CleanColdRow::key_image`), so keep mode needs the segment order to be the key itself (no
+order column, or the lead key); a group of a table ordered by another column is left alone as before. Test: `scoped_compaction_markers`.

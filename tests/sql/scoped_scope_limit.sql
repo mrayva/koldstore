@@ -72,7 +72,7 @@ SELECT count(*) AS sc_user_1_rows FROM sqlreg.sc WHERE user_id = 'user-1';
 SELECT count(*) AS sc_ctl_user_1_rows FROM sqlreg.sc_ctl WHERE user_id = 'user-1';
 SELECT v AS sc_edited_value FROM sqlreg.sc WHERE user_id = 'user-4' AND id = 4;
 
--- compaction handles the mix: scoped groups compact, the table-wide group is left alone
+-- compaction handles the mix: scoped groups compact, the table-wide group is merged keeping its markers
 SELECT (koldstore.compact_table('sqlreg.sc'::regclass, grace_seconds => 3600) ->> 'compacted')::boolean AS sc_compacted;
 SELECT sqlreg.same_content('sqlreg.sc', 'sqlreg.sc_ctl', 'id') AS sc_content_equal_after_compaction;
 SELECT koldstore.recover_segments('sqlreg.sc'::regclass, true) AS sc_orphans;

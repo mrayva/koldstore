@@ -222,6 +222,12 @@ pub(super) fn clean_rows_from_batch(
             let json = cell.to_pk_json(is_numeric);
             pk_json.insert(column.clone(), json);
         }
+        let mut key_image = RowImage::with_capacity(primary_key_columns.len());
+        for column in primary_key_columns {
+            if let Some(cell) = row_image.get(column) {
+                key_image.insert(column.clone(), cell.clone());
+            }
+        }
         if deleted_value {
             // Delete markers keep PK identity only; drop application payload.
             row_image = RowImage::new();
@@ -236,6 +242,7 @@ pub(super) fn clean_rows_from_batch(
         rows.push(CleanColdRow {
             pk_json: serde_json::Value::Object(pk_json),
             row_image,
+            key_image,
             seq: seq_value,
             op: op_value,
             deleted: deleted_value,

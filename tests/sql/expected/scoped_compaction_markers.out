@@ -1,0 +1,150 @@
+CREATE FUNCTION
+CREATE FUNCTION
+SET
+CREATE TABLE
+CREATE TABLE
+INSERT 0 15
+ cm_managed
+------------
+ t
+(1 row)
+
+ cm_flush_1
+------------
+ t
+(1 row)
+
+INSERT 0 15
+ cm_flush_2
+------------
+ t
+(1 row)
+
+INSERT 0 15
+ cm_flush_3
+------------
+ t
+(1 row)
+
+INSERT 0 15
+ cm_flush_4
+------------
+ t
+(1 row)
+
+INSERT 0 15
+ cm_flush_5
+------------
+ t
+(1 row)
+
+INSERT 0 15
+ cm_flush_6
+------------
+ t
+(1 row)
+
+INSERT 0 90
+SET
+INSERT 0 60
+INSERT 0 60
+ cm_fenced
+-----------
+ t
+(1 row)
+
+ cm_flushed_scoped
+-------------------
+ t
+(1 row)
+
+SET
+DELETE 21
+DELETE 21
+RESET
+ cm_fenced_2
+-------------
+ t
+(1 row)
+
+ cm_flushed_deletes
+--------------------
+ t
+(1 row)
+
+ cm_fenced_3
+-------------
+ t
+(1 row)
+
+ cm_table_wide_fragmented | cm_has_scoped
+--------------------------+---------------
+ t                        | t
+(1 row)
+
+ cm_content_equal
+------------------
+ t
+(1 row)
+
+ cm_rows
+---------
+     129
+(1 row)
+
+ cm_table_wide_before
+----------------------
+                    6
+(1 row)
+
+ cm_compacted
+--------------
+ t
+(1 row)
+
+ cm_table_wide_after
+---------------------
+                   1
+(1 row)
+
+ cm_content_equal_after_compaction
+-----------------------------------
+ t
+(1 row)
+
+ cm_rows_after
+---------------
+           129
+(1 row)
+
+ cm_deleted_still_gone
+-----------------------
+                     0
+(1 row)
+
+ cm_noop_second
+----------------
+ f
+(1 row)
+
+ cm_reaped
+-----------
+ t
+(1 row)
+
+ cm_content_equal_after_reap
+-----------------------------
+ t
+(1 row)
+
+ cm_orphans
+------------
+          0
+(1 row)
+
+ cm_valid
+----------
+ true
+(1 row)
+
+RESET

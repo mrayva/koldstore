@@ -8,7 +8,7 @@
 //! A pass lists the active segments with their primary-key bounds, plans units
 //! ([`koldstore_flush::plan_compaction_units`]) and rewrites each unit through the flush encoder:
 //! newest version of every key wins (its original `seq` and operation code are kept), delete markers
-//! are dropped, rows are sorted by key and re-split at `max_rows_per_file`. Publishing is one
+//! are dropped (kept while an older version of the key may live in a segment outside the unit's group), rows are sorted by key and re-split at `max_rows_per_file`. Publishing is one
 //! catalog statement that activates the new segments and retires the old ones under the manifest
 //! generation CAS, so readers see either the old segments or the new ones. Retired segments keep
 //! their object for a grace period (readers planned on the previous generation may still be
@@ -16,7 +16,7 @@
 //!
 //! The cold history of a key collapses to its newest version, so `changes_since` over cold data can no
 //! longer replay the overwritten versions. The highest dropped `seq` is stored as the manifest's
-//! `history_floor_seq` in the activation statement, and `changes_since` refuses older cursors. Scoped (per-user) tables are not handled yet.
+//! `history_floor_seq` in the activation statement, and `changes_since` refuses older cursors. Scoped (per-user) tables compact per scope group (ADR-010).
 //!
 //! Output rows are sorted like a flush sorts them: by the segment-order column when the table has
 //! one, then by the key columns in key order. Two segments can share a composite key only if their
@@ -180,24 +180,37 @@ fn compact_locked(
     for segment in &segments {
         groups.entry(segment.scope_id.clone()).or_default().push(segment);
     }
-    if table_has_scoped {
-        groups.remove(&None);
-    }
-    // A delete marker now follows its row into the row's scope group (the mirror records the scope),
+    // A delete marker follows its row into the row's scope group (the mirror records the scope),
     // where compaction can drop it once it has met the older versions it masks. That is only safe
     // while nothing outside the scope group could still hold such a version: older versions never
     // live in another scope (a key has one scope), but the table-wide group (rows from before
-    // scoping, NULL scopes, markers whose scope was unknown) can. While it is not empty, a unit that
-    // holds a marker is left as it is.
-    let drop_markers = !table_has_scoped || !segments.iter().any(|segment| segment.scope_id.is_none());
+    // scoping, NULL scopes, markers whose scope was unknown) can. While that group is not empty,
+    // scope groups keep their winning markers; the table-wide group itself always keeps them
+    // once scoped segments exist, since a marker there may mask a version in any scope group.
+    let table_wide_present = segments.iter().any(|segment| segment.scope_id.is_none());
+    let drop_markers_in = |scope: &Option<String>| {
+        !table_has_scoped || (scope.is_some() && !table_wide_present)
+    };
     // A composite key whose segments all have exact tuple bounds is planned with both tests (see
     // `SegmentRange::may_share_keys`): a sorted rewrite makes the output lexicographically disjoint,
     // so a repeat finds nothing to do and the scan sees disjoint segments afterwards.
     let composite = catalog.primary_key.columns.len() > 1;
     // The last flag marks an oversized overlap component that is rewritten in slices (streamed).
-    let mut planned: Vec<(CompactionUnit, Vec<&ListedSegment>, Option<String>, bool, bool)> = Vec::new();
+    let mut planned: Vec<(CompactionUnit, Vec<&ListedSegment>, Option<String>, bool, bool, bool)> =
+        Vec::new();
     let mut skipped_over_cap = 0_usize;
     for (scope, group) in groups {
+        let drop_markers = drop_markers_in(&scope);
+        // A kept marker carries only its key, so it can be placed only when the segment order is
+        // the key itself; for any other order column its group is left as it was.
+        if !drop_markers
+            && !ctx
+                .snapshot
+                .segment_order_column_id
+                .is_none_or(|column_id| column_id == lead_key)
+        {
+            continue;
+        }
         let exact_tuples = composite && group.iter().all(|segment| segment.tuple_bounds.is_some());
         let ranges: Vec<SegmentRange> = group
             .iter()
@@ -227,7 +240,7 @@ fn compact_locked(
             for unit in std::mem::take(&mut plan.oversized) {
                 let members: Vec<&ListedSegment> = unit.members.iter().map(|index| group[*index]).collect();
                 skipped_over_cap -= 1;
-                planned.push((unit, members, scope.clone(), exact_tuples, true));
+                planned.push((unit, members, scope.clone(), exact_tuples, true, drop_markers));
             }
         }
         if auto {
@@ -245,7 +258,7 @@ fn compact_locked(
         }
         for unit in plan.units {
             let members: Vec<&ListedSegment> = unit.members.iter().map(|index| group[*index]).collect();
-            planned.push((unit, members, scope.clone(), exact_tuples, false));
+            planned.push((unit, members, scope.clone(), exact_tuples, false, drop_markers));
         }
     }
     if auto && planned.is_empty() {
@@ -262,7 +275,7 @@ fn compact_locked(
     let (mut segments_removed, mut segments_added) = (0_usize, 0_usize);
     let (mut rows_read, mut rows_written, mut dropped_versions) = (0_i64, 0_i64, 0_i64);
     let (mut bytes_removed, mut bytes_added) = (0_i64, 0_i64);
-    for (unit, members, scope, exact_tuples, streamed) in &planned {
+    for (unit, members, scope, exact_tuples, streamed, drop_markers) in &planned {
         // A streamed unit holds at most `max_rows` rows at a time, whatever its size, but it reads
         // all of it: it runs only as the first unit of a call, which then has no budget left.
         if *streamed {
@@ -286,7 +299,7 @@ fn compact_locked(
             started,
             *exact_tuples,
             scope.as_deref(),
-            drop_markers,
+            *drop_markers,
             streamed.then_some(max_rows),
         )?
         else {
@@ -348,14 +361,15 @@ struct ResolvedRows {
 /// Newest version of each key wins; a winning delete marker removes the key altogether. A dropped
 /// version or marker newer than `retain_from` is moved to history
 /// (`koldstore.cdc_retention_seconds`); `history_floor` is the highest seq of one dropped for good
-/// (`changes_since` can no longer report it, so it refuses cursors below it). `None` when a delete
-/// marker wins but `drop_markers` is false: nothing outside this unit's scope group may still hold
-/// an older version of its key (see `compact_locked`), so the unit is left as it is.
+/// (`changes_since` can no longer report it, so it refuses cursors below it). With `drop_markers`
+/// false a winning delete marker is kept in the output instead (still
+/// masking whatever older version of its key lives outside this unit, see `compact_locked`) and
+/// only the older versions it beats inside the unit are dropped.
 fn resolve_versions(
     rows: Vec<koldstore_parquet::CleanColdRow>,
     drop_markers: bool,
     retain_from: i64,
-) -> Option<ResolvedRows> {
+) -> ResolvedRows {
     let mut history_floor = 0_i64;
     let mut history: Vec<koldstore_parquet::CleanColdRow> = Vec::new();
     let mut drop_version = |row: koldstore_parquet::CleanColdRow, floor: &mut i64| {
@@ -383,8 +397,8 @@ fn resolve_versions(
             }
         }
     }
-    if !drop_markers && winners.values().any(|row| row.deleted) {
-        return None;
+    if !drop_markers {
+        return ResolvedRows { kept: winners.into_values().collect(), history, history_floor };
     }
     let marker_keys: Vec<String> = winners
         .iter()
@@ -396,7 +410,7 @@ fn resolve_versions(
             drop_version(marker, &mut history_floor);
         }
     }
-    Some(ResolvedRows { kept: winners.into_values().collect(), history, history_floor })
+    ResolvedRows { kept: winners.into_values().collect(), history, history_floor }
 }
 
 /// Peak-memory sample of lead-key values used to choose slice boundaries of a streamed unit.
@@ -438,7 +452,11 @@ fn compact_unit(
         .map(|column| &column.name);
     let null = CellValue::Null;
     let cell = |row: &koldstore_parquet::CleanColdRow, name: &String| -> CellValue {
-        row.row_image.get(name).cloned().unwrap_or_else(|| null.clone())
+        row.row_image
+            .get(name)
+            .or_else(|| row.key_image.get(name))
+            .cloned()
+            .unwrap_or_else(|| null.clone())
     };
     // Same order a flush produces: the segment-order column, then the key columns in key order.
     let sort_rows = |rows: &mut Vec<koldstore_parquet::CleanColdRow>| {
@@ -470,7 +488,11 @@ fn compact_unit(
                     .columns
                     .iter()
                     .map(|column| {
-                        row.row_image.get(&column.name).cloned().unwrap_or(CellValue::Null)
+                        row.row_image
+                            .get(&column.name)
+                            .or_else(|| row.key_image.get(&column.name))
+                            .cloned()
+                            .unwrap_or(CellValue::Null)
                     })
                     .collect(),
                 // The encoder only checks the key is present (rows arrive sorted); paging below
@@ -535,9 +557,7 @@ fn compact_unit(
                              check_gain: bool|
      -> Result<bool, String> {
         let batch_rows = i64::try_from(rows.len()).unwrap_or(i64::MAX);
-        let Some(mut resolved) = resolve_versions(rows, drop_markers, retain_from) else {
-            return Ok(false);
-        };
+        let mut resolved = resolve_versions(rows, drop_markers, retain_from);
         sort_rows(&mut resolved.kept);
         sort_rows(&mut resolved.history);
         if check_gain && !stable_rewrite {
@@ -597,9 +617,6 @@ fn compact_unit(
     let mut seen = 0_usize;
     for hint in &hints {
         for row in read_members(std::slice::from_ref(hint))? {
-            if !drop_markers && row.deleted {
-                return Ok(None);
-            }
             let Some(key) = lead_key(&row) else {
                 return Ok(None);
             };

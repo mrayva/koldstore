@@ -20,6 +20,9 @@ pub struct CleanColdRow {
     pub pk_json: serde_json::Value,
     /// Base table row image (empty for delete markers).
     pub row_image: RowImage,
+    /// Primary-key cells by column name; unlike `row_image` also present for delete markers, so a
+    /// marker can be written out again (compaction keeps markers that still mask older versions).
+    pub key_image: RowImage,
     /// KoldStore sequence number.
     pub seq: i64,
     /// Mirror operation code (`1` insert, `2` update, `3` delete).
