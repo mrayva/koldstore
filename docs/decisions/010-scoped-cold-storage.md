@@ -183,3 +183,22 @@ winning marker is written out again, because it may still mask an older version 
 any other (small flush segments no longer accumulate), and a scope group's units are no longer left unmerged just because they hold a
 marker. A kept marker carries only its key (`CleanColdRow::key_image`), so keep mode needs the segment order to be the key itself (no
 order column, or the lead key); a group of a table ordered by another column is left alone as before. Test: `scoped_compaction_markers`.
+
+## Remaining items, evaluated (2026-10-25)
+
+Four items were carried as open after slices 1-3. None is worth code today; the reasons, so they are not re-opened by accident:
+
+* **Per-scope manifest objects.** Nothing reads a manifest per scope: scans resolve segments from the catalog, and the one table manifest is
+  only the backup/recovery listing. Splitting it would add objects to publish under the generation CAS for no reader. Revisit if a consumer
+  (a per-tenant restore, an external reader) needs one scope's listing.
+* **Scope clustering in the `max_scopes_per_flush` fallback.** The fallback exists to stop a pass over very many scopes from scattering into
+  tiny objects. Sorting those table-wide segments by `(scope, order)` would break the "sorted by the segment order" claim ordered scans rely
+  on, and pruning by scope inside a table-wide segment needs per-segment scope bounds that the catalog does not carry. Cost without a
+  measured read problem; the tiny-object problem it replaces is the larger one.
+* **Tables managed before the mirror-scope change.** The scope-aware mirror and publication column list shipped in the unreleased
+  0.1.12-preview line (the last tagged release is 0.1.8-beta.1), and no database in use holds a scoped table from before it. Such a table
+  would only see markers stay table-wide until it is re-managed, which is correct, merely less pruned.
+* **Scoped flush buffered in memory.** A pass is capped by `max_rows_per_flush` (default 10,000), so the 2,000,000-row refusal is a guard
+  against a misconfigured limit, with an actionable error (lower `koldstore.max_rows_per_flush`), not a working limit. Streaming it would
+  mean one mirror scan per scope (`WHERE scope_id = ...`, cursor per scope) and a second path for mirrors without `scope_id`; not justified
+  by a limit nobody approaches.
