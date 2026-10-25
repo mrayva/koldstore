@@ -221,14 +221,16 @@ unsafe fn build_lock_probes(parse: *mut pg_sys::Query) -> Vec<(i32, String)> {
             && crate::merge_scan::pg::literals::list_node_pointers(query.rowMarks).iter().all(|clause| {
                 (*clause.cast::<pg_sys::RowMarkClause>()).waitPolicy == pg_sys::LockWaitPolicy::LockWaitBlock
             });
-        if (rtable.len() <= 1 && !query.hasSubLinks && !bounded)
-            || !query.cteList.is_null()
+        if (rtable.len() <= 1 && !query.hasSubLinks && !bounded && query.cteList.is_null())
+            || query.hasModifyingCTE
+            || query.hasRecursive
             || !query.setOperations.is_null()
             || !query.groupClause.is_null()
             || query.hasAggs
             || query.hasWindowFuncs
             || query.hasTargetSRFs
             || pg_sys::contain_volatile_functions(query.jointree.cast())
+            || (!query.cteList.is_null() && pg_sys::contain_volatile_functions(query.cteList.cast()))
         {
             return probes;
         }

@@ -96,7 +96,9 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   of the statement's own ordering) are copied into the heap; under `NOWAIT` / `SKIP LOCKED` every
   matching cold row is hydrated instead, since a skipped row shifts the window. A partitioned or inherited parent works too: each managed leaf
   hydrates the rows its own scan filter selects (pruned leaves are skipped); a join/sub-query across
-  partitions whose filter cannot be reproduced per leaf errors. Not covered: CTEs, set operations, and a
+  partitions whose filter cannot be reproduced per leaf errors. A lock inside a CTE body or sub-select, and a locking statement that joins a (non-recursive,
+  non-data-modifying) CTE, are hydrated the same way; a join *inside* a CTE body that locks, or a correlated
+  sub-select lock, errors. Not covered: recursive / data-modifying CTEs, set operations, and a
   `WHERE` with volatile functions or `CURRENT OF` (these error). Needs READ COMMITTED or REPEATABLE READ (or
   `reject_serializable_cold_reads = off`); otherwise, and when this transaction already wrote the
   table, it errors rather than skipping the cold row. A second session locking a key the first is

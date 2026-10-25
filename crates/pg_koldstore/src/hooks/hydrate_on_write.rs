@@ -198,66 +198,76 @@ unsafe fn hydrate_row_lock_target(query_desc: *mut pg_sys::QueryDesc, eflags: st
             return;
         }
         let planned = (*query_desc).plannedstmt;
-        // `Limit -> LockRows -> [Sort ->] scan`.
-        let node = crate::hooks::dml_planner::lock_rows_node((*planned).planTree);
-        if node.is_null() {
-            return;
+        // `Limit -> LockRows -> [Sort ->] scan`, for the statement itself and for every sub-plan
+        // (a CTE body or sub-select that locks rows).
+        let mut nodes = Vec::new();
+        let top = crate::hooks::dml_planner::lock_rows_node((*planned).planTree);
+        if !top.is_null() {
+            nodes.push(top);
         }
-        let lock_rows = node.cast::<pg_sys::LockRows>();
-        let marks = crate::merge_scan::pg::literals::list_node_pointers((*lock_rows).rowMarks);
+        for subplan in crate::merge_scan::pg::literals::list_node_pointers((*planned).subplans) {
+            let node = crate::hooks::dml_planner::lock_rows_node(subplan.cast());
+            if !node.is_null() {
+                nodes.push(node);
+            }
+        }
         let rtable = (*planned).rtable;
-        if marks.is_empty() || rtable.is_null() {
+        if nodes.is_empty() || rtable.is_null() {
             return;
         }
         let mut hydrated = false;
-        for mark in &marks {
-            let mark = mark.cast::<pg_sys::PlanRowMark>();
-            // Child (inheritance) marks carry `isParent = false` and a parent rti; only the
-            // statement's own relations are handled here.
-            let rti = (*mark).rti as i32;
-            if rti <= 0 || rti > (*rtable).length {
-                continue;
-            }
-            let rte = (*(*rtable).elements.add((rti - 1) as usize)).ptr_value.cast::<pg_sys::RangeTblEntry>();
-            if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
-                continue;
-            }
-            let table_oid = (*rte).relid;
-            if !crate::catalog::cache::is_managed_relation(table_oid)
-                || !matches!(
-                    crate::catalog::cache::cached_manifest_planner_hint(table_oid),
-                    Ok(Some((segments, _))) if segments > 0
-                )
-            {
-                continue;
-            }
-            let is_leaf = (*mark).prti != (*mark).rti;
-            let target = if isolation_blocks_hydration() {
-                None
-            } else if is_leaf {
-                match leaf_lock_target(query_desc, node, rtable, table_oid) {
-                    // A leaf the plan never scans (pruned) has nothing to lock.
-                    Ok(None) => continue,
-                    Ok(Some(target)) => Some(target),
-                    Err(()) => None,
+        for node in nodes {
+            let lock_rows = node.cast::<pg_sys::LockRows>();
+            let marks = crate::merge_scan::pg::literals::list_node_pointers((*lock_rows).rowMarks);
+            for mark in &marks {
+                let mark = mark.cast::<pg_sys::PlanRowMark>();
+                // Child (inheritance) marks carry `isParent = false` and a parent rti; only the
+                // statement's own relations are handled here.
+                let rti = (*mark).rti as i32;
+                if rti <= 0 || rti > (*rtable).length {
+                    continue;
                 }
-            } else {
-                lock_target(query_desc, node, marks.len(), rti, table_oid)
-            };
-            let Some(target) = target else {
-                pgrx::ereport!(
-                    pgrx::PgLogLevel::ERROR,
-                    pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    format!(
-                        "koldstore: SELECT ... FOR UPDATE/SHARE on managed table {} cannot hydrate its cold rows \
-                         here (SERIALIZABLE isolation, or a WHERE clause / join that cannot be reproduced) (upstream issue #125)",
-                        crate::txn_writes::relation_display_name(table_oid)
-                    ),
-                    "lock the rows by primary key in a READ COMMITTED or REPEATABLE READ transaction, or use koldstore.hydrate_pk() first"
-                );
-                return;
-            };
-            hydrated |= hydrate_target(&target);
+                let rte = (*(*rtable).elements.add((rti - 1) as usize)).ptr_value.cast::<pg_sys::RangeTblEntry>();
+                if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                    continue;
+                }
+                let table_oid = (*rte).relid;
+                if !crate::catalog::cache::is_managed_relation(table_oid)
+                    || !matches!(
+                        crate::catalog::cache::cached_manifest_planner_hint(table_oid),
+                        Ok(Some((segments, _))) if segments > 0
+                    )
+                {
+                    continue;
+                }
+                let is_leaf = (*mark).prti != (*mark).rti;
+                let target = if isolation_blocks_hydration() {
+                    None
+                } else if is_leaf {
+                    match leaf_lock_target(query_desc, node, rtable, table_oid) {
+                        // A leaf the plan never scans (pruned) has nothing to lock.
+                        Ok(None) => continue,
+                        Ok(Some(target)) => Some(target),
+                        Err(()) => None,
+                    }
+                } else {
+                    lock_target(query_desc, node, marks.len(), rti, table_oid)
+                };
+                let Some(target) = target else {
+                    pgrx::ereport!(
+                        pgrx::PgLogLevel::ERROR,
+                        pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "koldstore: SELECT ... FOR UPDATE/SHARE on managed table {} cannot hydrate its cold rows \
+                             here (SERIALIZABLE isolation, or a WHERE clause / join that cannot be reproduced) (upstream issue #125)",
+                            crate::txn_writes::relation_display_name(table_oid)
+                        ),
+                        "lock the rows by primary key in a READ COMMITTED or REPEATABLE READ transaction, or use koldstore.hydrate_pk() first"
+                    );
+                    return;
+                };
+                hydrated |= hydrate_target(&target);
+            }
         }
         if hydrated {
             pg_sys::CommandCounterIncrement();

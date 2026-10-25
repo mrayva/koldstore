@@ -183,3 +183,45 @@ async fn select_for_update_with_limit_hydrates_only_the_returned_rows() -> Resul
     ensure!(ids(rows) == vec![5, 6], "SKIP LOCKED lock returned wrong rows");
     Ok(())
 }
+
+/// Row locks reached through a CTE: a `FOR UPDATE` inside a CTE body, and a locking statement that
+/// joins a CTE.
+#[tokio::test]
+async fn select_for_update_through_ctes_hydrates_cold_rows() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "row_lock_cte").await?;
+    let table = db.create_indexed_items_table("rl_cte", 10).await?;
+    let relation = &table.relation;
+    db.manage_shared(relation, "id").await?;
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    db.client.batch_execute("SET koldstore.hydrate_on_write = on").await?;
+    let ids = |rows: Vec<tokio_postgres::Row>| rows.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>();
+    let peer = common::connect_peer(&db).await?;
+
+    // The lock sits in the CTE body.
+    db.client.batch_execute("BEGIN").await?;
+    let rows = db
+        .client
+        .query(&format!("WITH l AS (SELECT id FROM {relation} WHERE id <= 2 ORDER BY id FOR UPDATE) SELECT id FROM l ORDER BY id"), &[])
+        .await?;
+    let busy = peer.query(&format!("SELECT id FROM {relation} WHERE id = 2 FOR UPDATE NOWAIT"), &[]).await.err();
+    db.client.batch_execute("COMMIT").await?;
+    ensure!(ids(rows) == vec![1, 2], "CTE-body lock returned wrong rows");
+    ensure!(busy.is_some(), "a peer must not lock a row the CTE-body lock holds");
+
+    // The locking statement joins a CTE.
+    db.client.batch_execute("BEGIN").await?;
+    let rows = db
+        .client
+        .query(
+            &format!("WITH c AS (SELECT 5::bigint AS id UNION ALL SELECT 6) SELECT t.id FROM {relation} t JOIN c USING (id) ORDER BY t.id FOR UPDATE OF t"),
+            &[],
+        )
+        .await?;
+    let busy = peer.query(&format!("SELECT id FROM {relation} WHERE id = 6 FOR UPDATE NOWAIT"), &[]).await.err();
+    db.client.batch_execute("COMMIT").await?;
+    ensure!(ids(rows) == vec![5, 6], "CTE-join lock returned wrong rows");
+    ensure!(busy.is_some(), "a peer must not lock a row the CTE-join lock holds");
+    Ok(())
+}

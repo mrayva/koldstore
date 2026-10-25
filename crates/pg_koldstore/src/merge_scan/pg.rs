@@ -622,13 +622,16 @@ unsafe fn row_lock_hydratable(
     rte: *mut pg_sys::RangeTblEntry,
     snapshot: Option<&koldstore_catalog::ManagedTableSnapshot>,
 ) -> bool {
-    if !crate::guc::hydrate_on_write() || (*rte).inh || !(*root).parent_root.is_null() || snapshot.is_none() {
+    // A lock inside a CTE body or sub-select (`parent_root` set) is hydrated too: the executor
+    // walks the statement's sub-plans for their `LockRows` nodes.
+    if !crate::guc::hydrate_on_write() || (*rte).inh || snapshot.is_none() {
         return false;
     }
     let parse = (*root).parse;
     if (*parse).hasAggs
         || (*parse).hasWindowFuncs
-        || !(*parse).cteList.is_null()
+        || (*parse).hasModifyingCTE
+        || (*parse).hasRecursive
         || !(*parse).setOperations.is_null()
         || !(*parse).groupClause.is_null()
         || !(*parse).distinctClause.is_null()
