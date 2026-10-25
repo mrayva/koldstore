@@ -91,9 +91,10 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   With the experimental `koldstore.hydrate_on_write = on`, a top-level
   `SELECT ... FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE` hydrates the cold rows it selects first and
   then takes the native tuple locks: any single-table `WHERE` (primary key or not), and joins /
-  sub-queries (the statement's own FROM/WHERE is re-run to find the locked table's cold rows). Every
-  matching cold row is hydrated, so a `LIMIT` does not bound how many are copied into the heap (only
-  the returned rows are locked). A partitioned or inherited parent works too: each managed leaf
+  sub-queries (the statement's own FROM/WHERE is re-run to find the locked table's cold rows). A
+  `LIMIT` / `OFFSET` bounds the hydration: only the rows through the end of the window (`LIMIT + OFFSET`
+  of the statement's own ordering) are copied into the heap; under `NOWAIT` / `SKIP LOCKED` every
+  matching cold row is hydrated instead, since a skipped row shifts the window. A partitioned or inherited parent works too: each managed leaf
   hydrates the rows its own scan filter selects (pruned leaves are skipped); a join/sub-query across
   partitions whose filter cannot be reproduced per leaf errors. Not covered: CTEs, set operations, and a
   `WHERE` with volatile functions or `CURRENT OF` (these error). Needs READ COMMITTED or REPEATABLE READ (or

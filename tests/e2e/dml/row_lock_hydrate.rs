@@ -143,3 +143,43 @@ async fn select_for_update_through_a_partitioned_parent_hydrates_cold_leaf_rows(
     ensure!(busy.is_some(), "a peer must not lock a row the partitioned lock holds");
     Ok(())
 }
+
+/// A `LIMIT` / `OFFSET` bounds the hydration: only the rows the locking statement returns are
+/// copied into the heap, not every cold row the `WHERE` matches.
+#[tokio::test]
+async fn select_for_update_with_limit_hydrates_only_the_returned_rows() -> Result<()> {
+    let target = common::scenario_pg_matrix().into_iter().next().expect("PostgreSQL target");
+    let db = common::TestDb::start(target, "row_lock_limit").await?;
+    let table = db.create_indexed_items_table("rl_limit", 10).await?;
+    let relation = &table.relation;
+    db.manage_shared(relation, "id").await?;
+    db.flush_table(relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+    db.client.batch_execute("SET koldstore.hydrate_on_write = on").await?;
+    let ids = |rows: Vec<tokio_postgres::Row>| rows.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>();
+    // Heap inserts since the flush: each hydrated row is one tuple inserted (stats flushed on demand).
+    let hot = || async {
+        db.client.batch_execute("SELECT pg_stat_force_next_flush()").await?;
+        anyhow::Ok(
+            db.client
+                .query_one(&format!("SELECT pg_stat_get_tuples_inserted('{relation}'::regclass)"), &[])
+                .await?
+                .get::<_, i64>(0),
+        )
+    };
+    let base = hot().await?;
+
+    let rows = db.client.query(&format!("SELECT id FROM {relation} WHERE qty >= 0 ORDER BY id LIMIT 2 FOR UPDATE"), &[]).await?;
+    ensure!(ids(rows) == vec![1, 2], "LIMIT lock returned wrong rows");
+    ensure!(hot().await? == base + 2, "LIMIT 2 must hydrate exactly 2 rows, hot {} -> {}", base, hot().await?);
+
+    let rows = db.client.query(&format!("SELECT id FROM {relation} ORDER BY id DESC LIMIT 2 OFFSET 1 FOR SHARE"), &[]).await?;
+    let got = ids(rows);
+    ensure!(got == vec![9, 8], "OFFSET lock returned wrong rows: {got:?}");
+    let after = hot().await?; ensure!(after == base + 5, "LIMIT/OFFSET hydrates the rows through the window (3 more): base {base} after {after}");
+
+    // SKIP LOCKED keeps the unbounded form, so a skipped row cannot leave the window short.
+    let rows = db.client.query(&format!("SELECT id FROM {relation} WHERE id > 4 ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED"), &[]).await?;
+    ensure!(ids(rows) == vec![5, 6], "SKIP LOCKED lock returned wrong rows");
+    Ok(())
+}

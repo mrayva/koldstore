@@ -182,6 +182,20 @@ unsafe fn pk_target_list(table_oid: pg_sys::Oid, varno: i32, pk_attnums: &[i16])
     }
 }
 
+unsafe fn list_length(list: *mut pg_sys::List) -> i32 {
+    if list.is_null() { 0 } else { unsafe { (*list).length } }
+}
+
+/// The key `Var`s of a primary-key target list (`pk_target_list`), copied.
+unsafe fn literals_target_vars(target_list: *mut pg_sys::List) -> Vec<*mut pg_sys::Node> {
+    unsafe {
+        crate::merge_scan::pg::literals::list_node_pointers(target_list)
+            .into_iter()
+            .map(|entry| pg_sys::copyObjectImpl((*entry.cast::<pg_sys::TargetEntry>()).expr.cast()).cast())
+            .collect()
+    }
+}
+
 /// One probe per managed table a multi-table / sub-query `SELECT ... FOR UPDATE/SHARE` locks:
 /// `(range-table index, SELECT <that table's primary key> over the statement's FROM/WHERE)`.
 /// The executor hydrates the cold-only rows these select before the locking scan (upstream #125).
@@ -199,7 +213,15 @@ unsafe fn build_lock_probes(parse: *mut pg_sys::Query) -> Vec<(i32, String)> {
         }
         let query = &*parse;
         let rtable = crate::merge_scan::pg::literals::list_node_pointers(query.rtable);
-        if (rtable.len() <= 1 && !query.hasSubLinks)
+        // A LIMIT / OFFSET bounds how many rows the lock reaches (`Limit -> LockRows`), so the probe
+        // keeps the ORDER BY and limit and hydrates only those rows. Not under NOWAIT / SKIP LOCKED
+        // (a skipped row shifts the window), which keep the unbounded form.
+        let bounded = (!query.limitCount.is_null() || !query.limitOffset.is_null())
+            && query.distinctClause.is_null()
+            && crate::merge_scan::pg::literals::list_node_pointers(query.rowMarks).iter().all(|clause| {
+                (*clause.cast::<pg_sys::RowMarkClause>()).waitPolicy == pg_sys::LockWaitPolicy::LockWaitBlock
+            });
+        if (rtable.len() <= 1 && !query.hasSubLinks && !bounded)
             || !query.cteList.is_null()
             || !query.setOperations.is_null()
             || !query.groupClause.is_null()
@@ -224,14 +246,61 @@ unsafe fn build_lock_probes(parse: *mut pg_sys::Query) -> Vec<(i32, String)> {
             let Some(pk_attnums) = probe_pk_attnums(table_oid) else { continue };
             let Some(target_list) = pk_target_list(table_oid, rti, &pk_attnums) else { continue };
             let select = pg_sys::copyObjectImpl(parse.cast()).cast::<pg_sys::Query>();
-            (*select).targetList = target_list;
             (*select).rowMarks = std::ptr::null_mut();
             (*select).hasForUpdate = false;
-            (*select).sortClause = std::ptr::null_mut();
             (*select).distinctClause = std::ptr::null_mut();
+            (*select).hasTargetSRFs = false;
+            if bounded {
+                // Keep the select list (the ORDER BY refers into it) and append the key columns.
+                let mut list = (*select).targetList;
+                let first = list_length(list) + 1;
+                let keys = literals_target_vars(target_list);
+                for (offset, var) in keys.iter().enumerate() {
+                    let Ok(name) = std::ffi::CString::new(format!("koldstore_pk_{offset}")) else { continue };
+                    list = pg_sys::lappend(
+                        list,
+                        pg_sys::makeTargetEntry(
+                            var.cast(),
+                            (first + offset as i32) as pg_sys::AttrNumber,
+                            pg_sys::pstrdup(name.as_ptr()),
+                            false,
+                        )
+                        .cast(),
+                    );
+                }
+                (*select).targetList = list;
+                // The statement's hot-only plan ranks rows among hot + hydrated ones only, so every
+                // row ahead of the window must be hydrated too: bound by `LIMIT + OFFSET`, no offset.
+                if !(*select).limitOffset.is_null() {
+                    (*select).limitCount = if (*select).limitCount.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        // int8 + int8 (operator 684): both operands are already bigint after parse analysis.
+                        pg_sys::make_opclause(
+                            pg_sys::Oid::from(684u32),
+                            pg_sys::INT8OID,
+                            false,
+                            (*select).limitCount.cast(),
+                            (*select).limitOffset.cast(),
+                            pg_sys::InvalidOid,
+                            pg_sys::InvalidOid,
+                        )
+                        .cast()
+                    };
+                    (*select).limitOffset = std::ptr::null_mut();
+                }
+                let text = pg_sys::pg_get_querydef(select, false);
+                if !text.is_null() {
+                    let columns = (0..keys.len()).map(|i| format!("koldstore_lp.koldstore_pk_{i}")).collect::<Vec<_>>().join(", ");
+                    let inner = CStr::from_ptr(text).to_string_lossy();
+                    probes.push((rti, format!("SELECT {columns} FROM ({inner}) AS koldstore_lp")));
+                }
+                continue;
+            }
+            (*select).targetList = target_list;
+            (*select).sortClause = std::ptr::null_mut();
             (*select).limitOffset = std::ptr::null_mut();
             (*select).limitCount = std::ptr::null_mut();
-            (*select).hasTargetSRFs = false;
             let text = pg_sys::pg_get_querydef(select, false);
             if !text.is_null() {
                 probes.push((rti, CStr::from_ptr(text).to_string_lossy().into_owned()));
