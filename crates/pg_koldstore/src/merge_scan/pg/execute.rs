@@ -48,6 +48,7 @@ pub(super) struct ScanSourceInputs<'a> {
     pub(super) pk_equality: &'a [HotEqualityFilter],
     pub(super) pk_range: &'a [HotRangeFilter],
     pub(super) pk_point_lookup: bool,
+    pub(super) knn: Option<super::knn::KnnHint>,
 }
 
 /// Source execution result stored in the Custom Scan's backend-local state.
@@ -798,6 +799,7 @@ fn prepare_cold_stream(
         projected_columns: inputs.image_columns,
         params: inputs.params,
         profile_mode,
+        knn: inputs.knn.as_ref(),
     })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} cold stream setup failed: {error}"))
 }

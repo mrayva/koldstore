@@ -146,6 +146,7 @@ pub(super) struct ColdStreamPlanRequest<'a> {
     pub(super) projected_columns: &'a [&'a koldstore_migrate::order::CatalogColumn],
     pub(super) params: pg_sys::ParamListInfo,
     pub(super) profile_mode: ProfileCollectionMode,
+    pub(super) knn: Option<&'a super::knn::KnnHint>,
 }
 
 /// Inputs for decoding one catalog-selected group of cold segments.
@@ -400,6 +401,7 @@ fn plan_cold_segments(
         projected_columns,
         params,
         profile_mode,
+        knn,
     } = request;
     let catalog = catalog.as_ref();
     let scope_column_id = snapshot.scope_column_id;
@@ -516,6 +518,14 @@ fn plan_cold_segments(
             }
         }
     }
+    // Nearest-neighbour queries: a segment whose vector ball cannot reach the closest rows is skipped. The
+    // hint only exists for a filter-free single-table shape; the same single-version condition applies.
+    if let Some(hint) = knn.filter(|_| (pk_ranges_disjoint || scoped_segment_count <= 1) && qual.is_null()) {
+        let excluded = knn_excluded_paths(*table_oid, &snapshot.mirror_relation, hint, &segments)?;
+        if !excluded.is_empty() {
+            segments.retain(|segment| !path_in_excluded(&segment.object_path, &excluded));
+        }
+    }
     let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
     let profile = if profile_mode.collects_counts() {
@@ -603,6 +613,43 @@ fn term_filter_excluded_paths(
         })
         .map_err(|error| error.to_string())
     })?
+}
+
+/// Relative paths of the candidate `segments` that provably hold none of the `hint.rows` nearest rows.
+fn knn_excluded_paths(
+    table_oid: pg_sys::Oid,
+    mirror: &koldstore_common::TableName,
+    hint: &super::knn::KnnHint,
+    segments: &[SegmentStatsHint],
+) -> Result<Vec<String>, String> {
+    if segments.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let loaded = super::knn::load_sketches(table_oid, hint.column_id)?;
+    // Segments without a sketch are never excluded and never counted.
+    let sketches = loaded
+        .iter()
+        .map(|(_, sketch)| sketch.clone())
+        .collect::<Vec<_>>();
+    if sketches.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    let needed = hint
+        .rows
+        .saturating_add(super::knn::masking_rows_bound(table_oid, mirror)?);
+    let candidate = |path: &str| {
+        segments.iter().any(|segment| path_in_excluded(&segment.object_path, &[path.to_owned()]))
+    };
+    // Only candidate segments take part: others are already out of the scan.
+    let (paths, sketches): (Vec<_>, Vec<_>) = loaded
+        .into_iter()
+        .filter(|(path, _)| candidate(path))
+        .map(|(path, sketch)| (path, sketch))
+        .unzip();
+    Ok(koldstore_parquet::knn_excluded(&sketches, &hint.query, hint.metric, needed)
+        .into_iter()
+        .map(|index| paths[index].clone())
+        .collect())
 }
 
 /// Whether a segment's full object path ends in one of the catalog-relative `excluded` paths (the full

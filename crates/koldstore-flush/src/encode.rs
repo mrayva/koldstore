@@ -384,6 +384,47 @@ impl TermFilterState {
     }
 }
 
+/// Distance sketch of one indexed `vector` column for the segment being written (see
+/// `koldstore_parquet::vector_sketch`). Like a term filter, it rides on an index row with no bounds.
+struct VectorSketchState {
+    name: String,
+    column_id: koldstore_common::ColumnId,
+    builder: koldstore_parquet::VectorSketchBuilder,
+}
+
+impl VectorSketchState {
+    fn for_input(input: &StreamEncodeInput) -> Vec<Self> {
+        input
+            .indexed_columns
+            .iter()
+            .filter(|indexed| {
+                input.parquet_columns.iter().any(|column| {
+                    column.name == indexed.name
+                        && column.pg_type == koldstore_parquet::PgType::Vector
+                })
+            })
+            .map(|indexed| Self {
+                name: indexed.name.clone(),
+                column_id: indexed.column_id,
+                builder: koldstore_parquet::VectorSketchBuilder::new(),
+            })
+            .collect()
+    }
+
+    fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
+        self.builder.add_batch(batch, &self.name);
+    }
+
+    /// Takes the sketch for the segment just closed and resets for the next one.
+    fn finish(&mut self) -> Option<Vec<u8>> {
+        std::mem::replace(
+            &mut self.builder,
+            koldstore_parquet::VectorSketchBuilder::new(),
+        )
+        .finish()
+    }
+}
+
 /// Accumulates the tuple-level key bounds of a composite primary key for the segment being written
 /// (see `koldstore_parquet::key_bounds`). Single-column keys do not need it: their column bounds are
 /// already exact. `builder` is `None` once anything went wrong, and the segment then has no tuple
@@ -449,6 +490,7 @@ struct SegmentBuilder {
     key_bounds: Option<KeyBoundsState>,
     numeric_bounds: Vec<NumericBoundsState>,
     term_filters: Vec<TermFilterState>,
+    vector_sketches: Vec<VectorSketchState>,
 }
 
 impl SegmentBuilder {
@@ -488,6 +530,7 @@ impl SegmentBuilder {
             key_bounds: KeyBoundsState::for_input(input),
             numeric_bounds: NumericBoundsState::for_input(input),
             term_filters: TermFilterState::for_input(input),
+            vector_sketches: VectorSketchState::for_input(input),
         }
     }
 
@@ -518,6 +561,9 @@ impl SegmentBuilder {
             state.add_batch(&batch.batch);
         }
         for state in &mut self.term_filters {
+            state.add_batch(&batch.batch);
+        }
+        for state in &mut self.vector_sketches {
             state.add_batch(&batch.batch);
         }
         self.row_count = self.row_count.saturating_add(batch_row_count);
@@ -588,6 +634,25 @@ impl SegmentBuilder {
                     .push(koldstore_parquet::PackedColumnIndex {
                         column_id: state.column_id,
                         type_oid: state.type_oid,
+                        codec_version: koldstore_sortkey::CODEC_VERSION,
+                        min_value: None,
+                        max_value: None,
+                        row_group_min_values: vec![None; row_group_count],
+                        row_group_max_values: vec![None; row_group_count],
+                        row_group_null_counts: vec![None; row_group_count],
+                        value_summary: Some(summary),
+                        key_min: None,
+                        key_max: None,
+                    });
+            }
+        }
+        for state in &mut self.vector_sketches {
+            if let Some(summary) = state.finish() {
+                packed_metadata
+                    .column_indexes
+                    .push(koldstore_parquet::PackedColumnIndex {
+                        column_id: state.column_id,
+                        type_oid: koldstore_parquet::PgType::Vector.type_oid(),
                         codec_version: koldstore_sortkey::CODEC_VERSION,
                         min_value: None,
                         max_value: None,

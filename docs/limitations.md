@@ -431,6 +431,16 @@ The result is intentionally strict:
 - A distance query that the planner serves by a sequential scan or sort reads
   cold rows too (exact results, no index); one served by an HNSW/IVFFlat index
   scan sees hot rows only.
+- When a `vector` column is listed in `pruning_columns`, each cold segment
+  stores a small ball sketch (centre and radius, for L2 and for cosine). A
+  query of the form `SELECT ... FROM t ORDER BY emb <-> '[...]' LIMIT k`
+  (also `<=>`, with optional `OFFSET`) then skips segments that provably hold
+  none of the `k` nearest rows. It is exact, not approximate, and applies
+  only to a single-table query with no `WHERE`, ascending order, a constant
+  query vector and a constant `LIMIT`, over keys that do not overlap between
+  segments (`tests/sql/vector_knn_pruning.sql`). Any other shape reads every
+  segment, as before. Segments written before the column was indexed have no
+  sketch and are never skipped.
 
 For v1 behavior, vector search should be treated as hot-only unless a
 Kalam-managed cold-vector mode is explicitly enabled.

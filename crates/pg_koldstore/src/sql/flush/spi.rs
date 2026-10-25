@@ -394,7 +394,12 @@ pub(super) fn persist_flush_segments_batch(
             }
             index_segment_ids.push(segment_id);
             index_column_ids.push(bound.column_id.get());
-            index_type_oids.push(pgrx::pg_sys::Oid::from(bound.type_oid));
+            // pgvector's type OID is dynamic, so its sketch rows carry 0 until resolved here.
+            index_type_oids.push(if bound.type_oid == 0 {
+                crate::merge_scan::pg::literals::vector_type_oid()
+            } else {
+                pgrx::pg_sys::Oid::from(bound.type_oid)
+            });
             index_codec_versions.push(bound.codec_version);
             index_min_values.push(bound.min_value.clone());
             index_max_values.push(bound.max_value.clone());

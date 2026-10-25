@@ -25,6 +25,7 @@ mod execute;
 mod hot;
 mod hot_cursor;
 mod keyset;
+mod knn;
 pub(crate) mod literals;
 mod mirror;
 mod path_strategy;
@@ -61,6 +62,10 @@ const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
 const PRIVATE_SORT_ORDER_ID_INDEX: i32 = 4;
 const PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 5;
 const PRIVATE_ORDER_DESCENDING_INDEX: i32 = 6;
+const PRIVATE_KNN_COLUMN_INDEX: i32 = 7;
+const PRIVATE_KNN_METRIC_INDEX: i32 = 8;
+const PRIVATE_KNN_ROWS_INDEX: i32 = 9;
+const PRIVATE_KNN_QUERY_INDEX: i32 = 10;
 
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
@@ -737,6 +742,13 @@ unsafe extern "C-unwind" fn plan_custom_path(
     // Prefer widening the native child over custom_scan_tlist: INDEX_VAR
     // rewrite against a physical custom_scan_tlist has caused
     // "variable not found in subplan target list" on Aggregate/Limit plans.
+    let knn_hint = if actual_clauses.is_null() && table_oid != pg_sys::InvalidOid {
+        with_hook_disabled(|| crate::catalog::cache::cached_migration_catalog(table_oid).ok())
+            .and_then(|catalog| knn::plan_knn_hint(root, scanrelid, &catalog, actual_clauses))
+    } else {
+        None
+    };
+
     let mut planned_children = custom_plans;
     if matches!(
         strategy_tag,
@@ -766,6 +778,7 @@ unsafe extern "C-unwind" fn plan_custom_path(
         sort_order_id,
         leading_column_id,
         order_descending,
+        knn_hint.as_ref(),
     );
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
@@ -1134,6 +1147,7 @@ unsafe fn initialize_fallback_scan(
         pk_equality: &pk_equality,
         pk_range: &pk_range,
         pk_point_lookup,
+        knn: unsafe { custom_private_knn((*node).ss.ps.plan) },
     };
     let source_execution = if profiler.is_enabled() {
         unsafe { execute::execute_scan_sources(source_inputs, &mut profiler) }
@@ -1802,6 +1816,7 @@ unsafe fn serialize_custom_private(
     sort_order_id: i32,
     leading_column_id: i16,
     order_descending: bool,
+    knn: Option<&knn::PlannedKnn>,
 ) -> *mut pg_sys::List {
     let exact_pk = pg_sys::makeInteger(i32::from(exact_pk_lookup));
     let runtime_delegate = pg_sys::makeInteger(i32::from(runtime_delegate_safe));
@@ -1816,7 +1831,24 @@ unsafe fn serialize_custom_private(
     private = pg_sys::lappend(private, scope_node.cast::<c_void>());
     private = pg_sys::lappend(private, sort_order.cast::<c_void>());
     private = pg_sys::lappend(private, leading.cast::<c_void>());
-    pg_sys::lappend(private, descending.cast::<c_void>())
+    private = pg_sys::lappend(private, descending.cast::<c_void>());
+    let (column, metric, rows, query) = knn.map_or((0, 0, 0, ""), |knn| {
+        (i32::from(knn.column_id), knn.metric, knn.rows, knn.query_text.as_str())
+    });
+    private = pg_sys::lappend(private, pg_sys::makeInteger(column).cast::<c_void>());
+    private = pg_sys::lappend(private, pg_sys::makeInteger(metric).cast::<c_void>());
+    private = pg_sys::lappend(private, pg_sys::makeInteger(rows).cast::<c_void>());
+    pg_sys::lappend(private, make_pg_string(query).cast::<c_void>())
+}
+
+/// Returns the nearest-neighbour hint from scan private data, when the planner found that query shape.
+unsafe fn custom_private_knn(plan: *mut pg_sys::Plan) -> Option<knn::KnnHint> {
+    let list = custom_private_list(plan);
+    let column = list_integer_at(list, PRIVATE_KNN_COLUMN_INDEX).filter(|id| *id > 0)?;
+    let metric = list_integer_at(list, PRIVATE_KNN_METRIC_INDEX)?;
+    let rows = list_integer_at(list, PRIVATE_KNN_ROWS_INDEX)?;
+    let query = list_cstring_at(list, PRIVATE_KNN_QUERY_INDEX)?;
+    knn::KnnHint::from_private(column, metric, rows, &query)
 }
 
 /// Returns the path strategy tag from scan private data (default: general merge).

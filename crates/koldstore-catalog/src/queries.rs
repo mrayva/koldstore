@@ -1167,6 +1167,27 @@ WHERE cs.table_oid = $1::oid AND cs.status = 'active'
     )
 }
 
+/// Lists the relative path and encoded vector sketch (a `value_summary` on a `vector` column's index
+/// row) of every active segment that has one. Parameters are table OID and column id.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_vector_sketches() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list vector sketches of active segments",
+        r#"
+SELECT cs.path, t.value_summary
+FROM koldstore.cold_segments cs
+JOIN koldstore.cold_segment_index t
+  ON t.segment_id = cs.segment_id AND t.column_id = $2::smallint
+WHERE cs.table_oid = $1::oid AND cs.status = 'active'
+  AND t.value_summary IS NOT NULL
+"#,
+        [SqlParamType::Oid, SqlParamType::Integer],
+    )
+}
+
 /// Lists compacted segments of one table whose retirement is older than a grace period, with the
 /// full object key each one lives at. Parameters are table OID and the grace in seconds.
 ///

@@ -12,6 +12,7 @@ pub mod schema;
 pub mod temporal;
 pub mod key_bounds;
 pub mod term_filter;
+pub mod vector_sketch;
 pub mod value_summary;
 pub mod writer;
 
@@ -46,6 +47,9 @@ pub use key_bounds::{
 pub use term_filter::{
     TermClauses, TermFilterBuilder, TermFilterKind, array_contains_clauses, array_overlap_clauses,
     jsonb_contains_clauses, jsonb_exists_clauses, term_hash,
+};
+pub use vector_sketch::{
+    KnnMetric, VectorSketch, VectorSketchBuilder, knn_excluded, parse_vector_text,
 };
 pub use value_summary::{
     RebuiltSummary, add_column_to_value_summary, add_key_columns_to_value_summary,

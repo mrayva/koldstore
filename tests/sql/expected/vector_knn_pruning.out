@@ -1,0 +1,124 @@
+CREATE EXTENSION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+INSERT 0 2
+SELECT 402
+ kn_managed
+------------
+ t
+(1 row)
+
+ kn_caught_up
+--------------
+ t
+(1 row)
+
+ kn_flushed
+------------
+ t
+(1 row)
+
+ kn_many_segments
+------------------
+ t
+(1 row)
+
+ kn_has_sketches
+-----------------
+ t
+(1 row)
+
+ l2_prunes
+-----------
+ t
+(1 row)
+
+ offset_prunes
+---------------
+ t
+(1 row)
+
+ cosine_runs
+-------------
+ t
+(1 row)
+
+ big_limit_reads_enough
+------------------------
+ t
+(1 row)
+
+ where_reads_all
+-----------------
+ t
+(1 row)
+
+ no_limit_reads_all
+--------------------
+ t
+(1 row)
+
+ desc_reads_all
+----------------
+ t
+(1 row)
+
+ offset_zero_runs
+------------------
+ t
+(1 row)
+
+ kn_mismatches_before
+----------------------
+                    0
+(1 row)
+
+SET
+UPDATE 6
+UPDATE 6
+DELETE 3
+DELETE 3
+UPDATE 2
+UPDATE 2
+RESET
+ kn_fenced
+-----------
+ t
+(1 row)
+
+ kn_mismatches_masked
+----------------------
+                    0
+(1 row)
+
+ kn_reflushed
+--------------
+ t
+(1 row)
+
+ kn_fenced_2
+-------------
+ t
+(1 row)
+
+ kn_mismatches_reflush
+-----------------------
+                     0
+(1 row)
+
+ kn_total | kn_distinct
+----------+-------------
+      399 |         399
+(1 row)
+
+PREPARE
+PREPARE
+SELECT 4
+SELECT 4
+ kn_param_matches
+------------------
+ t
+(1 row)
+
