@@ -59,7 +59,9 @@ older catalog.
 
 `scripts/backup-restore-drill.sh` runs this end to end on throwaway clusters (base backup, further
 writes and flushes, restore to several restore points, then damage, unprotected `DROP TABLE`, retained
-`DROP TABLE` and purge cases) and asserts that the merged hot+cold table equals what it was at each
+`DROP TABLE` and purge cases, plus a `register_backup` case: a registered base backup survives a compaction and a
+`DROP TABLE` and restores with deep validation clean, and the same restore reports missing objects once it is
+unregistered) and asserts that the merged hot+cold table equals what it was at each
 restore point. It passes against a filesystem
 store and against an S3-compatible server (`STORAGE=s3`, verified with MinIO: the object operations are
 done through a small SigV4 helper, `scripts/lib/s3_tool.py`, so no AWS CLI is needed). S3 needs a build with the

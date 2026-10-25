@@ -10,7 +10,10 @@
 #     when the retained object prefix is damaged or when a DROP TABLE after the backup deleted the
 #     objects (which is why the object prefix must be retained as long as old backups may be restored);
 #   * koldstore.cold_object_retention_seconds keeps a dropped table's objects so an older backup stays
-#     valid, and only koldstore.purge_deferred_cold_objects() removes them.
+#     valid, and only koldstore.purge_deferred_cold_objects() removes them;
+#   * koldstore.register_backup() keeps the objects a registered base backup references through a
+#     compaction (retired segments) and a DROP TABLE, so that backup restores and validates; once it
+#     is unregistered the objects are released and the same restore reports them missing.
 #
 # Usage: scripts/backup-restore-drill.sh
 #   env: STORAGE      fs (default) or s3. s3 needs a build with the `s3` cargo feature and an
@@ -152,8 +155,8 @@ for _ in $(seq 1 60); do [ -n "$(ls "$ARCH" 2>/dev/null)" ] && \
 sleep 3
 
 restore_to() { # restore_to name target_restore_point
-  local name="$1" target="$2"
-  rm -rf "${W:?}/$name"; cp -a "$W/base" "$W/$name"; chmod 700 "$W/$name"
+  local name="$1" target="$2" base="${3:-base}"
+  rm -rf "${W:?}/$name"; cp -a "$W/$base" "$W/$name"; chmod 700 "$W/$name"
   : > "$W/$name/recovery.signal"
   cat >> "$W/$name/postgresql.auto.conf" <<EOF
 restore_command = 'cp $ARCH/%f %p'
@@ -242,6 +245,56 @@ restore_to b6 s1
 check "restore after the purge reports missing objects" \
   "$(q "$PORT_B" drill -c "SELECT (koldstore.validate_cold_storage('t'::regclass)->>'ok')")" false
 stop_all_b b6
+
+say "register_backup: a registered base backup keeps compacted and dropped-table objects restorable"
+q "$PORT_A" drill >/dev/null <<EOF
+CREATE TABLE reg (id bigint PRIMARY KEY, v text NOT NULL);
+INSERT INTO reg SELECT g, 'r' || g FROM generate_series(1, 400) g;
+EOF
+q "$PORT_A" drill -c "SET koldstore.min_max_rows_per_file=1; SELECT koldstore.manage_table('reg'::regclass, storage=>'drill_fs', hot_row_limit=>2, min_flush_rows=>1,
+  max_rows_per_file=>20, migration_order_by=>'id', auto_flush=>false) IS NOT NULL" >/dev/null
+rflush() {
+  q "$PORT_A" drill -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
+  q "$PORT_A" drill -c "SET koldstore.flush_execution='inline'; SET koldstore.min_max_rows_per_file=1; SELECT koldstore.flush_table('reg'::regclass, true)->>'status'" >/dev/null
+}
+rsnap() { # rsnap port -> "count:md5" of the merged reg table
+  q "$1" drill -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
+  q "$1" drill -c "SELECT count(*) || ':' || md5(string_agg(id || '=' || v, ',' ORDER BY id)) FROM reg"
+}
+rflush
+q "$PORT_A" drill >/dev/null <<EOF
+SET koldstore.hydrate_on_write = on;
+UPDATE reg SET v = 'edited' WHERE id IN (3, 77, 150, 301);
+EOF
+rflush
+R1="$(rsnap "$PORT_A")"
+# The backup starts here: register it, then take it.
+q "$PORT_A" drill -c "SELECT koldstore.register_backup('drill-base') IS NOT NULL" >/dev/null
+"$PG_BIN/pg_basebackup" -h "$SOCK" -p "$PORT_A" -D "$W/base2" -X stream -c fast >/dev/null
+q "$PORT_A" drill -c "SELECT pg_create_restore_point('r1')" >/dev/null
+q "$PORT_A" postgres -c "SELECT pg_switch_wal()" >/dev/null
+sleep 3
+check "compaction retires segments but the registered backup holds them" \
+  "$(q "$PORT_A" drill -c "SELECT (r->>'compacted')::boolean AND (r->>'held_by_registered_backups')::int > 0 FROM (SELECT koldstore.compact_table('reg'::regclass, grace_seconds => 0) AS r) c")" t
+q "$PORT_A" drill -c "SELECT koldstore.reap_compacted_segments('reg'::regclass, 0)" >/dev/null
+check "reaping with grace 0 deletes nothing while the backup is registered" \
+  "$(q "$PORT_A" drill -c "SELECT count(*) > 0 FROM koldstore.cold_segments WHERE table_oid = 'reg'::regclass::oid AND status = 'compacted'")" t
+q "$PORT_A" drill -c "DROP TABLE reg" >/dev/null
+check "DROP TABLE queues the objects while the backup is registered" \
+  "$(q "$PORT_A" drill -c "SELECT count(*) > 0 FROM koldstore.deferred_cold_deletes")" t
+q "$PORT_A" drill -c "SELECT koldstore.purge_deferred_cold_objects(older_than_seconds => 0)" >/dev/null
+restore_to b7 r1 base2
+check "registered backup restores the merged table as of the backup" "$(rsnap "$PORT_B")" "$R1"
+check "validate_cold_storage (deep) ok for the registered backup" \
+  "$(q "$PORT_B" drill -c "SELECT koldstore.validate_cold_storage('reg'::regclass, true)->>'ok'")" true
+stop_all_b b7
+check "unregister_backup releases the held objects" \
+  "$(q "$PORT_A" drill -c "SELECT koldstore.unregister_backup('drill-base')")" t
+q "$PORT_A" drill -c "SELECT koldstore.purge_deferred_cold_objects(older_than_seconds => 0)" >/dev/null
+restore_to b8 r1 base2
+check "after unregistering, the same backup reports missing objects" \
+  "$(q "$PORT_B" drill -c "SELECT (koldstore.validate_cold_storage('reg'::regclass)->>'ok')")" false
+stop_all_b b8
 
 echo
 if [ "$fail" = 0 ]; then echo "DRILL PASSED"; else echo "DRILL FAILED"; exit 1; fi
