@@ -1352,6 +1352,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$rebuild_segment_summaries_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function rebuild_table(table_name regclass, ddl text) returns uuid security definer [rebuild_table_pg_wrapper]": {
+            "add": "koldstore.rebuild_table(table_name regclass, ddl text)",
+            "name": "rebuild_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_table(table_name regclass, ddl text)\n RETURNS uuid\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$rebuild_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean DEFAULT true) returns text security definer [register_storage_pg_with_default_templates_wrapper]": {
             "add": "koldstore.register_storage(name text, storage_type text, base_path text, credentials jsonb, config jsonb, \"check\" boolean)",
             "name": "register_storage",

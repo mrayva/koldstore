@@ -15,6 +15,8 @@ mod migration_jobs;
 #[cfg(feature = "pg")]
 pub(crate) mod partition;
 #[cfg(feature = "pg")]
+mod rebuild;
+#[cfg(feature = "pg")]
 mod schema_registry;
 #[cfg(feature = "pg")]
 mod unmanage;
@@ -193,6 +195,24 @@ pub fn unmanage_table_pg(
     }
     unmanage::unmanage_table_pg_impl(table_oid, options)
         .unwrap_or_else(|error| pgrx::error!("unmanage table failed: {error}"))
+}
+
+/// Applies a schema change KoldStore cannot apply in place (primary-key change, narrowing or
+/// cross-type column change) to a managed table that has cold data.
+///
+/// SQL contract: `koldstore.rebuild_table(table_name regclass, ddl text) -> uuid`. In one
+/// transaction: rehydrate every cold row into the heap and unmanage the table, run `ddl` (as the
+/// calling role) and manage the table again with the options it had, so a failing `ddl` -- e.g.
+/// a new primary key the data violates -- rolls everything back. Rows return to cold storage on
+/// the next flush.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "rebuild_table", schema = "koldstore", security_definer)]
+pub fn rebuild_table_pg(table_name: pgrx::PgRelation, ddl: &str) -> pgrx::Uuid {
+    let table_oid = table_name.oid();
+    crate::security::require_relation_owner_or_superuser(table_oid, "rebuild this table");
+    drop(table_name);
+    rebuild::rebuild_table_pg_impl(table_oid, ddl)
+        .unwrap_or_else(|error| pgrx::error!("rebuild table failed: {error}"))
 }
 
 /// Pauses or resumes managing new partitions of a managed partitioned table.

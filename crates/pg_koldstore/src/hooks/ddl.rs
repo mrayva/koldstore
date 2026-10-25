@@ -243,8 +243,8 @@ mod process_utility {
                         // (rolling the ALTER back); otherwise queries would start failing.
                         if unsafe_for_cold_data(&error) && managed_with_cold_data(table_oid) {
                             pgrx::error!(
-                                "{error} (the table has cold data: rehydrate it with koldstore.unmanage_table, \
-                                 apply the change, then koldstore.manage_table again)"
+                                "{error} (the table has cold data: apply it with \
+                                 koldstore.rebuild_table(table, 'ALTER TABLE ...'))"
                             );
                         }
                         pgrx::warning!(

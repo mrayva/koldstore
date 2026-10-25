@@ -46,7 +46,7 @@ pub(crate) struct ManageArgs {
 
 #[cfg(feature = "pg")]
 impl ManageArgs {
-    fn manage_leaf(&self, leaf: Oid) -> pgrx::Uuid {
+    pub(super) fn manage_leaf(&self, leaf: Oid) -> pgrx::Uuid {
         super::manage::manage_table_pg_impl(
             leaf,
             &self.table_type,

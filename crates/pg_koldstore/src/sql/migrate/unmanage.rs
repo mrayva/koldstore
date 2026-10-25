@@ -25,6 +25,7 @@ pub(super) fn unmanage_table_pg_impl(
             ));
         }
     }
+    let rehydrate = options.rehydrate;
     let context = demigration_context(
         table,
         koldstore_common::TableOid::from_raw(table_oid_u32),
@@ -66,6 +67,18 @@ pub(super) fn unmanage_table_pg_impl(
         crate::sql::cold_dml::as_hydration(|| {
             crate::sql::cold_dml::guard::with_guard_suspended(|| execute_demigration_statements(&plan, table_oid))
         })?;
+
+    if rehydrate {
+        // Every row now lives in the heap, so the segment registry describes nothing; left behind,
+        // it would resurface as duplicate (or missing-file) cold rows if the table is managed again.
+        for statement in [
+            "DELETE FROM koldstore.cold_segments WHERE table_oid = $1::oid",
+            "DELETE FROM koldstore.manifest WHERE table_oid = $1::oid",
+        ] {
+            pgrx::Spi::run_with_args(statement, &[pgrx::datum::DatumWithOid::from(table_oid)])
+                .map_err(|error| error.to_string())?;
+        }
+    }
 
     let source = koldstore_common::QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
     for statement in crate::sql::cold_dml::guard::plan_insert_guard_teardown(&source) {

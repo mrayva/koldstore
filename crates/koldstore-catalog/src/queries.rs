@@ -258,7 +258,7 @@ pub fn plan_async_mirror_state_status() -> SqlResult<SqlStatement> {
 pub fn plan_table_already_managed() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "probe whether table is already managed",
-        "SELECT EXISTS (SELECT 1 FROM koldstore.schemas WHERE table_oid = $1::oid)",
+        "SELECT EXISTS (SELECT 1 FROM koldstore.schemas WHERE table_oid = $1::oid AND active)",
         [SqlParamType::Oid],
     )
 }

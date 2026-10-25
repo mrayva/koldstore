@@ -95,7 +95,6 @@ Still open:
 
 - user-scoped tables
 - streaming merges for units larger than `max_rows` (a unit is read into memory)
-- keeping `changes_since` history of overwritten cold versions
 
 Size-aware writing via `target_file_size_mb` reduces how often compaction is
 needed; compaction remains the safety net for already-written small files.
@@ -175,5 +174,5 @@ Time-based `max_flush_interval` and predicate move policies remain deferred. See
 
 - Segment lifecycle tooling, validation, and repair automation.
 - Explicit cold-row DML APIs (`hydrate_pk`, `update_row`, `delete_row`).
-- In-place primary-key change and key-column type change on tables with cold data (today: unmanage/manage).
+- In-place primary-key change and key-column type change on tables with cold data (today: `rebuild_table`, which rewrites the table).
 - Production hardening, observability, and performance tuning.

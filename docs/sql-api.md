@@ -134,6 +134,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.set_partition_auto_manage(...)` | `boolean` | `true` when the table has a partition template |
 | `koldstore.set_table_auto_flush(...)` | `boolean` | `true` when an active managed table was updated |
 | `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
+| `koldstore.rebuild_table(table, ddl)` | `uuid` | Job id of the re-management. Rehydrates the table, runs `ddl` as the caller, and manages it again with its stored options, in one transaction; use it for primary-key and narrowing type changes that `ALTER TABLE` refuses on tables with cold data |
 | `koldstore.wait_for_async_mirror()` | `bigint` | Async source row changes applied by this fence |
 | `koldstore.async_mirror_status()` | `jsonb` | DB-scoped slot lag, WAL watermarks, apply rates, health |
 | `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |

@@ -184,9 +184,13 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   older segments keep their narrow type and are widened on read. Narrowing,
   cross-type or `USING` changes, any type change of a primary-key or indexed
   column (their cold bounds and blooms are type-encoded), and primary-key
-  changes are refused and the `ALTER TABLE` is rolled back; to apply one,
-  rehydrate with `koldstore.unmanage_table`, run the `ALTER`, and call
-  `koldstore.manage_table` again. Defaults and constraints are not
+  changes are refused and the `ALTER TABLE` is rolled back; apply one with
+  `koldstore.rebuild_table(table, 'ALTER TABLE ...')`, which rehydrates the cold
+  rows, runs the DDL as the calling role and manages the table again with its
+  stored options, all in one transaction (a failing DDL, e.g. a new key the data
+  violates, rolls everything back; rows return to cold storage on the next
+  flush; it holds the table locked and rewrites it, so it suits tables that fit
+  back in the heap). Defaults and constraints are not
   retroactively enforced on older Parquet rows.
 - `COPY <table> TO ...` (the plain table form, including what `pg_dump` issues for table data)
   never goes through the planner, so on its own it would export the hot heap only

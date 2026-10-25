@@ -50,6 +50,12 @@ pub(crate) fn with_relation_owner_for_merge<T>(
     )?
 }
 
+/// Runs `operation` as the role that actually called the surrounding `SECURITY DEFINER` function,
+/// so caller-supplied SQL gets the caller's privileges instead of the function owner's.
+pub(crate) fn with_calling_role<T>(operation: impl FnOnce() -> T) -> Result<T, String> {
+    with_user_identity(unsafe { pg_sys::GetOuterUserId() }, 0, operation)
+}
+
 fn with_user_identity<T>(
     user: pg_sys::Oid,
     security_flags: i32,
