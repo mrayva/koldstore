@@ -136,7 +136,12 @@ pub fn plan_schema_evolution(
         }
 
         if let Some(current) = current {
-            if current.catalog_type_name != active_column.catalog_type_name() {
+            let retyped = current.catalog_type_name != active_column.catalog_type_name();
+            let key_like = is_pk
+                || input.active_indexed_columns.contains(&active_column.column_id)
+                || input.current_indexed_columns.contains(&active_column.column_id);
+            if retyped && !(!key_like && is_readable_widening(active_column.pg_type, current.pg_type))
+            {
                 return Err(SchemaEvolutionError::ColumnTypeChanged {
                     column_id: active_column.column_id,
                     old_type: active_column.catalog_type_name().to_string(),
@@ -153,6 +158,23 @@ pub fn plan_schema_evolution(
     } else {
         Ok(SchemaEvolutionAction::Refresh)
     }
+}
+
+/// Whether cold segments written under `old` stay readable under `new` without a rewrite.
+///
+/// Same-`PgType` changes (`varchar(n)`, numeric precision) leave the Arrow layout untouched;
+/// integer and float widenings are read by widening the stored Arrow values on decode. Key and
+/// indexed columns are excluded by the caller because their bounds and blooms are encoded
+/// per type.
+fn is_readable_widening(old: PgType, new: PgType) -> bool {
+    old == new
+        || matches!(
+            (old, new),
+            (PgType::Int2, PgType::Int4 | PgType::Int8 | PgType::Numeric)
+                | (PgType::Int4, PgType::Int8 | PgType::Numeric)
+                | (PgType::Int8, PgType::Numeric)
+                | (PgType::Float4, PgType::Float8)
+        )
 }
 
 fn schema_columns_match(active: &[SchemaColumn], current: &[CatalogColumnShape<'_>]) -> bool {
@@ -358,6 +380,41 @@ mod tests {
                 new_type: "jsonb".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn non_key_integer_widening_refreshes_but_key_widening_is_rejected() {
+        let active_primary_key = vec![id(1)];
+        let active_columns = vec![
+            SchemaColumn::app(1, "id", "int4", false),
+            SchemaColumn::app(2, "qty", "int4", true),
+        ];
+        let widened = current_columns(&[
+            (1, "id", PgType::Int4, "int4"),
+            (2, "qty", PgType::Int8, "int8"),
+        ]);
+        let plan = |columns: &[CatalogColumnShape<'_>], indexed: &[ColumnId]| {
+            plan_schema_evolution(&SchemaEvolutionInput {
+                active_primary_key: &active_primary_key,
+                active_columns: &active_columns,
+                active_indexed_columns: indexed,
+                current_primary_key: &active_primary_key,
+                current_columns: columns,
+                current_indexed_columns: indexed,
+            })
+        };
+        assert_eq!(plan(&widened, &[]), Ok(SchemaEvolutionAction::Refresh));
+        assert!(plan(&widened, &[id(2)]).is_err());
+        let key_widened = current_columns(&[
+            (1, "id", PgType::Int8, "int8"),
+            (2, "qty", PgType::Int4, "int4"),
+        ]);
+        assert!(plan(&key_widened, &[]).is_err());
+        let narrowed = current_columns(&[
+            (1, "id", PgType::Int4, "int4"),
+            (2, "qty", PgType::Int2, "int2"),
+        ]);
+        assert!(plan(&narrowed, &[]).is_err());
     }
 
     #[test]

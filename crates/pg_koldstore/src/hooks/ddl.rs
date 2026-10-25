@@ -239,6 +239,14 @@ mod process_utility {
                     if let Err(error) =
                         crate::sql::migrate::refresh_active_schema_if_changed(table_oid)
                     {
+                        // A change the cold segments cannot be read under is refused outright
+                        // (rolling the ALTER back); otherwise queries would start failing.
+                        if unsafe_for_cold_data(&error) && managed_with_cold_data(table_oid) {
+                            pgrx::error!(
+                                "{error} (the table has cold data: rehydrate it with koldstore.unmanage_table, \
+                                 apply the change, then koldstore.manage_table again)"
+                            );
+                        }
                         pgrx::warning!(
                             "KoldStore schema refresh after ALTER TABLE deferred: {error}"
                         );
@@ -479,6 +487,14 @@ mod process_utility {
     /// paths are derived from the current name, so renaming a table or its schema after cold
     /// publication would orphan the segments already written under the old name -- the merge scan
     /// would look for cold data under the new path and silently find nothing there).
+    /// Refresh failures that leave existing cold segments unreadable (as opposed to an
+    /// unsupported newly added type, which only blocks flushing).
+    fn unsafe_for_cold_data(error: &str) -> bool {
+        error.contains("changed the primary key")
+            || error.contains("dropped primary-key column")
+            || error.contains("changed type of managed")
+    }
+
     fn managed_with_cold_data(table_oid: pg_sys::Oid) -> bool {
         crate::catalog::cache::is_managed_relation(table_oid)
             && matches!(

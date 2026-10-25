@@ -183,20 +183,19 @@ pub fn cell_from_arrow_cell(
         PgType::Int2 => Ok(CellValue::Int16(
             array_for::<Int16Array>(array, column_name)?.value(row_index),
         )),
+        // Segments written before a widening `ALTER COLUMN ... TYPE` keep their original physical
+        // width; `widened_int` / `widened_float` read them under the current type.
         PgType::Int4 => Ok(CellValue::Int32(
-            array_for::<Int32Array>(array, column_name)?.value(row_index),
+            i32::try_from(widened_int(array, column_name, row_index, 32)?)
+                .map_err(|error| error.to_string())?,
         )),
-        PgType::Int8 => Ok(CellValue::Int64(
-            array_for::<Int64Array>(array, column_name)?.value(row_index),
-        )),
+        PgType::Int8 => Ok(CellValue::Int64(widened_int(array, column_name, row_index, 64)?)),
         PgType::Float4 => Ok(CellValue::Float32(
             array_for::<Float32Array>(array, column_name)?.value(row_index),
         )),
-        PgType::Float8 => Ok(CellValue::Float64(
-            array_for::<Float64Array>(array, column_name)?.value(row_index),
-        )),
+        PgType::Float8 => Ok(CellValue::Float64(widened_float(array, column_name, row_index)?)),
+        PgType::Numeric => Ok(CellValue::Utf8(numeric_text(array, column_name, row_index)?)),
         PgType::Text
-        | PgType::Numeric
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
@@ -253,28 +252,24 @@ pub fn json_from_arrow_cell(
             column_name
         )?
         .value(row_index))),
-        PgType::Int4 => Ok(serde_json::json!(array_for::<Int32Array>(
+        PgType::Int4 | PgType::Int8 => Ok(serde_json::json!(widened_int(
             array,
-            column_name
-        )?
-        .value(row_index))),
-        PgType::Int8 => Ok(serde_json::json!(array_for::<Int64Array>(
-            array,
-            column_name
-        )?
-        .value(row_index))),
+            column_name,
+            row_index,
+            if pg_type == PgType::Int4 { 32 } else { 64 }
+        )?)),
         PgType::Float4 => Ok(serde_json::json!(array_for::<Float32Array>(
             array,
             column_name
         )?
         .value(row_index))),
-        PgType::Float8 => Ok(serde_json::json!(array_for::<Float64Array>(
+        PgType::Float8 => Ok(serde_json::json!(widened_float(array, column_name, row_index)?)),
+        PgType::Numeric => Ok(serde_json::Value::String(numeric_text(
             array,
-            column_name
-        )?
-        .value(row_index))),
+            column_name,
+            row_index,
+        )?)),
         PgType::Text
-        | PgType::Numeric
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
@@ -313,6 +308,48 @@ pub fn json_from_arrow_cell(
                 .map_err(|error| format!("column `{column_name}`: {error}"))
         }
     }
+}
+
+/// Reads an integer cell whose physical width may be narrower than the column's current type
+/// (`smallint` -> `integer` -> `bigint` widened after the segment was written).
+fn widened_int(array: &dyn Array, name: &str, row: usize, bits: u8) -> Result<i64, String> {
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return if bits >= 64 {
+            Ok(values.value(row))
+        } else {
+            Err(format!("cold column `{name}` has unexpected Arrow type"))
+        };
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return if bits >= 32 {
+            Ok(i64::from(values.value(row)))
+        } else {
+            Err(format!("cold column `{name}` has unexpected Arrow type"))
+        };
+    }
+    Ok(i64::from(array_for::<Int16Array>(array, name)?.value(row)))
+}
+
+/// Reads a float cell that may still be stored as `real` after a widening to `double precision`.
+fn widened_float(array: &dyn Array, name: &str, row: usize) -> Result<f64, String> {
+    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
+        return Ok(f64::from(values.value(row)));
+    }
+    Ok(array_for::<Float64Array>(array, name)?.value(row))
+}
+
+/// Reads a `numeric` cell; segments written while the column was an integer type hold integers.
+fn numeric_text(array: &dyn Array, name: &str, row: usize) -> Result<String, String> {
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(values.value(row).to_string());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return Ok(values.value(row).to_string());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int16Array>() {
+        return Ok(values.value(row).to_string());
+    }
+    Ok(array_for::<StringArray>(array, name)?.value(row).to_string())
 }
 
 fn array_for<'a, T: 'static>(array: &'a dyn Array, name: &str) -> Result<&'a T, String> {

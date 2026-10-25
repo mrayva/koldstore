@@ -175,5 +175,5 @@ Time-based `max_flush_interval` and predicate move policies remain deferred. See
 
 - Segment lifecycle tooling, validation, and repair automation.
 - Explicit cold-row DML APIs (`hydrate_pk`, `update_row`, `delete_row`).
-- Broader schema evolution and primary-key change support.
+- In-place primary-key change and key-column type change on tables with cold data (today: unmanage/manage).
 - Production hardening, observability, and performance tuning.

@@ -177,9 +177,17 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   A table created under a name whose prefix is still pinned by a renamed table
   cannot be managed until that table is unmanaged or dropped. Exported table
   metadata carries the prefix, and `import_table_metadata` re-pins it when the
-  restored table has a different name. Other schema evolution can still apply
-  in PostgreSQL before KoldStore discovers it is unsupported; defaults and
-  constraints are not retroactively enforced on older Parquet rows.
+  restored table has a different name. Schema evolution on a table with cold data:
+  adding, dropping and renaming columns, and `varchar(n)` / numeric-precision
+  changes work. Widening a non-key, non-indexed column (`smallint` -> `integer`
+  -> `bigint`, `real` -> `double precision`, integer -> `numeric`) works too:
+  older segments keep their narrow type and are widened on read. Narrowing,
+  cross-type or `USING` changes, any type change of a primary-key or indexed
+  column (their cold bounds and blooms are type-encoded), and primary-key
+  changes are refused and the `ALTER TABLE` is rolled back; to apply one,
+  rehydrate with `koldstore.unmanage_table`, run the `ALTER`, and call
+  `koldstore.manage_table` again. Defaults and constraints are not
+  retroactively enforced on older Parquet rows.
 - `COPY <table> TO ...` (the plain table form, including what `pg_dump` issues for table data)
   never goes through the planner, so on its own it would export the hot heap only
   ([#126](https://github.com/kalamdb/koldstore/issues/126)). When the table has cold data it is
