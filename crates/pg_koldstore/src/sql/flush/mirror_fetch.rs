@@ -320,6 +320,31 @@ fn decode_mirror_row(
     })
 }
 
+/// Renders a one-dimensional `text[]` as its array literal (`{"a","b",NULL}`).
+fn text_array_literal(items: &[Option<String>]) -> String {
+    let mut out = String::from("{");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match item {
+            None => out.push_str("NULL"),
+            Some(text) => {
+                out.push('"');
+                for ch in text.chars() {
+                    if ch == '"' || ch == '\\' {
+                        out.push('\\');
+                    }
+                    out.push(ch);
+                }
+                out.push('"');
+            }
+        }
+    }
+    out.push('}');
+    out
+}
+
 fn read_column(
     tuple: &pgrx::spi::SpiHeapTupleData<'_>,
     column: &CatalogColumn,
@@ -371,10 +396,21 @@ fn read_column(
             .get::<pgrx::AnyNumeric>(ordinal)?
             .map(|number| CellValue::Utf8(number.to_string()))
             .unwrap_or(CellValue::Null),
-        PgType::TextArray => tuple
-            .get::<String>(ordinal)?
-            .map(CellValue::Utf8)
-            .unwrap_or(CellValue::Null),
+        // An array datum is not a text datum: rebuild its literal from the elements.
+        PgType::TextArray => match tuple.get::<pgrx::Array<'_, String>>(ordinal)? {
+            Some(array) => {
+                let items: Vec<Option<String>> = array.iter().collect();
+                // SAFETY: the array pointer comes from the `Array` just read from this tuple.
+                let ndim = unsafe { (*array.into_array_type()).ndim };
+                if ndim > 1 {
+                    pgrx::error!(
+                        "multi-dimensional text[] columns cannot be flushed to cold storage"
+                    );
+                }
+                CellValue::Utf8(text_array_literal(&items))
+            }
+            None => CellValue::Null,
+        },
         PgType::Date => match tuple.get::<pgrx::datum::Date>(ordinal)? {
             // Raw `DateADT` days since 2000-01-01; `infinity` is `i32::MAX` / `i32::MIN`.
             Some(date) => CellValue::DateDays(pgrx::pg_sys::DateADT::from(date)),

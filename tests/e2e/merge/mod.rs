@@ -1,5 +1,6 @@
 //! Merge-scan E2E category.
 
+mod cold_index_predicates;
 mod merge_scan_matrix;
 mod merge_scan_outage;
 mod merge_scan_results;

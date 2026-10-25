@@ -382,6 +382,16 @@ This applies to built-in indexes, custom indexes, and extension-owned indexes.
 Kalam does not automatically translate those indexes into object-storage
 indexes over Parquet files.
 
+Queries stay correct, though: a predicate that a hot-only index would serve (GIN on `jsonb`
+or arrays, BRIN, expression, partial and `text_pattern_ops` indexes, expression full-text
+indexes) is answered over the merged hot and cold rows, whichever scan types the planner may
+use, and stale cold versions of updated rows never match. The cold side of such a query is a
+filtered scan of the segments that min/max statistics and Bloom filters cannot rule out; list
+the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narrow it. The
+`merge/cold_index_predicates` e2e test pins this against a plain-table reference. Arrays are
+supported only as one-dimensional `text[]`; other array types are rejected at `manage_table`,
+and a multi-dimensional `text[]` value fails the flush.
+
 ## pgvector
 
 pgvector indexes such as HNSW and IVFFlat speed vector similarity search over
