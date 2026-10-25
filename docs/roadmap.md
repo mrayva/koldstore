@@ -94,7 +94,7 @@ CAS shared with flush finalize (see [ADR-004](decisions/004-segment-publication-
 Still open:
 
 - user-scoped tables
-- streaming merges for units larger than `max_rows` (a unit is read into memory)
+- streaming merges for units larger than `max_rows` that are ordered by another column than the key (key-ordered ones are streamed in lead-key slices; see `koldstore.compact_table`)
 
 Size-aware writing via `target_file_size_mb` reduces how often compaction is
 needed; compaction remains the safety net for already-written small files.

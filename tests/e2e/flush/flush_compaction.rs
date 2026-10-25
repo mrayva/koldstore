@@ -162,3 +162,110 @@ async fn compaction_is_invisible_to_concurrent_readers() -> Result<()> {
     ensure!(after_reap == expected, "after reaping {after_reap:?}, expected {expected:?}");
     Ok(())
 }
+
+/// A component of overlapping segments larger than `max_rows` is rewritten in key slices rather than
+/// skipped: the result is the same as an in-memory compaction (superseded versions and delete
+/// markers gone, key-disjoint segments, identical data) while at most `max_rows` rows are held.
+#[tokio::test]
+async fn compaction_streams_a_unit_larger_than_max_rows() -> Result<()> {
+    common::require_pgrx_server().await?;
+    let target = common::scenario_pg_matrix()
+        .into_iter()
+        .next()
+        .context("PostgreSQL target")?;
+    let db = common::TestDb::start(target, "compaction_stream").await?;
+    let table = db.create_indexed_items_table("stream_items", 12000).await?;
+    let relation = table.relation.clone();
+    db.client
+        .execute(
+            r#"
+            SELECT koldstore.manage_table(
+              table_name => $1::text::regclass, storage => $2, hot_row_limit => 2,
+              min_flush_rows => 1, max_rows_per_file => 1000, migration_order_by => 'id',
+              auto_flush => false
+            )
+            "#,
+            &[&relation, &db.storage_name],
+        )
+        .await?;
+    common::fence_async_mirror(&db.client).await?;
+    db.flush_table(&relation).await?;
+    db.client.batch_execute("SET koldstore.hydrate_on_write = on").await?;
+    db.client
+        .batch_execute(&format!("UPDATE {relation} SET qty = qty + 1 WHERE id % 5 = 0"))
+        .await?;
+    db.client
+        .batch_execute(&format!("DELETE FROM {relation} WHERE id BETWEEN 7000 AND 7600"))
+        .await?;
+    db.client.batch_execute("RESET koldstore.hydrate_on_write").await?;
+    common::fence_async_mirror(&db.client).await?;
+    db.flush_table(&relation).await?;
+    common::fence_async_mirror(&db.client).await?;
+
+    let aggregate = format!("SELECT count(*)::bigint, sum(id)::bigint, sum(qty)::bigint FROM {relation}");
+    let expected: (i64, i64, i64) = {
+        let row = db.client.query_one(&aggregate, &[]).await?;
+        (row.get(0), row.get(1), row.get(2))
+    };
+    ensure!(expected.0 == 12000 - 601, "unexpected row count {expected:?}");
+
+    // The overlapping component holds well over 3000 rows, so a plain pass would skip it. A streamed
+    // unit runs alone in its call, so go on until nothing is left.
+    let mut streamed_rows = 0_i64;
+    for _ in 0..6 {
+        let report: serde_json::Value = db
+            .client
+            .query_one(
+                "SELECT koldstore.compact_table($1::text::regclass, max_rows => 3000, grace_seconds => 3600)::text",
+                &[&relation],
+            )
+            .await
+            .map(|row| serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)))??;
+        ensure!(report["units_over_max_rows"] == 0, "an oversized unit was skipped: {report}");
+        streamed_rows = streamed_rows.max(report["rows_read"].as_i64().unwrap_or(0));
+        if report["compacted"] != true && report["units_left_for_next_call"] == 0 {
+            break;
+        }
+    }
+    ensure!(streamed_rows > 3000, "no unit larger than max_rows was rewritten ({streamed_rows} rows read at most)");
+
+    let after: (i64, i64, i64) = {
+        let row = db.client.query_one(&aggregate, &[]).await?;
+        (row.get(0), row.get(1), row.get(2))
+    };
+    ensure!(after == expected, "after streamed compaction {after:?}, expected {expected:?}");
+
+    // Slices come out in key order, so the segments are key-disjoint again.
+    db.client.batch_execute("SET koldstore.max_merge_seen_keys = 100").await?;
+    let counted: i64 = db
+        .client
+        .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
+        .await?
+        .get(0);
+    ensure!(counted == expected.0, "capped scan counted {counted}");
+    db.client.batch_execute("RESET koldstore.max_merge_seen_keys").await?;
+
+    let again: serde_json::Value = db
+        .client
+        .query_one(
+            "SELECT koldstore.compact_table($1::text::regclass, max_rows => 3000, grace_seconds => 3600)::text",
+            &[&relation],
+        )
+        .await
+        .map(|row| serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)))??;
+    ensure!(again["compacted"] == false, "a repeat pass rewrote the layout: {again}");
+
+    db.client
+        .query_one("SELECT koldstore.reap_compacted_segments($1::text::regclass, 0)::bigint", &[&relation])
+        .await?;
+    let valid: String = db
+        .client
+        .query_one(
+            "SELECT (koldstore.validate_cold_storage($1::text::regclass, true) ->> 'ok')",
+            &[&relation],
+        )
+        .await?
+        .get(0);
+    ensure!(valid == "true", "cold storage invalid after streamed compaction");
+    Ok(())
+}

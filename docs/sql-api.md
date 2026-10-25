@@ -790,7 +790,14 @@ the affected segments:
 Each unit is published atomically: one catalog statement activates the new segments and retires the old ones
 under the manifest-generation CAS (the same one flush uses), so a reader sees either layout, never a mix.
 `max_rows` bounds the rows one call reads (and so its memory); a unit that does not fit is left for the next
-call, and one larger than `max_rows` alone is reported in `units_over_max_rows`. The call holds the table's
+call. An overlapping unit larger than `max_rows` alone is streamed when the rewrite is key-ordered (a
+single-column key ordered by itself, or a composite key with exact tuple bounds): its lead-key range is cut
+into slices, each read (one segment at a time), resolved and written on its own, so at most about `max_rows` rows
+are in memory whatever the unit's size, the output stays key-disjoint, and all slices are published in one
+activation. It reads the whole unit, so it runs alone as the first unit of an explicit call (run the call again
+for the rest) and never in automatic compaction. A unit that cannot be streamed (ordered by another column, a lead key
+without a Sort Key encoding, keys too skewed to split into slices that fit `max_rows`) is reported in
+`units_over_max_rows` (or fails with a message to raise `max_rows`). The call holds the table's
 flush lock, so it fails fast when a flush is running and flushes skip the table meanwhile. It returns a report
 (`compacted`, `units`, `segments_replaced`, `segments_written`, `rows_read`, `rows_written`,
 `versions_and_markers_dropped`, `bytes_replaced`, `bytes_written`, `reaped_segments`, ...).

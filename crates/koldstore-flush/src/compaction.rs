@@ -163,6 +163,9 @@ pub struct CompactionPlan {
     pub units: Vec<CompactionUnit>,
     /// Overlap components larger than the cap (left for a larger `max_rows`).
     pub skipped_over_cap: usize,
+    /// The same oversized components, for a caller that can rewrite them in slices rather than skip
+    /// them (`rows` exceeds the cap; the members are the whole component).
+    pub oversized: Vec<CompactionUnit>,
 }
 
 /// Plans units over `segments`, which must be sorted by `min`.
@@ -201,6 +204,7 @@ pub fn plan_compaction_units(
             close_run(&mut run, &mut run_rows, &mut plan);
             if rows > cap {
                 plan.skipped_over_cap += 1;
+                plan.oversized.push(CompactionUnit { members: component, rows, overlapping: true });
             } else {
                 plan.units.push(CompactionUnit {
                     members: component,
@@ -276,6 +280,9 @@ mod tests {
         let plan = plan_compaction_units(&segments, 1000, 1000);
         assert!(plan.units.is_empty());
         assert_eq!(plan.skipped_over_cap, 1);
+        assert_eq!(plan.oversized.len(), 1);
+        assert_eq!(plan.oversized[0].members, vec![0, 1]);
+        assert_eq!(plan.oversized[0].rows, 1200);
     }
 
     #[test]

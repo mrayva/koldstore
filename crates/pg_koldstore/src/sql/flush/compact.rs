@@ -194,7 +194,8 @@ fn compact_locked(
     // `SegmentRange::may_share_keys`): a sorted rewrite makes the output lexicographically disjoint,
     // so a repeat finds nothing to do and the scan sees disjoint segments afterwards.
     let composite = catalog.primary_key.columns.len() > 1;
-    let mut planned: Vec<(CompactionUnit, Vec<&ListedSegment>, Option<String>, bool)> = Vec::new();
+    // The last flag marks an oversized overlap component that is rewritten in slices (streamed).
+    let mut planned: Vec<(CompactionUnit, Vec<&ListedSegment>, Option<String>, bool, bool)> = Vec::new();
     let mut skipped_over_cap = 0_usize;
     for (scope, group) in groups {
         let exact_tuples = composite && group.iter().all(|segment| segment.tuple_bounds.is_some());
@@ -214,6 +215,21 @@ fn compact_locked(
             max_rows,
         );
         skipped_over_cap += plan.skipped_over_cap;
+        // An explicit call streams components over the cap when the rewrite is key-ordered (slices
+        // come out in key order, so the result stays key-disjoint); the maintenance worker leaves
+        // them, since one would read the whole component in a tick.
+        let streamable = (!composite || exact_tuples)
+            && ctx
+                .snapshot
+                .segment_order_column_id
+                .is_none_or(|column_id| column_id == lead_key);
+        if !auto && streamable {
+            for unit in std::mem::take(&mut plan.oversized) {
+                let members: Vec<&ListedSegment> = unit.members.iter().map(|index| group[*index]).collect();
+                skipped_over_cap -= 1;
+                planned.push((unit, members, scope.clone(), exact_tuples, true));
+            }
+        }
         if auto {
             // Only a single-column key ordered by itself is rewritten into key-disjoint segments;
             // for anything else an overlap component would be reread and rewritten unchanged every
@@ -229,7 +245,7 @@ fn compact_locked(
         }
         for unit in plan.units {
             let members: Vec<&ListedSegment> = unit.members.iter().map(|index| group[*index]).collect();
-            planned.push((unit, members, scope.clone(), exact_tuples));
+            planned.push((unit, members, scope.clone(), exact_tuples, false));
         }
     }
     if auto && planned.is_empty() {
@@ -246,12 +262,22 @@ fn compact_locked(
     let (mut segments_removed, mut segments_added) = (0_usize, 0_usize);
     let (mut rows_read, mut rows_written, mut dropped_versions) = (0_i64, 0_i64, 0_i64);
     let (mut bytes_removed, mut bytes_added) = (0_i64, 0_i64);
-    for (unit, members, scope, exact_tuples) in &planned {
-        if unit.rows > budget {
-            units_left += 1;
-            continue;
+    for (unit, members, scope, exact_tuples, streamed) in &planned {
+        // A streamed unit holds at most `max_rows` rows at a time, whatever its size, but it reads
+        // all of it: it runs only as the first unit of a call, which then has no budget left.
+        if *streamed {
+            if budget < max_rows {
+                units_left += 1;
+                continue;
+            }
+            budget = 0;
+        } else {
+            if unit.rows > budget {
+                units_left += 1;
+                continue;
+            }
+            budget -= unit.rows;
         }
-        budget -= unit.rows;
         let Some(outcome) = compact_unit(
             table_oid,
             &ctx,
@@ -261,6 +287,7 @@ fn compact_locked(
             *exact_tuples,
             scope.as_deref(),
             drop_markers,
+            streamed.then_some(max_rows),
         )?
         else {
             units_without_gain += 1;
@@ -310,31 +337,25 @@ struct UnitOutcome {
     bytes_written: i64,
 }
 
-fn compact_unit(
-    table_oid: pgrx::pg_sys::Oid,
-    ctx: &FlushPreparedContext,
-    client: &koldstore_storage::ObjectStoreClient,
-    members: &[&ListedSegment],
-    started: std::time::Instant,
-    exact_tuples: bool,
-    scope: Option<&str>,
-    drop_markers: bool,
-) -> Result<Option<UnitOutcome>, String> {
-    let catalog = &ctx.catalog;
-    let hints: Vec<SegmentStatsHint> = members.iter().map(|segment| segment.hint.clone()).collect();
-    let rows = crate::merge_scan::pg::read_clean_rows_of_segments(
-        client,
-        &hints,
-        catalog,
-        ctx.storage.schema_version,
-    )?;
-    let rows_read: i64 = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+/// Versions of a unit's rows after resolution: the newest version of each key, the older versions
+/// and delete markers that move to history segments, and the highest `seq` dropped for good.
+struct ResolvedRows {
+    kept: Vec<koldstore_parquet::CleanColdRow>,
+    history: Vec<koldstore_parquet::CleanColdRow>,
+    history_floor: i64,
+}
 
-    // Newest version of each key wins; a winning delete marker removes the key altogether.
-    // A dropped version or marker newer than `retain_from` is moved to history segments
-    // (`koldstore.cdc_retention_seconds`); `history_floor` is the highest seq of one dropped for
-    // good (`changes_since` can no longer report it, so it refuses cursors below it).
-    let retain_from = history_horizon();
+/// Newest version of each key wins; a winning delete marker removes the key altogether. A dropped
+/// version or marker newer than `retain_from` is moved to history
+/// (`koldstore.cdc_retention_seconds`); `history_floor` is the highest seq of one dropped for good
+/// (`changes_since` can no longer report it, so it refuses cursors below it). `None` when a delete
+/// marker wins but `drop_markers` is false: nothing outside this unit's scope group may still hold
+/// an older version of its key (see `compact_locked`), so the unit is left as it is.
+fn resolve_versions(
+    rows: Vec<koldstore_parquet::CleanColdRow>,
+    drop_markers: bool,
+    retain_from: i64,
+) -> Option<ResolvedRows> {
     let mut history_floor = 0_i64;
     let mut history: Vec<koldstore_parquet::CleanColdRow> = Vec::new();
     let mut drop_version = |row: koldstore_parquet::CleanColdRow, floor: &mut i64| {
@@ -362,10 +383,8 @@ fn compact_unit(
             }
         }
     }
-    // A winning delete marker may only be dropped when nothing outside this unit's scope group can
-    // still hold an older version of its key (see `compact_locked`).
     if !drop_markers && winners.values().any(|row| row.deleted) {
-        return Ok(None);
+        return None;
     }
     let marker_keys: Vec<String> = winners
         .iter()
@@ -377,6 +396,34 @@ fn compact_unit(
             drop_version(marker, &mut history_floor);
         }
     }
+    Some(ResolvedRows { kept: winners.into_values().collect(), history, history_floor })
+}
+
+/// Peak-memory sample of lead-key values used to choose slice boundaries of a streamed unit.
+const STREAM_SAMPLE_TARGET: i64 = 65_536;
+
+fn compact_unit(
+    table_oid: pgrx::pg_sys::Oid,
+    ctx: &FlushPreparedContext,
+    client: &koldstore_storage::ObjectStoreClient,
+    members: &[&ListedSegment],
+    started: std::time::Instant,
+    exact_tuples: bool,
+    scope: Option<&str>,
+    drop_markers: bool,
+    stream_slice_rows: Option<i64>,
+) -> Result<Option<UnitOutcome>, String> {
+    let catalog = &ctx.catalog;
+    let hints: Vec<SegmentStatsHint> = members.iter().map(|segment| segment.hint.clone()).collect();
+    let read_members = |hints: &[SegmentStatsHint]| {
+        crate::merge_scan::pg::read_clean_rows_of_segments(
+            client,
+            hints,
+            catalog,
+            ctx.storage.schema_version,
+        )
+    };
+    let retain_from = history_horizon();
     let key_names: Vec<&String> = catalog
         .primary_key
         .columns
@@ -389,7 +436,6 @@ fn compact_unit(
         .segment_order_column_id
         .and_then(|column_id| catalog.column_by_id(column_id))
         .map(|column| &column.name);
-    let mut kept: Vec<koldstore_parquet::CleanColdRow> = winners.into_values().collect();
     let null = CellValue::Null;
     let cell = |row: &koldstore_parquet::CleanColdRow, name: &String| -> CellValue {
         row.row_image.get(name).cloned().unwrap_or_else(|| null.clone())
@@ -408,21 +454,12 @@ fn compact_unit(
                 .then(left.seq.cmp(&right.seq))
         });
     };
-    sort_rows(&mut kept);
-    sort_rows(&mut history);
     // A single-column key ordered by itself always ends up key-disjoint, which is worth publishing
     // even when no row is dropped. Otherwise (composite key, or ordered by another column) the
     // rewritten segments' key boxes may still touch, so publish only when it removes rows or merges
     // segments; otherwise every call would rewrite the same layout again.
     let stable_rewrite = (key_names.len() == 1 || exact_tuples)
         && order_name.is_none_or(|name| name == key_names[0]);
-    if !stable_rewrite {
-        let target = ctx.max_rows_per_file.max(1);
-        let output_segments = kept.len().div_ceil(target);
-        if kept.len() as i64 == rows_read && output_segments >= members.len() {
-            return Ok(None);
-        }
-    }
     let sorted_by_key = ctx.snapshot.segment_order_column_id.is_some();
     let to_mirror_rows = |rows: Vec<koldstore_parquet::CleanColdRow>| -> Vec<FlushMirrorRow> {
         rows.into_iter()
@@ -443,9 +480,6 @@ fn compact_unit(
             })
             .collect()
     };
-    let mirror_rows = to_mirror_rows(kept);
-    let history_rows = to_mirror_rows(history);
-    let max_seq = mirror_rows.iter().map(|row| row.seq).max().unwrap_or(0);
 
     let table_prefix = crate::catalog::resolve::table_object_prefix(&ctx.storage, &ctx.relation.namespace, &ctx.relation.name)?;
     let manifest_path = manifest_object_key(&table_prefix);
@@ -492,14 +526,151 @@ fn compact_unit(
         )?;
         Ok((pending, total_rows))
     };
-    let (pending, total_rows) = write_rows(mirror_rows, max_seq)?;
-    let history_max_seq = history_rows.iter().map(|row| row.seq).max().unwrap_or(0);
-    let history_pending = if history_rows.is_empty() {
-        Vec::new()
-    } else {
-        write_rows(history_rows, history_max_seq)?.0
+
+    let mut pending: Vec<PendingFlushSegmentRef> = Vec::new();
+    let mut history_pending: Vec<PendingFlushSegmentRef> = Vec::new();
+    let (mut total_rows, mut rows_read, mut history_floor) = (0_i64, 0_i64, 0_i64);
+    // Resolves, sorts and writes one batch of the unit's rows; false when the unit must be left as it is.
+    let mut rewrite_batch = |rows: Vec<koldstore_parquet::CleanColdRow>,
+                             check_gain: bool|
+     -> Result<bool, String> {
+        let batch_rows = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+        let Some(mut resolved) = resolve_versions(rows, drop_markers, retain_from) else {
+            return Ok(false);
+        };
+        sort_rows(&mut resolved.kept);
+        sort_rows(&mut resolved.history);
+        if check_gain && !stable_rewrite {
+            let target = ctx.max_rows_per_file.max(1);
+            let output_segments = resolved.kept.len().div_ceil(target);
+            if resolved.kept.len() as i64 == batch_rows && output_segments >= members.len() {
+                return Ok(false);
+            }
+        }
+        rows_read += batch_rows;
+        history_floor = history_floor.max(resolved.history_floor);
+        let kept = to_mirror_rows(resolved.kept);
+        let history = to_mirror_rows(resolved.history);
+        let max_seq = kept.iter().map(|row| row.seq).max().unwrap_or(0);
+        let (written, rows_written) = write_rows(kept, max_seq)?;
+        pending.extend(written);
+        total_rows += rows_written;
+        if !history.is_empty() {
+            let history_max_seq = history.iter().map(|row| row.seq).max().unwrap_or(0);
+            history_pending.extend(write_rows(history, history_max_seq)?.0);
+        }
+        Ok(true)
     };
 
+    let Some(slice_rows) = stream_slice_rows else {
+        let rows = read_members(&hints)?;
+        if !rewrite_batch(rows, true)? {
+            return Ok(None);
+        }
+        return finish_unit(
+            table_oid, ctx, client, members, &manifest_path, pending, history_pending, total_rows,
+            rows_read, history_floor,
+        );
+    };
+
+    // Streamed rewrite of a unit too large to hold in memory (key-ordered tables only, see
+    // `compact_locked`). Every version of a key has the same lead-key value, so cutting the unit's
+    // lead-key range into slices keeps each key's versions together: each slice is read (one
+    // segment at a time, rows outside the slice dropped), resolved and written on its own, and the
+    // slices come out in key order, so the output stays key-disjoint. One pass first samples the
+    // lead keys to pick balanced boundaries; all slices are then published in one activation.
+    let lead_name = key_names[0];
+    let lead_type = catalog
+        .column_by_id(catalog.primary_key.columns[0].column_id)
+        .and_then(|column| {
+            koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(column.pg_type.type_oid())
+        });
+    let Some(lead_type) = lead_type else {
+        return Ok(None);
+    };
+    let lead_key = |row: &koldstore_parquet::CleanColdRow| -> Option<Vec<u8>> {
+        koldstore_sortkey::encode_sort_key_json(lead_type, row.pk_json.get(lead_name)?).ok()
+    };
+    let unit_rows: i64 = members.iter().map(|segment| segment.row_count).sum();
+    let stride = usize::try_from((unit_rows / STREAM_SAMPLE_TARGET).max(1)).unwrap_or(1);
+    let mut sample: Vec<Vec<u8>> = Vec::new();
+    let mut seen = 0_usize;
+    for hint in &hints {
+        for row in read_members(std::slice::from_ref(hint))? {
+            if !drop_markers && row.deleted {
+                return Ok(None);
+            }
+            let Some(key) = lead_key(&row) else {
+                return Ok(None);
+            };
+            if seen % stride == 0 {
+                sample.push(key);
+            }
+            seen += 1;
+        }
+    }
+    sample.sort_unstable();
+    sample.dedup();
+    // Aim at half the cap per slice: the sample is approximate and a slice must stay under the cap.
+    let per_slice = (slice_rows / 2).max(1);
+    let slice_count = usize::try_from((unit_rows + per_slice - 1) / per_slice).unwrap_or(1).max(1);
+    let mut boundaries: Vec<Vec<u8>> = (1..slice_count)
+        .filter_map(|i| sample.get(i * sample.len() / slice_count).cloned())
+        .collect();
+    boundaries.dedup();
+    if boundaries.is_empty() {
+        return Ok(None);
+    }
+    let slice_cap = usize::try_from(slice_rows).unwrap_or(usize::MAX);
+    for slice in 0..=boundaries.len() {
+        let lo = slice.checked_sub(1).map(|i| boundaries[i].as_slice());
+        let hi = boundaries.get(slice).map(Vec::as_slice);
+        let mut batch: Vec<koldstore_parquet::CleanColdRow> = Vec::new();
+        for (hint, member) in hints.iter().zip(members) {
+            // A member whose lead-key range lies outside the slice cannot contribute.
+            if let Some((min, max)) = member.bounds.as_ref().and_then(|bounds| bounds.first()) {
+                if hi.is_some_and(|hi| min.as_slice() >= hi) || lo.is_some_and(|lo| max.as_slice() < lo) {
+                    continue;
+                }
+            }
+            for row in read_members(std::slice::from_ref(hint))? {
+                let key = lead_key(&row).ok_or_else(|| "compaction could not encode a primary key".to_string())?;
+                if lo.is_some_and(|lo| key.as_slice() < lo) || hi.is_some_and(|hi| key.as_slice() >= hi) {
+                    continue;
+                }
+                batch.push(row);
+                if batch.len() > slice_cap {
+                    return Err(format!(
+                        "a key slice of the unit exceeds max_rows ({slice_rows}); the keys are too skewed to split, \
+                         raise max_rows"
+                    ));
+                }
+            }
+        }
+        if !batch.is_empty() && !rewrite_batch(batch, false)? {
+            return Ok(None);
+        }
+    }
+    finish_unit(
+        table_oid, ctx, client, members, &manifest_path, pending, history_pending, total_rows,
+        rows_read, history_floor,
+    )
+}
+
+/// Publishes a rewritten unit: manifest first (rebuildable from the catalog if the transaction does
+/// not commit), then one catalog statement that activates the new segments and retires the old.
+fn finish_unit(
+    table_oid: pgrx::pg_sys::Oid,
+    ctx: &FlushPreparedContext,
+    client: &koldstore_storage::ObjectStoreClient,
+    members: &[&ListedSegment],
+    manifest_path: &str,
+    pending: Vec<PendingFlushSegmentRef>,
+    history_pending: Vec<PendingFlushSegmentRef>,
+    total_rows: i64,
+    rows_read: i64,
+    history_floor: i64,
+) -> Result<Option<UnitOutcome>, String> {
     let source_ids: Vec<uuid::Uuid> = members.iter().map(|segment| segment.segment_id).collect();
     let history_ids: Vec<uuid::Uuid> =
         history_pending.iter().map(|segment| segment.segment_id).collect();
@@ -518,7 +689,7 @@ fn compact_unit(
         ctx.storage.schema_version,
         &[source_ids.as_slice(), history_ids.as_slice()].concat(),
     )?;
-    write_manifest_with_client(client, &manifest_path, &manifest)?;
+    write_manifest_with_client(client, manifest_path, &manifest)?;
 
     let expected_generation = manifest_generation(table_oid)?;
     let new_generation = expected_generation
