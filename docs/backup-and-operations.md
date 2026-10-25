@@ -76,13 +76,43 @@ with `unsupported storage_type`. Use `PG_OPTS` to point the drill at a staged bu
   cold-tier metadata: the restored table is an ordinary table with every row in the heap (plus the
   per-table guard triggers and change-log table, which are harmless), and is not managed until you
   register a storage and run `manage_table` on it again (it reuses the leftover change-log table).
-  Use the physical procedure above to keep the cold tier and its history.
+  Use the physical procedure above to keep the cold tier and its history, or carry the cold tier
+  across a logical dump with the metadata export below.
 - `koldstore.validate_cold_storage` does not report *unreferenced* objects (use
   `recover_segments(..., dry_run => true)`). The retention guard defers deletion by a fixed window; it
   does not know which backups still exist, so size the window to your backup retention. It does not
   survive `DROP EXTENSION koldstore`, which drops the queue table, and it is off by default.
 - The deferred queue is never purged automatically; schedule `purge_deferred_cold_objects()`.
-- Packaged export/import (`EXPORT TABLE` / `IMPORT TABLE`) is not shipped.
+- Cross-cluster moves of the cold *objects* themselves are not packaged: `import_table_metadata`
+  re-binds the catalog, and the named storage must already serve the exported object prefix.
+
+## Logical dump that keeps the cold tier
+
+For a table whose cold rows should stay in object storage (instead of being copied into the dump):
+
+```sql
+-- source database
+SELECT koldstore.flush_table('chat.messages');            -- no pending delete markers
+SELECT koldstore.export_table_metadata('chat.messages');  -- save this jsonb next to the dump
+SET koldstore.dump_cold_as_metadata = on;                 -- in the session/role that runs pg_dump
+-- pg_dump now carries only the hot rows of managed tables
+
+-- destination: restore the dump (the table comes back unmanaged), register the same storage, then
+SELECT koldstore.import_table_metadata('chat.messages', :'metadata');
+SELECT koldstore.validate_cold_storage('chat.messages', deep => true);
+```
+
+Restoring the dump into a database without that table's change-log objects reports errors for the dumped
+per-table guard triggers (their functions do not exist there); they are harmless and `manage_table`,
+run by the import, recreates the guards. Verified with a real `pg_dump` / restore across two databases.
+
+The export holds the schema versions, options, manifest and segment/index rows without OIDs or
+credentials. It refuses while delete markers are unflushed (a hot-only dump would resurrect those cold
+rows), while a segment is pending, or while the manifest is out of sync. The restored table must keep
+the original column order, and the named storage must be registered and serve the object prefix; retain
+cold objects across a `DROP TABLE` with `koldstore.cold_object_retention_seconds`. Segment indexes of
+user-defined column types carry type OIDs that differ between clusters; use the default merged dump
+for such tables.
 
 ## `pg_dump` and `COPY`
 
@@ -91,6 +121,8 @@ These commands do not all enter the planner in the same way:
 - `pg_dump` and `COPY managed_table TO ...` (the plain table form) are rewritten to
   `COPY (SELECT ... FROM managed_table) TO ...` when the table has cold data, so they export the merged
   hot+cold rows instead of only the heap (see "Not covered" for what a dump does not carry).
+- With `koldstore.dump_cold_as_metadata = on` that rewrite is skipped and only the heap is exported;
+  see "Logical dump that keeps the cold tier".
 - `COPY (SELECT ... FROM managed_table) TO ...` plans the query and can use
   `KoldMergeScan`, so it includes cold rows for query shapes within the
   supported scan contract.

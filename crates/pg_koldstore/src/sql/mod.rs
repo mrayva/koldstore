@@ -23,6 +23,8 @@ pub mod session;
 #[cfg(feature = "pg")]
 pub mod summaries;
 pub mod sort_key;
+#[cfg(feature = "pg")]
+pub mod table_metadata;
 pub mod storage;
 #[cfg(feature = "pg")]
 pub mod sync;

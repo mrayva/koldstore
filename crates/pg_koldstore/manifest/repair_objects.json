@@ -1096,6 +1096,18 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.unregister_backup(name text)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$unregister_backup_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function export_table_metadata(table_name regclass) returns jsonb security definer [export_table_metadata_pg_wrapper]": {
+            "add": "koldstore.export_table_metadata(table_name regclass)",
+            "name": "export_table_metadata",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.export_table_metadata(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$export_table_metadata_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function import_table_metadata(table_name regclass, metadata jsonb) returns bigint security definer [import_table_metadata_pg_wrapper]": {
+            "add": "koldstore.import_table_metadata(table_name regclass, metadata jsonb)",
+            "name": "import_table_metadata",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.import_table_metadata(table_name regclass, metadata jsonb)\n RETURNS bigint\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$import_table_metadata_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function internal_ensure_manifest_row(p_table_oid oid) returns void security definer [sql:456fd88ef614]": {
             "add": "koldstore.internal_ensure_manifest_row(p_table_oid oid)",
             "name": "internal_ensure_manifest_row",

@@ -494,3 +494,19 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- Cold-tier metadata for logical dumps: export on the source, import on the restored table.
+CREATE FUNCTION koldstore."export_table_metadata"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'export_table_metadata_pg_wrapper';
+
+CREATE FUNCTION koldstore."import_table_metadata"(
+	"table_name" regclass,
+	"metadata" jsonb
+) RETURNS bigint
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'import_table_metadata_pg_wrapper';

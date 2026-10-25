@@ -439,7 +439,7 @@ mod process_utility {
     /// then `manage_table` again). A `COPY (query) TO` (`relation` null, `query` set) is unaffected.
     unsafe fn rewrite_copy_table_to_with_cold_data(stmt: *mut pg_sys::CopyStmt) {
         unsafe {
-            if stmt.is_null() || !(*stmt).query.is_null() {
+            if stmt.is_null() || !(*stmt).query.is_null() || crate::guc::dump_cold_as_metadata() {
                 return;
             }
             let Some(table_oid) = relation_oid_from_range_var((*stmt).relation) else {

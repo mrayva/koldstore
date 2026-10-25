@@ -14,6 +14,7 @@ mod copy_to_cold;
 mod inbound_fk_guard;
 mod purge_where;
 mod row_lock_hydrate;
+mod table_metadata;
 mod unique_guard;
 mod upsert_hydrate;
 mod pgoutput_old_row_cow;

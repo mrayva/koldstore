@@ -221,6 +221,8 @@ pub const MAX_SCOPES_PER_FLUSH_GUC: &str = "koldstore.max_scopes_per_flush";
 pub const DEFAULT_MAX_SCOPES_PER_FLUSH: i32 = 256;
 /// GUC name: let the maintenance worker compact cold segments of managed tables on its own.
 pub const AUTO_COMPACTION_GUC: &str = "koldstore.auto_compaction";
+/// GUC name: make `COPY TO` / `pg_dump` export only the hot rows of managed tables.
+pub const DUMP_COLD_AS_METADATA_GUC: &str = "koldstore.dump_cold_as_metadata";
 /// GUC name: purge retained cold objects automatically once their window has passed.
 pub const COLD_OBJECT_AUTO_PURGE_GUC: &str = "koldstore.cold_object_auto_purge";
 /// GUC name: seconds to keep cold objects of a dropped / unmanaged table before they may be purged.

@@ -183,7 +183,9 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   ([#126](https://github.com/kalamdb/koldstore/issues/126)). When the table has cold data it is
   rewritten to `COPY (SELECT <columns> FROM table) TO ...`, which plans normally and exports hot and
   cold rows. A logical `pg_dump` therefore carries all rows, but not the cold-tier metadata: the
-  restored table is an ordinary table until `manage_table` is run on it again. Backup and PITR that keep
+  restored table is an ordinary table until `manage_table` is run on it again; alternatively set
+  `koldstore.dump_cold_as_metadata = on` for a hot-only dump and carry the cold tier with
+  `koldstore.export_table_metadata()` / `import_table_metadata()`. Backup and PITR that keep
   the cold tier are supported through a physical base backup plus WAL archive and a retained cold
   object prefix, checked with `koldstore.backup_manifest` / `koldstore.validate_cold_storage` (see
   [Backup and Operations](backup-and-operations.md)).

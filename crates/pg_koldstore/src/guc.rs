@@ -34,6 +34,8 @@ static COLD_OBJECT_AUTO_PURGE: GucSetting<bool> = GucSetting::<bool>::new(true);
 #[cfg(feature = "pg")]
 static AUTO_COMPACTION: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static DUMP_COLD_AS_METADATA: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
 static MAX_SCOPES_PER_FLUSH: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_SCOPES_PER_FLUSH);
 #[cfg(feature = "pg")]
@@ -433,6 +435,14 @@ pub fn define_gucs() {
         flags,
     );
     GucRegistry::define_bool_guc(
+        c"koldstore.dump_cold_as_metadata",
+        c"Makes COPY TO and pg_dump carry only the hot rows of managed tables.",
+        c"Off (default): COPY table TO and pg_dump export the merged hot+cold rows. On: they export the heap only; the cold rows stay in object storage and travel as metadata via koldstore.export_table_metadata() / koldstore.import_table_metadata().",
+        &DUMP_COLD_AS_METADATA,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
         c"koldstore.cold_object_auto_purge",
         c"Deletes retained cold objects automatically once their retention window has passed.",
         c"Only has an effect while koldstore.cold_object_retention_seconds > 0. On (default), each database's maintenance worker removes the cold objects of dropped tables whose window has passed, in bounded batches, so koldstore.deferred_cold_deletes does not grow without limit. Turn off to purge only by calling koldstore.purge_deferred_cold_objects() yourself. Superuser-only.",
@@ -701,6 +711,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
         },
         GucDefinition {
             name: settings::AUTO_COMPACTION_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
+            name: settings::DUMP_COLD_AS_METADATA_GUC,
             internal: false,
             default_value: "off",
         },
@@ -1218,6 +1233,20 @@ pub fn auto_compaction() -> bool {
     #[cfg(feature = "pg")]
     {
         AUTO_COMPACTION.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
+}
+
+/// Whether `COPY table TO` / `pg_dump` export only the hot rows of managed tables.
+#[must_use]
+pub fn dump_cold_as_metadata() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        DUMP_COLD_AS_METADATA.get()
     }
 
     #[cfg(not(feature = "pg"))]
