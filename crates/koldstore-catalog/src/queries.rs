@@ -1137,6 +1137,36 @@ ORDER BY (SELECT csi.min_value FROM koldstore.cold_segment_index csi
     )
 }
 
+/// Lists the relative paths of active segments whose term filter (a `value_summary` on a `text[]` /
+/// `jsonb` column's index row) proves a probe cannot match. Parameters are table OID, column id and a
+/// JSON array of `{"hash", "clause"}` objects: a segment is listed when some clause has no term whose bit
+/// is set. Segments without a term filter are never listed.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_term_filter_excluded_segments() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "list segments excluded by a term filter",
+        r#"
+SELECT cs.path
+FROM koldstore.cold_segments cs
+JOIN koldstore.cold_segment_index t
+  ON t.segment_id = cs.segment_id AND t.column_id = $2::smallint
+WHERE cs.table_oid = $1::oid AND cs.status = 'active'
+  AND t.value_summary IS NOT NULL
+  AND EXISTS (
+      SELECT 1
+      FROM jsonb_to_recordset($3::jsonb) AS h(hash bigint, clause integer)
+      GROUP BY h.clause
+      HAVING bool_and(get_bit(t.value_summary,
+                              (h.hash % (octet_length(t.value_summary) * 8)::bigint)::integer) = 0)
+  )
+"#,
+        [SqlParamType::Oid, SqlParamType::Integer, SqlParamType::Jsonb],
+    )
+}
+
 /// Lists compacted segments of one table whose retirement is older than a grace period, with the
 /// full object key each one lives at. Parameters are table OID and the grace in seconds.
 ///

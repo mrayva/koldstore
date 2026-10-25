@@ -19,7 +19,7 @@ use koldstore_parquet::{
 use pgrx::pg_sys;
 
 use super::profile::{elapsed_ms, ColdReadProfile, ProfileCollectionMode, SegmentReadProfile};
-use super::qual::{segment_prune_predicates, session_scope_equality};
+use super::qual::{segment_prune_predicates, segment_term_predicates, session_scope_equality};
 use super::with_hook_disabled;
 
 /// Returns whether safe bounds prove that no active cold segment can match.
@@ -504,6 +504,18 @@ fn plan_cold_segments(
         .unwrap_or_else(|| manifest_stats.segments.clone());
     // Segments of other scopes cannot hold a row this scan may return (counted as catalog-pruned).
     segments.retain(|segment| in_scope(segment));
+    // Term filters on `text[]` / `jsonb` columns prune under the same single-version-per-key condition as
+    // any other mutable column. Only a segment that carries a filter can be excluded, so no column needs to
+    // be known as indexed here.
+    if pk_ranges_disjoint || scoped_segment_count <= 1 {
+        let term_predicates = unsafe { segment_term_predicates(*scanrelid, *qual, catalog, *params) };
+        for predicate in &term_predicates {
+            let excluded = term_filter_excluded_paths(*table_oid, predicate)?;
+            if !excluded.is_empty() {
+                segments.retain(|segment| !path_in_excluded(&segment.object_path, &excluded));
+            }
+        }
+    }
     let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
     let profile = if profile_mode.collects_counts() {
@@ -549,6 +561,58 @@ fn plan_cold_segments(
         pk_probe,
         pk_ranges_disjoint,
     }))
+}
+
+/// Most clauses sent to the catalog per predicate; dropping clauses only weakens the prune.
+const MAX_TERM_CLAUSES: usize = 16;
+
+/// Relative paths of active segments whose term filter rules the predicate out.
+fn term_filter_excluded_paths(
+    table_oid: pg_sys::Oid,
+    predicate: &super::qual::SegmentTermPredicate,
+) -> Result<Vec<String>, String> {
+    let probes = predicate
+        .clauses
+        .iter()
+        .take(MAX_TERM_CLAUSES)
+        .enumerate()
+        .flat_map(|(clause, terms)| {
+            terms.iter().map(move |term| {
+                serde_json::json!({ "hash": koldstore_parquet::term_hash(term), "clause": clause })
+            })
+        })
+        .collect::<Vec<_>>();
+    if probes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let statement = koldstore_catalog::queries::plan_term_filter_excluded_segments().map_err(|error| error.to_string())?;
+    let args = [
+        pgrx::datum::DatumWithOid::from(table_oid),
+        pgrx::datum::DatumWithOid::from(i32::from(predicate.column_id)),
+        pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::Value::Array(probes))),
+    ];
+    crate::catalog::owner::with_extension_owner(|| {
+        crate::spi::execute_prepared(&statement, &args, |tuples| {
+            let mut out = Vec::new();
+            for tuple in tuples {
+                if let Some(path) = tuple.get::<String>(1)? {
+                    out.push(path);
+                }
+            }
+            Ok(out)
+        })
+        .map_err(|error| error.to_string())
+    })?
+}
+
+/// Whether a segment's full object path ends in one of the catalog-relative `excluded` paths (the full
+/// path is the table prefix, empty or ending in `/`, followed by the relative one).
+fn path_in_excluded(object_path: &str, excluded: &[String]) -> bool {
+    excluded.iter().any(|path| {
+        object_path
+            .strip_suffix(path.as_str())
+            .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+    })
 }
 
 /// Result of choosing a prune column and loading catalog index candidates.

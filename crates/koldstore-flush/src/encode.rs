@@ -332,6 +332,58 @@ impl NumericBoundsState {
     }
 }
 
+/// Term filter of one indexed `text[]` / `jsonb` column for the segment being written (see
+/// `koldstore_parquet::term_filter`). Its bitmap rides on an index row with no min/max bounds.
+struct TermFilterState {
+    name: String,
+    column_id: koldstore_common::ColumnId,
+    type_oid: u32,
+    kind: koldstore_parquet::TermFilterKind,
+    builder: koldstore_parquet::TermFilterBuilder,
+}
+
+impl TermFilterState {
+    fn for_input(input: &StreamEncodeInput) -> Vec<Self> {
+        input
+            .indexed_columns
+            .iter()
+            .filter_map(|indexed| {
+                let column = input
+                    .parquet_columns
+                    .iter()
+                    .find(|column| column.name == indexed.name)?;
+                let kind = match column.pg_type {
+                    koldstore_parquet::PgType::TextArray => {
+                        koldstore_parquet::TermFilterKind::TextArray
+                    }
+                    koldstore_parquet::PgType::Jsonb => koldstore_parquet::TermFilterKind::Jsonb,
+                    _ => return None,
+                };
+                Some(Self {
+                    name: indexed.name.clone(),
+                    column_id: indexed.column_id,
+                    type_oid: column.pg_type.type_oid(),
+                    kind,
+                    builder: koldstore_parquet::TermFilterBuilder::new(kind),
+                })
+            })
+            .collect()
+    }
+
+    fn add_batch(&mut self, batch: &arrow_array::RecordBatch) {
+        self.builder.add_batch(batch, &self.name);
+    }
+
+    /// Takes the filter for the segment just closed and resets for the next one.
+    fn finish(&mut self, row_count: usize) -> Option<Vec<u8>> {
+        let builder = std::mem::replace(
+            &mut self.builder,
+            koldstore_parquet::TermFilterBuilder::new(self.kind),
+        );
+        builder.finish(row_count)
+    }
+}
+
 /// Accumulates the tuple-level key bounds of a composite primary key for the segment being written
 /// (see `koldstore_parquet::key_bounds`). Single-column keys do not need it: their column bounds are
 /// already exact. `builder` is `None` once anything went wrong, and the segment then has no tuple
@@ -396,6 +448,7 @@ struct SegmentBuilder {
     pk_summary: Option<PkSummaryState>,
     key_bounds: Option<KeyBoundsState>,
     numeric_bounds: Vec<NumericBoundsState>,
+    term_filters: Vec<TermFilterState>,
 }
 
 impl SegmentBuilder {
@@ -434,6 +487,7 @@ impl SegmentBuilder {
             pk_summary: PkSummaryState::for_input(input),
             key_bounds: KeyBoundsState::for_input(input),
             numeric_bounds: NumericBoundsState::for_input(input),
+            term_filters: TermFilterState::for_input(input),
         }
     }
 
@@ -461,6 +515,9 @@ impl SegmentBuilder {
             bounds.add_batch(&batch.batch);
         }
         for state in &mut self.numeric_bounds {
+            state.add_batch(&batch.batch);
+        }
+        for state in &mut self.term_filters {
             state.add_batch(&batch.batch);
         }
         self.row_count = self.row_count.saturating_add(batch_row_count);
@@ -521,6 +578,26 @@ impl SegmentBuilder {
                     index.min_value = Some(min);
                     index.max_value = Some(max);
                 }
+            }
+        }
+        let row_group_count = packed_metadata.row_group_count;
+        for state in &mut self.term_filters {
+            if let Some(summary) = state.finish(self.row_count) {
+                packed_metadata
+                    .column_indexes
+                    .push(koldstore_parquet::PackedColumnIndex {
+                        column_id: state.column_id,
+                        type_oid: state.type_oid,
+                        codec_version: koldstore_sortkey::CODEC_VERSION,
+                        min_value: None,
+                        max_value: None,
+                        row_group_min_values: vec![None; row_group_count],
+                        row_group_max_values: vec![None; row_group_count],
+                        row_group_null_counts: vec![None; row_group_count],
+                        value_summary: Some(summary),
+                        key_min: None,
+                        key_max: None,
+                    });
             }
         }
         let chunk = FlushWriteChunk::from_encoded(encoded, packed_metadata);

@@ -391,6 +391,162 @@ pub(super) unsafe fn segment_prune_predicates(
         .collect()
 }
 
+/// A containment predicate on a `text[]` / `jsonb` column, as clauses over the column's segment term
+/// filter (see `koldstore_parquet::term_filter`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SegmentTermPredicate {
+    pub(super) column_id: i16,
+    pub(super) clauses: koldstore_parquet::TermClauses,
+}
+
+/// Collects `@>`, `&&`, `?`, `?|` and `?&` predicates on `text[]` / `jsonb` columns that compare against
+/// a constant or bound parameter. Anything else yields nothing, which only means no pruning.
+pub(super) unsafe fn segment_term_predicates(
+    scanrelid: pg_sys::Index,
+    qual: *mut pg_sys::List,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    params: pg_sys::ParamListInfo,
+) -> Vec<SegmentTermPredicate> {
+    let catalog = QualCatalog { scanrelid, catalog };
+    let mut out = Vec::new();
+    for node in list_node_pointers(qual) {
+        collect_term_predicates(node.cast::<pg_sys::Expr>(), catalog, params, &mut out);
+    }
+    out
+}
+
+unsafe fn collect_term_predicates(
+    expr: *mut pg_sys::Expr,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+    out: &mut Vec<SegmentTermPredicate>,
+) {
+    if expr.is_null() {
+        return;
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_OpExpr => out.extend(term_predicate_from_op(expr, catalog, params)),
+        pg_sys::NodeTag::T_BoolExpr => {
+            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            if (*bool_expr).boolop == pg_sys::BoolExprType::AND_EXPR {
+                for node in list_node_pointers((*bool_expr).args) {
+                    collect_term_predicates(node.cast::<pg_sys::Expr>(), catalog, params, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+unsafe fn term_predicate_from_op(
+    expr: *mut pg_sys::Expr,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<SegmentTermPredicate> {
+    let op_expr = expr.cast::<pg_sys::OpExpr>();
+    let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
+    if !matches!(opname, "@>" | "&&" | "?" | "?|" | "?&") || !operator_is_pg_catalog((*op_expr).opno) {
+        return None;
+    }
+    let args = list_node_pointers((*op_expr).args);
+    if args.len() != 2 {
+        return None;
+    }
+    // `&&` is commutative; the others only mean what we need with the column on the left.
+    let (column, literal) = match var_column(args[0].cast::<pg_sys::Expr>(), catalog) {
+        Some(column) => (column, args[1]),
+        None if opname == "&&" => (var_column(args[1].cast::<pg_sys::Expr>(), catalog)?, args[0]),
+        None => return None,
+    };
+    let (datum, isnull, literal_type) = super::literals::const_or_param_datum(literal.cast::<pg_sys::Expr>(), params)?;
+    if isnull {
+        return None;
+    }
+    let clauses = match (column.pg_type, opname) {
+        (koldstore_schema::PgType::TextArray, "@>" | "&&") => {
+            // Element equality must be bytewise for a term (an exact string) to stand for it.
+            if literal_type != pg_sys::TEXTARRAYOID || !collation_is_deterministic((*op_expr).inputcollid) {
+                return None;
+            }
+            let elements = text_array_datum_elements(datum)?;
+            if opname == "@>" {
+                koldstore_parquet::array_contains_clauses(&elements)
+            } else {
+                koldstore_parquet::array_overlap_clauses(&elements)
+            }
+        }
+        (koldstore_schema::PgType::Jsonb, "@>") => {
+            if literal_type != pg_sys::JSONBOID {
+                return None;
+            }
+            koldstore_parquet::jsonb_contains_clauses(&datum_output_text(datum, literal_type)?)
+        }
+        (koldstore_schema::PgType::Jsonb, "?") => {
+            if literal_type != pg_sys::TEXTOID {
+                return None;
+            }
+            koldstore_parquet::jsonb_exists_clauses(&[datum_output_text(datum, literal_type)?], false)
+        }
+        (koldstore_schema::PgType::Jsonb, "?|" | "?&") => {
+            if literal_type != pg_sys::TEXTARRAYOID {
+                return None;
+            }
+            let keys = text_array_datum_elements(datum)?;
+            // A NULL key never exists; leave such a probe to the scan.
+            let keys = keys.into_iter().collect::<Option<Vec<_>>>()?;
+            koldstore_parquet::jsonb_exists_clauses(&keys, opname == "?&")
+        }
+        _ => return None,
+    }?;
+    Some(SegmentTermPredicate {
+        column_id: column.column_id.get(),
+        clauses,
+    })
+}
+
+/// Renders a datum through its type's output function.
+unsafe fn datum_output_text(datum: pg_sys::Datum, type_oid: pg_sys::Oid) -> Option<String> {
+    let mut typoutput = pg_sys::InvalidOid;
+    let mut typisvarlena = false;
+    pg_sys::getTypeOutputInfo(type_oid, &mut typoutput, &mut typisvarlena);
+    super::literals::cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum))
+}
+
+/// The elements of a one-dimensional `text[]` datum; `None` for any other shape.
+unsafe fn text_array_datum_elements(datum: pg_sys::Datum) -> Option<Vec<Option<String>>> {
+    let array = pg_sys::pg_detoast_datum(datum.cast_mut_ptr()).cast::<pg_sys::ArrayType>();
+    if array.is_null() || (*array).ndim > 1 {
+        return None;
+    }
+    let mut typlen: i16 = 0;
+    let mut typbyval = false;
+    let mut typalign: std::os::raw::c_char = 0;
+    pg_sys::get_typlenbyvalalign(pg_sys::TEXTOID, &mut typlen, &mut typbyval, &mut typalign);
+    let mut elements: *mut pg_sys::Datum = std::ptr::null_mut();
+    let mut nulls: *mut bool = std::ptr::null_mut();
+    let mut count: std::os::raw::c_int = 0;
+    pg_sys::deconstruct_array(
+        array,
+        pg_sys::TEXTOID,
+        i32::from(typlen),
+        typbyval,
+        typalign,
+        &mut elements,
+        &mut nulls,
+        &mut count,
+    );
+    let count = usize::try_from(count).ok()?;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        if *nulls.add(index) {
+            values.push(None);
+        } else {
+            values.push(Some(datum_output_text(*elements.add(index), pg_sys::TEXTOID)?));
+        }
+    }
+    Some(values)
+}
+
 unsafe fn segment_prune_node_predicates(
     expr: *mut pg_sys::Expr,
     catalog: QualCatalog<'_>,

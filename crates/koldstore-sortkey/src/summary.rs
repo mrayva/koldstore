@@ -70,6 +70,19 @@ impl ValueSummaryBuilder {
         self.hashes.push(summary_hash(encoded));
     }
 
+    /// Adds a value by its [`summary_hash`] (for callers that deduplicate before building).
+    pub fn insert_hash(&mut self, hash: u64) {
+        if self.overflowed {
+            return;
+        }
+        if self.hashes.len() >= SUMMARY_MAX_ROWS {
+            self.overflowed = true;
+            self.hashes = Vec::new();
+            return;
+        }
+        self.hashes.push(hash);
+    }
+
     /// Number of values collected (zero once overflowed).
     #[must_use]
     pub fn len(&self) -> usize {

@@ -393,6 +393,16 @@ the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narro
 supported only as one-dimensional `text[]`; other array types are rejected at `manage_table`,
 and a multi-dimensional `text[]` value fails the flush.
 
+Listing a `text[]` or `jsonb` column in `pruning_columns` also gives every new segment a *term
+filter* (a one-hash membership bitmap in `cold_segment_index.value_summary`, built from the
+array elements, or the keys, scalar values and key/value pairs of the JSON at any depth). A
+constant or parameter `@>`, `&&`, `?`, `?|` or `?&` predicate then skips the segments whose
+filter rules it out. It prunes only while no key is stored in two active segments (otherwise a
+newer version could be hidden and a stale one resurrected), never for a NULL or empty probe,
+a bare scalar `jsonb @>` probe or a non-deterministic collation, and never for segments
+written before the column was listed (they carry no filter and are always read). The filter
+can only over-read, never under-read; `tests/sql/term_filter_pruning.sql` pins both.
+
 ## pgvector
 
 pgvector indexes such as HNSW and IVFFlat speed vector similarity search over

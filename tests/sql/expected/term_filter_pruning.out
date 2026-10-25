@@ -1,0 +1,150 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+SELECT 400
+ tf_managed
+------------
+ t
+(1 row)
+
+ tf_caught_up
+--------------
+ t
+(1 row)
+
+ tf_flushed
+------------
+ t
+(1 row)
+
+ tf_many_segments
+------------------
+ t
+(1 row)
+
+ tf_has_term_filters
+---------------------
+ t
+(1 row)
+
+ contains_prunes
+-----------------
+ t
+(1 row)
+
+ overlap_prunes
+----------------
+ t
+(1 row)
+
+ jsonb_contains_prunes
+-----------------------
+ t
+(1 row)
+
+ jsonb_key_prunes
+------------------
+ t
+(1 row)
+
+ jsonb_any_prunes
+------------------
+ t
+(1 row)
+
+ jsonb_all_prunes
+------------------
+ t
+(1 row)
+
+ jsonb_nested_prunes
+---------------------
+ t
+(1 row)
+
+ absent_opens_nothing
+----------------------
+ t
+(1 row)
+
+ common_reads_all
+------------------
+ t
+(1 row)
+
+ null_probe_reads_all
+----------------------
+ t
+(1 row)
+
+ scalar_probe_reads_all
+------------------------
+ t
+(1 row)
+
+ tf_mismatches_before
+----------------------
+                    0
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+RESET
+ tf_fenced
+-----------
+ t
+(1 row)
+
+ tf_reflushed
+--------------
+ t
+(1 row)
+
+ tf_fenced_2
+-------------
+ t
+(1 row)
+
+ tf_mismatches_after_reflush
+-----------------------------
+                           0
+(1 row)
+
+ overlapping_reads_all
+-----------------------
+ t
+(1 row)
+
+ id  |  tags
+-----+---------
+  45 | {moved}
+ 190 | {moved}
+(2 rows)
+
+ tf_total | tf_distinct
+----------+-------------
+      400 |         400
+(1 row)
+
+ tf_compacted
+--------------
+ t
+(1 row)
+
+ tf_fenced_3
+-------------
+ t
+(1 row)
+
+ compacted_segments_have_term_filters
+--------------------------------------
+ t
+(1 row)
+
+ tf_mismatches_after_compaction
+--------------------------------
+                              0
+(1 row)
+
