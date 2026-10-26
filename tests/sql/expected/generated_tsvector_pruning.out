@@ -1,0 +1,93 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+INSERT 0 2
+CREATE TABLE
+INSERT 0 402
+ gen_managed
+-------------
+ t
+(1 row)
+
+ gen_caught_up
+---------------
+ t
+(1 row)
+
+ gen_flushed
+-------------
+ t
+(1 row)
+
+ gen_many_segments
+-------------------
+ t
+(1 row)
+
+ gen_has_term_filters
+----------------------
+ t
+(1 row)
+
+ lexeme_prunes
+---------------
+ t
+(1 row)
+
+ and_prunes
+------------
+ t
+(1 row)
+
+ plain_prunes
+--------------
+ t
+(1 row)
+
+ absent_opens_almost_nothing
+-----------------------------
+ t
+(1 row)
+
+ common_reads_all
+------------------
+ t
+(1 row)
+
+ gen_mismatches_before
+-----------------------
+                     0
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+DELETE 1
+DELETE 1
+RESET
+ gen_caught_up_2
+-----------------
+ t
+(1 row)
+
+ gen_mismatches_after_dml
+--------------------------
+                        0
+(1 row)
+
+ gen_reflushed
+---------------
+ t
+(1 row)
+
+ gen_mismatches_after_reflush
+------------------------------
+                            0
+(1 row)
+
+ counts_match
+--------------
+ t
+(1 row)
+
