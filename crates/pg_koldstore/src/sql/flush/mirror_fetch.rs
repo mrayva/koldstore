@@ -31,6 +31,7 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array
@@ -211,6 +212,7 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Cidr => CellValue::Utf8("0.0.0.0/0".to_string()),
         PgType::Macaddr => CellValue::Utf8("00:00:00:00:00:00".to_string()),
         PgType::Time | PgType::Timetz => CellValue::Utf8("00:00:00".to_string()),
+        PgType::Interval => CellValue::Utf8("0".to_string()),
         PgType::Int2Array => CellValue::Utf8("{}".to_string()),
         PgType::Int4Array => CellValue::Utf8("{}".to_string()),
         PgType::Int8Array => CellValue::Utf8("{}".to_string()),
@@ -270,6 +272,7 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Interval
             | PgType::Int2Array
             | PgType::Int4Array
             | PgType::Int8Array
@@ -516,6 +519,7 @@ fn read_column(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array

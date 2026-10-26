@@ -80,6 +80,7 @@ impl TypeMatrix {
             "numeric[]",
             "uuid[]",
             "bool[]",
+            "interval",
         ];
         Self {
             entries: supported

@@ -1,0 +1,96 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 11
+INSERT 0 49
+SELECT 60
+ iv_managed
+------------
+ t
+(1 row)
+
+SET
+ iv_flushed
+------------
+ t
+(1 row)
+
+RESET
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id | span | expected
+----+------+----------
+(0 rows)
+
+SET
+ same_under_iso
+----------------
+ t
+(1 row)
+
+RESET
+ eq_day
+--------
+      2
+(1 row)
+
+ eq_day_ctl
+------------
+          2
+(1 row)
+
+ lt_mon
+--------
+     55
+(1 row)
+
+ lt_mon_ctl
+------------
+         55
+(1 row)
+
+ null_span
+-----------
+         1
+(1 row)
+
+SET
+UPDATE 6
+UPDATE 6
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ iv_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ iv_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: segment order column `span` has unsupported type OID 1186

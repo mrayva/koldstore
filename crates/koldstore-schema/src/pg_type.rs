@@ -78,6 +78,8 @@ pub enum PgType {
     UuidArray = 30,
     /// `bool[]`
     BoolArray = 31,
+    /// `interval`, rendered as ISO 8601 so the text form does not depend on `IntervalStyle`
+    Interval = 32,
 }
 
 /// PostgreSQL integer array type OID.
@@ -158,6 +160,7 @@ impl PgType {
             "numeric[]" => Ok(Self::NumericArray),
             "uuid[]" => Ok(Self::UuidArray),
             "bool[]" => Ok(Self::BoolArray),
+            "interval" => Ok(Self::Interval),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -204,6 +207,7 @@ impl PgType {
             29 => Some(Self::NumericArray),
             30 => Some(Self::UuidArray),
             31 => Some(Self::BoolArray),
+            32 => Some(Self::Interval),
             _ => None,
         }
     }
@@ -244,6 +248,7 @@ impl PgType {
             Self::NumericArray => "numeric[]",
             Self::UuidArray => "uuid[]",
             Self::BoolArray => "bool[]",
+            Self::Interval => "interval",
         }
     }
 
@@ -317,6 +322,7 @@ impl PgType {
             Self::NumericArray => 1231,
             Self::UuidArray => 2951,
             Self::BoolArray => 1000,
+            Self::Interval => 1186,
         }
     }
 
@@ -479,6 +485,7 @@ mod tests {
             PgType::NumericArray,
             PgType::UuidArray,
             PgType::BoolArray,
+            PgType::Interval,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

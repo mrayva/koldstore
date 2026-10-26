@@ -397,13 +397,13 @@ multi-dimensional `text[]` value fails the flush. Cold reads keep every `jsonb` 
 (`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, with array columns carried as their text
 literal so bounds survive; a JSON `null` in a `jsonb` column still becomes SQL `NULL`.
 
-`json`, `inet`, `cidr`, `macaddr`, `char(n)`, `time` and `timetz` are managed the same way, as their text
+`json`, `inet`, `cidr`, `macaddr`, `char(n)`, `time`, `timetz` and `interval` are managed the same way, as their text
 form, so a cold read returns exactly what was stored (`json` keeps its whitespace and key order; `char(n)` keeps its
-padding; `tests/sql/text_form_types.sql`). They carry no min/max statistics and cannot be a migration-order column.
+padding; an `interval` is stored as ISO 8601, so `1 day`, `24 hours` and `30 days` stay distinct whatever `IntervalStyle` the flush ran under (`tests/sql/interval_type.sql`; the others: `tests/sql/text_form_types.sql`). They carry no min/max statistics and cannot be a migration-order column.
 A domain over a supported type (nested domains included) is stored as its base type, as a column, a key or the
 migration-order column; the domain's constraints keep applying to the heap, hydrate-on-write included
 (`tests/sql/domain_types.sql`). A domain over an unsupported type is refused like the type itself.
-Still unsupported, and refused by `manage_table`: `interval` (its text form depends on `IntervalStyle`), `money`,
+Still unsupported, and refused by `manage_table`: `money` (its text form depends on `lc_monetary`),
 enums, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays of other element types (`timestamptz[]`, `text`-like or enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;

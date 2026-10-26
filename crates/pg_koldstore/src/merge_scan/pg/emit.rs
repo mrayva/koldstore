@@ -77,6 +77,7 @@ unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_s
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Interval
             | PgType::Int2Array
             | PgType::Int4Array
             | PgType::Int8Array
@@ -149,6 +150,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array

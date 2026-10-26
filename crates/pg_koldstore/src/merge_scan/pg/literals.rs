@@ -161,6 +161,7 @@ unsafe fn datum_typed_sql(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array
@@ -378,7 +379,15 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     let mut typoutput = pg_sys::InvalidOid;
     let mut typisvarlena = false;
     pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
-    cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum))
+    // An interval's text form follows the session's IntervalStyle; ISO 8601 is stable and `interval_in`
+    // accepts it under every style, so a stored value reads back identically.
+    let saved_style = pg_sys::IntervalStyle;
+    if oid == pg_sys::INTERVALOID {
+        pg_sys::IntervalStyle = pg_sys::INTSTYLE_ISO_8601 as _;
+    }
+    let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));
+    pg_sys::IntervalStyle = saved_style;
+    text
 }
 
 pub(crate) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {

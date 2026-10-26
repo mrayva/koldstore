@@ -28,6 +28,10 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
     if normalized.starts_with("timestamp(") && normalized.ends_with(" with time zone") {
         return "timestamptz".to_string();
     }
+    // `interval [(p)]` and `interval year to month` style field restrictions are all one storage type.
+    if normalized == "interval" || normalized.starts_with("interval ") || normalized.starts_with("interval(") {
+        return "interval".to_string();
+    }
     // `time [(p)] without|with time zone`; PostgreSQL reports the long form.
     if normalized.starts_with("time") {
         let bare = normalized.split_once('(').map_or(normalized.clone(), |(head, tail)| {

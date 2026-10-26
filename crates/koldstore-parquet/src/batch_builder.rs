@@ -278,6 +278,7 @@ impl TypedColumnBuilder {
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Interval
             | PgType::Int2Array
             | PgType::Int4Array
             | PgType::Int8Array
@@ -518,6 +519,7 @@ fn plan_value_to_flush_cell(
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Interval
             | PgType::Int2Array
             | PgType::Int4Array
             | PgType::Int8Array

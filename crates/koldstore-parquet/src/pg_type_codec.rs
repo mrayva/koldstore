@@ -64,6 +64,7 @@ pub const fn arrow_data_type(pg_type: PgType) -> DataType {
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array
@@ -158,6 +159,7 @@ pub fn arrow_array_from_json(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array
@@ -245,6 +247,7 @@ pub fn cell_from_arrow_cell(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array
@@ -336,6 +339,7 @@ pub fn json_from_arrow_cell(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Interval
         | PgType::Int2Array
         | PgType::Int4Array
         | PgType::Int8Array

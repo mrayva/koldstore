@@ -77,7 +77,7 @@ SELECT sqlreg.fingerprint('sqlreg.tf', 'id') = sqlreg.fingerprint('sqlreg.tf_ctl
 SELECT koldstore.unmanage_table('sqlreg.tf'::regclass, true, true) IS NOT NULL AS tf_unmanaged;
 SELECT sqlreg.fingerprint('sqlreg.tf', 'id') = sqlreg.fingerprint('sqlreg.tf_ctl', 'id') AS rows_match_after_unmanage;
 
--- interval is still unsupported: its text form depends on IntervalStyle
-CREATE TABLE sqlreg.tf_interval (id bigint PRIMARY KEY, i interval);
-SELECT koldstore.manage_table(table_name => 'sqlreg.tf_interval'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
+-- money is still unsupported: its text form depends on lc_monetary
+CREATE TABLE sqlreg.tf_money (id bigint PRIMARY KEY, i money);
+SELECT koldstore.manage_table(table_name => 'sqlreg.tf_money'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
   min_flush_rows => 1, migration_order_by => 'id', auto_flush => false);
