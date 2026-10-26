@@ -145,7 +145,7 @@ unsafe fn datum_typed_sql(
     match pg_type {
         // An enum's type OID is per column and not carried here: leave the predicate to the executor.
         PgType::Enum | PgType::Money | PgType::Int4Range | PgType::Int8Range | PgType::NumRange
-        | PgType::TsRange | PgType::TstzRange | PgType::DateRange => None,
+        | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle => None,
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
@@ -400,6 +400,12 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     // timestamptz carries its UTC offset, so the instant survives any TimeZone. Array output calls
     // the element output functions, so the same styles apply to date[], timestamp[], timestamptz[], interval[].
     let (saved_interval, saved_date) = (pg_sys::IntervalStyle, pg_sys::DateStyle);
+    // Geometric types print float8 coordinates, whose precision follows extra_float_digits; > 0 is the
+    // shortest text that parses back to the same bits.
+    let saved_digits = pg_sys::extra_float_digits;
+    if matches!(oid.to_u32(), 600 | 601 | 602 | 603 | 604 | 628 | 718) {
+        pg_sys::extra_float_digits = 1;
+    }
     if oid == pg_sys::INTERVALOID || oid == pg_sys::INTERVALARRAYOID {
         pg_sys::IntervalStyle = pg_sys::INTSTYLE_ISO_8601 as _;
     }
@@ -415,6 +421,7 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     }
     let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));
     (pg_sys::IntervalStyle, pg_sys::DateStyle) = (saved_interval, saved_date);
+    pg_sys::extra_float_digits = saved_digits;
     text
 }
 

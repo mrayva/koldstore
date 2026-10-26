@@ -116,6 +116,20 @@ pub enum PgType {
     TstzRange = 49,
     /// `daterange`, stored as its canonical text form.
     DateRange = 50,
+    /// `point`, stored as its text form.
+    Point = 51,
+    /// `lseg`, stored as its text form.
+    Lseg = 52,
+    /// `path`, stored as its text form.
+    Path = 53,
+    /// `box`, stored as its text form.
+    Box = 54,
+    /// `polygon`, stored as its text form.
+    Polygon = 55,
+    /// `line`, stored as its text form.
+    Line = 56,
+    /// `circle`, stored as its text form.
+    Circle = 57,
 }
 
 /// PostgreSQL integer array type OID.
@@ -215,6 +229,13 @@ impl PgType {
             "tsrange" => Ok(Self::TsRange),
             "tstzrange" => Ok(Self::TstzRange),
             "daterange" => Ok(Self::DateRange),
+            "point" => Ok(Self::Point),
+            "lseg" => Ok(Self::Lseg),
+            "path" => Ok(Self::Path),
+            "box" => Ok(Self::Box),
+            "polygon" => Ok(Self::Polygon),
+            "line" => Ok(Self::Line),
+            "circle" => Ok(Self::Circle),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -280,6 +301,13 @@ impl PgType {
             48 => Some(Self::TsRange),
             49 => Some(Self::TstzRange),
             50 => Some(Self::DateRange),
+            51 => Some(Self::Point),
+            52 => Some(Self::Lseg),
+            53 => Some(Self::Path),
+            54 => Some(Self::Box),
+            55 => Some(Self::Polygon),
+            56 => Some(Self::Line),
+            57 => Some(Self::Circle),
             _ => None,
         }
     }
@@ -339,6 +367,13 @@ impl PgType {
             Self::TsRange => "tsrange",
             Self::TstzRange => "tstzrange",
             Self::DateRange => "daterange",
+            Self::Point => "point",
+            Self::Lseg => "lseg",
+            Self::Path => "path",
+            Self::Box => "box",
+            Self::Polygon => "polygon",
+            Self::Line => "line",
+            Self::Circle => "circle",
         }
     }
 
@@ -432,6 +467,13 @@ impl PgType {
             Self::TsRange => 3908,
             Self::TstzRange => 3910,
             Self::DateRange => 3912,
+            Self::Point => 600,
+            Self::Lseg => 601,
+            Self::Path => 602,
+            Self::Box => 603,
+            Self::Polygon => 604,
+            Self::Line => 628,
+            Self::Circle => 718,
         }
     }
 
@@ -613,6 +655,13 @@ mod tests {
             PgType::TsRange,
             PgType::TstzRange,
             PgType::DateRange,
+            PgType::Point,
+            PgType::Lseg,
+            PgType::Path,
+            PgType::Box,
+            PgType::Polygon,
+            PgType::Line,
+            PgType::Circle,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

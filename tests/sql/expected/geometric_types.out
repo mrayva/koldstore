@@ -1,0 +1,105 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 4
+INSERT 0 56
+SELECT 60
+ geo_managed
+-------------
+ t
+(1 row)
+
+SET
+ geo_flushed
+-------------
+ t
+(1 row)
+
+RESET
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id |      pt       |                   ls                    |         pa          |                  bx
+----+---------------+-----------------------------------------+---------------------+---------------------------------------
+  1 | (1,2)         | [(0,0),(3,4)]                           | [(0,0),(1,1),(2,0)] | (2,2),(0,0)
+  2 | (0.1,0.2)     | [(0.1,0.2),(0.30000000000000004,1e-09)] | ((0,0),(1,1),(2,0)) | (10000000000,10000000000),(-1.5,-1.5)
+  3 |               |                                         |                     |
+  4 | (-0,Infinity) | [(-Infinity,0),(NaN,1)]                 | [(1,1)]             | (0,0),(0,0)
+(4 rows)
+
+ id |               pg                |      ln       |               ci
+----+---------------------------------+---------------+---------------------------------
+  1 | ((0,0),(4,0),(4,3))             | {1,-1,0}      | <(1,1),2.5>
+  2 | ((0.1,0.1),(0.2,0.7),(0.9,0.3)) | {0.1,0.2,0.3} | <(0.1,0.2),0.30000000000000004>
+  3 |                                 |               |
+  4 | ((0,0))                         | {0,1,1}       | <(0,0),0>
+(4 rows)
+
+ inside_box
+------------
+          7
+(1 row)
+
+ inside_box_ctl
+----------------
+              7
+(1 row)
+
+ circle_overlap
+----------------
+              4
+(1 row)
+
+ circle_overlap_ctl
+--------------------
+                  4
+(1 row)
+
+SET
+UPDATE 4
+UPDATE 4
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ geo_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ geo_unmanaged
+---------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TYPE
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: sqlreg.pair at line 1 column 376
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: point[] at line 1 column 372

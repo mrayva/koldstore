@@ -99,6 +99,13 @@ impl TypeMatrix {
             "tsrange",
             "tstzrange",
             "daterange",
+            "point",
+            "lseg",
+            "path",
+            "box",
+            "polygon",
+            "line",
+            "circle",
         ];
         Self {
             entries: supported

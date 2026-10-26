@@ -411,8 +411,12 @@ The built-in range types (`int4range`, `int8range`, `numrange`, `tsrange`, `tstz
 their canonical text form: empty, unbounded and infinite bounds round-trip, and `tstzrange`/date ranges read the same
 under any `TimeZone` or `DateStyle` (`tests/sql/range_types.sql`). Range predicates (`&&`, `@>`) are evaluated by the
 executor on the merged rows rather than pushed into the cold read, and ranges have no min/max statistics.
+The built-in geometric types (`point`, `lseg`, `path`, `box`, `polygon`, `line`, `circle`) are managed in text form,
+printed with enough float digits to read back bit-identically whatever `extra_float_digits` the flushing session
+uses (`tests/sql/geometric_types.sql`). Their predicates are evaluated by the executor, and they have no min/max
+statistics.
 Still unsupported, and refused by `manage_table`:
-composite types, multiranges, user-defined range types, geometric types, and arrays of other element types (`money[]`, enum arrays, …).
+composite types, multiranges, user-defined range types, geometric arrays, and arrays of other element types (`money[]`, enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
