@@ -400,7 +400,9 @@ lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
 storage like any column, and hydrate-on-write and `unmanage_table` skip them on insert so PostgreSQL recomputes
 them from the restored base columns (`tests/sql/generated_columns.sql`). `VIRTUAL` generated columns have no
-storage and are still rejected.
+storage and are still rejected. Identity columns (`ALWAYS` and `BY DEFAULT`) round-trip: hydration and
+`unmanage_table` insert with `OVERRIDING SYSTEM VALUE`, and the sequence keeps counting from where it was
+(`tests/sql/identity_columns.sql`).
 
 Listing a `text[]`, `jsonb` or `tsvector` column in `pruning_columns` also gives every new segment a *term
 filter* (a one-hash membership bitmap in `cold_segment_index.value_summary`, built from the

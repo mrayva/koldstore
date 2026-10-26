@@ -234,7 +234,7 @@ pub fn plan_rehydrate_heap(
             "DO $koldstore$ DECLARE cols text; BEGIN \
              SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO cols FROM pg_attribute \
              WHERE attrelid = '{table}'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''; \
-             EXECUTE format('INSERT INTO {table} (%1$s) SELECT %1$s FROM {temp_table}', cols); END $koldstore$"
+             EXECUTE format('INSERT INTO {table} (%1$s) OVERRIDING SYSTEM VALUE SELECT %1$s FROM {temp_table}', cols); END $koldstore$"
         ),
     )
     .map_err(|error| DemigrationError::Spi(error.to_string()))?;

@@ -343,7 +343,7 @@ fn hydrate_pk_impl(
     // combined. ON CONFLICT DO NOTHING absorbs a hot-race between steps.
     let columns = insertable_columns(table_oid)?;
     let insert_sql = format!(
-        "INSERT INTO {quoted} ({columns}) \
+        "INSERT INTO {quoted} ({columns}) OVERRIDING SYSTEM VALUE \
          SELECT {columns} FROM jsonb_populate_record(NULL::{quoted}, $1) \
          ON CONFLICT DO NOTHING"
     );
@@ -410,7 +410,7 @@ pub(crate) fn hydrate_rows(table_oid: pgrx::pg_sys::Oid, rows: &[serde_json::Val
     let quoted = qualified_relation(table_oid)?.quoted();
     let columns = insertable_columns(table_oid)?;
     let insert_sql = format!(
-        "INSERT INTO {quoted} ({columns}) \
+        "INSERT INTO {quoted} ({columns}) OVERRIDING SYSTEM VALUE \
          SELECT {columns} FROM jsonb_populate_recordset(NULL::{quoted}, $1) \
          ON CONFLICT DO NOTHING"
     );

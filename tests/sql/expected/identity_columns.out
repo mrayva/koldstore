@@ -1,0 +1,69 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+SELECT 60
+ idt_managed
+-------------
+ t
+(1 row)
+
+ idt_flushed
+-------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+INSERT 0 1
+ id
+----
+ 61
+(1 row)
+
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_visible
+--------------
+           60
+(1 row)
+
+ idt_reflushed
+---------------
+ t
+(1 row)
+
+ rows_after_reflush | max_id
+--------------------+--------
+                 60 |     61
+(1 row)
+
+ idt_unmanaged
+---------------
+ t
+(1 row)
+
+ rows_after_unmanage | max_id
+---------------------+--------
+                  60 |     61
+(1 row)
+
+INSERT 0 1
+ id
+----
+ 62
+(1 row)
+
