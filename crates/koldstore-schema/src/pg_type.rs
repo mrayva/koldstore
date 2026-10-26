@@ -80,6 +80,14 @@ pub enum PgType {
     BoolArray = 31,
     /// `interval`, rendered as ISO 8601 so the text form does not depend on `IntervalStyle`
     Interval = 32,
+    /// `date[]`
+    DateArray = 33,
+    /// `timestamp[]`
+    TimestampArray = 34,
+    /// `timestamptz[]`
+    TimestamptzArray = 35,
+    /// `interval[]`
+    IntervalArray = 36,
 }
 
 /// PostgreSQL integer array type OID.
@@ -161,6 +169,10 @@ impl PgType {
             "uuid[]" => Ok(Self::UuidArray),
             "bool[]" => Ok(Self::BoolArray),
             "interval" => Ok(Self::Interval),
+            "date[]" => Ok(Self::DateArray),
+            "timestamp[]" => Ok(Self::TimestampArray),
+            "timestamptz[]" => Ok(Self::TimestamptzArray),
+            "interval[]" => Ok(Self::IntervalArray),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -208,6 +220,10 @@ impl PgType {
             30 => Some(Self::UuidArray),
             31 => Some(Self::BoolArray),
             32 => Some(Self::Interval),
+            33 => Some(Self::DateArray),
+            34 => Some(Self::TimestampArray),
+            35 => Some(Self::TimestamptzArray),
+            36 => Some(Self::IntervalArray),
             _ => None,
         }
     }
@@ -249,6 +265,10 @@ impl PgType {
             Self::UuidArray => "uuid[]",
             Self::BoolArray => "bool[]",
             Self::Interval => "interval",
+            Self::DateArray => "date[]",
+            Self::TimestampArray => "timestamp[]",
+            Self::TimestamptzArray => "timestamptz[]",
+            Self::IntervalArray => "interval[]",
         }
     }
 
@@ -323,6 +343,10 @@ impl PgType {
             Self::UuidArray => 2951,
             Self::BoolArray => 1000,
             Self::Interval => 1186,
+            Self::DateArray => 1182,
+            Self::TimestampArray => 1115,
+            Self::TimestamptzArray => 1185,
+            Self::IntervalArray => 1187,
         }
     }
 
@@ -486,6 +510,10 @@ mod tests {
             PgType::UuidArray,
             PgType::BoolArray,
             PgType::Interval,
+            PgType::DateArray,
+            PgType::TimestampArray,
+            PgType::TimestamptzArray,
+            PgType::IntervalArray,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

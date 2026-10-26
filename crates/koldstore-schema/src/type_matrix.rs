@@ -81,6 +81,10 @@ impl TypeMatrix {
             "uuid[]",
             "bool[]",
             "interval",
+            "date[]",
+            "timestamp[]",
+            "timestamptz[]",
+            "interval[]",
         ];
         Self {
             entries: supported

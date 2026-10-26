@@ -170,6 +170,10 @@ unsafe fn datum_typed_sql(
         | PgType::NumericArray
         | PgType::UuidArray
         | PgType::BoolArray
+        | PgType::DateArray
+        | PgType::TimestampArray
+        | PgType::TimestamptzArray
+        | PgType::IntervalArray
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp
@@ -381,12 +385,21 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
     // An interval's text form follows the session's IntervalStyle; ISO 8601 is stable and `interval_in`
     // accepts it under every style, so a stored value reads back identically.
-    let saved_style = pg_sys::IntervalStyle;
-    if oid == pg_sys::INTERVALOID {
+    // Dates and timestamps likewise follow DateStyle; ISO output parses back under every style, and a
+    // timestamptz carries its UTC offset, so the instant survives any TimeZone. Array output calls
+    // the element output functions, so the same styles apply to date[], timestamp[], timestamptz[], interval[].
+    let (saved_interval, saved_date) = (pg_sys::IntervalStyle, pg_sys::DateStyle);
+    if oid == pg_sys::INTERVALOID || oid == pg_sys::INTERVALARRAYOID {
         pg_sys::IntervalStyle = pg_sys::INTSTYLE_ISO_8601 as _;
     }
+    if matches!(
+        oid,
+        pg_sys::DATEARRAYOID | pg_sys::TIMESTAMPARRAYOID | pg_sys::TIMESTAMPTZARRAYOID
+    ) {
+        pg_sys::DateStyle = pg_sys::USE_ISO_DATES as _;
+    }
     let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));
-    pg_sys::IntervalStyle = saved_style;
+    (pg_sys::IntervalStyle, pg_sys::DateStyle) = (saved_interval, saved_date);
     text
 }
 

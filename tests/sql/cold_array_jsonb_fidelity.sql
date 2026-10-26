@@ -9,12 +9,12 @@
 
 -- ------------------------------------------------ arrays
 -- Arrays of types koldstore cannot store are refused up front.
-CREATE TABLE sqlreg.arr_int (id bigint PRIMARY KEY, a timestamptz[], n int NOT NULL);
+CREATE TABLE sqlreg.arr_int (id bigint PRIMARY KEY, a money[], n int NOT NULL);
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.arr_int'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
   min_flush_rows => 1, migration_order_by => 'n', auto_flush => false
 ) IS NOT NULL AS int_array_managed;
-CREATE TABLE sqlreg.arr_num (id bigint PRIMARY KEY, a interval[], n int NOT NULL);
+CREATE TABLE sqlreg.arr_num (id bigint PRIMARY KEY, a xml[], n int NOT NULL);
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.arr_num'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
   min_flush_rows => 1, migration_order_by => 'n', auto_flush => false

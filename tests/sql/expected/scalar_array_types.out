@@ -101,4 +101,4 @@ RESET
 (1 row)
 
 CREATE TABLE
-psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: timestamptz[] at line 1 column 391
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: money[] at line 1 column 372

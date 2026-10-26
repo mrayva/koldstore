@@ -1,0 +1,101 @@
+CREATE FUNCTION
+SET
+SET
+CREATE TABLE
+INSERT 0 8
+INSERT 0 52
+SELECT 60
+ ta_managed
+------------
+ t
+(1 row)
+
+SET
+SET
+SET
+ ta_flushed
+------------
+ t
+(1 row)
+
+RESET
+SET
+SET
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id |   d_dims   |  tz_dims
+----+------------+------------
+  5 | [1:2][1:2] | [1:2][1:1]
+  6 | [0:1]      | [-1:0]
+(2 rows)
+
+ d_contains
+------------
+          2
+(1 row)
+
+ d_contains_ctl
+----------------
+              2
+(1 row)
+
+ tz_any
+--------
+      1
+(1 row)
+
+ tz_any_ctl
+------------
+          1
+(1 row)
+
+ cardinality_eq
+----------------
+              2
+(1 row)
+
+SET
+UPDATE 6
+UPDATE 6
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ ta_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ ta_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+RESET
+RESET

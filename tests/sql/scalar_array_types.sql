@@ -79,6 +79,6 @@ SELECT koldstore.unmanage_table('sqlreg.ar'::regclass, true, true) IS NOT NULL A
 SELECT sqlreg.fingerprint('sqlreg.ar', 'id') = sqlreg.fingerprint('sqlreg.ar_ctl', 'id') AS rows_match_after_unmanage;
 
 -- element types whose text form depends on a session setting stay unsupported
-CREATE TABLE sqlreg.ar_ts (id bigint PRIMARY KEY, t timestamptz[]);
+CREATE TABLE sqlreg.ar_ts (id bigint PRIMARY KEY, t money[]);
 SELECT koldstore.manage_table(table_name => 'sqlreg.ar_ts'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
   min_flush_rows => 1, migration_order_by => 'id', auto_flush => false);

@@ -390,9 +390,9 @@ use, and stale cold versions of updated rows never match. The cold side of such 
 filtered scan of the segments that min/max statistics and Bloom filters cannot rule out; list
 the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narrow it. The
 `merge/cold_index_predicates` e2e test pins this against a plain-table reference. One-dimensional `text[]` and
-`smallint[]`, `int[]`, `bigint[]`, `real[]`, `double precision[]`, `numeric[]`, `uuid[]` and `bool[]` are supported, including
+`smallint[]`, `int[]`, `bigint[]`, `real[]`, `double precision[]`, `numeric[]`, `uuid[]`, `bool[]`, `date[]`, `timestamp[]`, `timestamptz[]` and `interval[]` are supported, including
 NULL elements, `NaN`/`Infinity`, explicit lower bounds (`[0:2]={x,y,z}`) and multi-dimensional values (scalar
-arrays: `tests/sql/scalar_array_types.sql`); other array types are rejected at `manage_table`, and a
+arrays: `tests/sql/scalar_array_types.sql`; the temporal ones are stored as ISO text, so values are exact whatever `DateStyle`, `TimeZone` and `IntervalStyle` the flush ran under: `tests/sql/temporal_array_types.sql`); other array types are rejected at `manage_table`, and a
 multi-dimensional `text[]` value fails the flush. Cold reads keep every `jsonb` value, bare JSON strings included
 (`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, with array columns carried as their text
 literal so bounds survive; a JSON `null` in a `jsonb` column still becomes SQL `NULL`.
@@ -404,7 +404,7 @@ A domain over a supported type (nested domains included) is stored as its base t
 migration-order column; the domain's constraints keep applying to the heap, hydrate-on-write included
 (`tests/sql/domain_types.sql`). A domain over an unsupported type is refused like the type itself.
 Still unsupported, and refused by `manage_table`: `money` (its text form depends on `lc_monetary`),
-enums, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays of other element types (`timestamptz[]`, `text`-like or enum arrays, …).
+enums, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays of other element types (`money[]`, enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
