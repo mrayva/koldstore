@@ -236,8 +236,10 @@ unsafe fn hot_row_from_slot(
             let datum = *(*slot).tts_values.add(index);
             if column.pg_type == koldstore_schema::PgType::Enum {
                 // An enum's type OID is per column: take it from the slot's own descriptor.
-                let attr = pg_sys::TupleDescAttr((*slot).tts_tupleDescriptor, index as i32);
-                super::literals::datum_output_text(datum, (*attr).atttypid)
+                let tupdesc = pgrx::PgTupleDesc::from_pg_unchecked((*slot).tts_tupleDescriptor);
+                let type_oid = tupdesc.get(index).map(|attr| attr.atttypid);
+                type_oid
+                    .and_then(|oid| super::literals::datum_output_text(datum, oid))
                     .map_or(CellValue::Null, CellValue::Utf8)
             } else {
                 datum_to_cell_value(datum, column).unwrap_or(CellValue::Null)
