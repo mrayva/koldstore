@@ -1,0 +1,104 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 5
+SELECT 65
+ ar_managed
+------------
+ t
+(1 row)
+
+ ar_flushed
+------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+ pg_typeof  | pg_typeof | pg_typeof | pg_typeof |     pg_typeof      | pg_typeof | pg_typeof | pg_typeof
+------------+-----------+-----------+-----------+--------------------+-----------+-----------+-----------
+ smallint[] | integer[] | bigint[]  | real[]    | double precision[] | numeric[] | uuid[]    | boolean[]
+(1 row)
+
+ id  |      a2       |        a4         |            r8            |    b
+-----+---------------+-------------------+--------------------------+---------
+ 101 | {}            | {}                | {}                       | {}
+ 102 |               |                   |                          |
+ 103 | {{1,2},{3,4}} | {{1,2,3},{4,5,6}} | {{2.5,3.5}}              | {{t,f}}
+ 104 | [0:2]={1,2,3} | [-1:1]={4,5,6}    | [5:5]={9.5}              |
+ 105 |               |                   | {NaN,Infinity,-Infinity} |
+(5 rows)
+
+ any_match
+-----------
+ t
+(1 row)
+
+ contains
+----------
+ t
+(1 row)
+
+ overlaps
+----------
+ t
+(1 row)
+
+ length_and_elem
+-----------------
+ t
+(1 row)
+
+ empty_or_null
+---------------
+ t
+(1 row)
+
+SET
+UPDATE 7
+UPDATE 7
+UPDATE 2
+UPDATE 2
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ ar_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ ar_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: timestamptz[] at line 1 column 391

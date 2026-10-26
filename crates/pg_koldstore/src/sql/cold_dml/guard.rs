@@ -178,8 +178,9 @@ pub(crate) fn cold_only_matching_rows_with_params(
     let relation = super::qualified_relation(table_oid)?;
     let pk_columns = super::primary_key_columns(table_oid)?;
     let sql = format!(
-        "SELECT coalesce(jsonb_agg(jsonb_build_object('r', to_jsonb(t.*), 'k', {})), '[]'::jsonb) \
+        "SELECT coalesce(jsonb_agg(jsonb_build_object('r', {}, 'k', {})), '[]'::jsonb) \
          FROM {} AS t WHERE {where_sql}",
+        super::row_json_sql(table_oid, "t")?,
         super::key_lock::key_sql(&pk_columns, "t"),
         relation.quoted()
     );

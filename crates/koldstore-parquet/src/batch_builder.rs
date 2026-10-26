@@ -278,6 +278,14 @@ impl TypedColumnBuilder {
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Int2Array
+            | PgType::Int4Array
+            | PgType::Int8Array
+            | PgType::Float4Array
+            | PgType::Float8Array
+            | PgType::NumericArray
+            | PgType::UuidArray
+            | PgType::BoolArray
             | PgType::Bytea => Self::Utf8(StringBuilder::new()),
             PgType::Timestamptz => Self::Timestamptz(TimestampMicrosecondBuilder::new()),
             PgType::Timestamp => Self::Timestamp(TimestampMicrosecondBuilder::new()),
@@ -510,6 +518,14 @@ fn plan_value_to_flush_cell(
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Int2Array
+            | PgType::Int4Array
+            | PgType::Int8Array
+            | PgType::Float4Array
+            | PgType::Float8Array
+            | PgType::NumericArray
+            | PgType::UuidArray
+            | PgType::BoolArray
         | PgType::Bytea => Ok(CellValue::Utf8(
             json_string_cell(Some(value))?.expect("non-null"),
         )),

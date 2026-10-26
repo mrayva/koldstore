@@ -77,6 +77,14 @@ unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_s
             | PgType::Bpchar
             | PgType::Time
             | PgType::Timetz
+            | PgType::Int2Array
+            | PgType::Int4Array
+            | PgType::Int8Array
+            | PgType::Float4Array
+            | PgType::Float8Array
+            | PgType::NumericArray
+            | PgType::UuidArray
+            | PgType::BoolArray
             | PgType::Bytea,
             _,
         ) => input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type),
@@ -141,6 +149,14 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Int2Array
+        | PgType::Int4Array
+        | PgType::Int8Array
+        | PgType::Float4Array
+        | PgType::Float8Array
+        | PgType::NumericArray
+        | PgType::UuidArray
+        | PgType::BoolArray
         | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),

@@ -62,6 +62,22 @@ pub enum PgType {
     Time = 22,
     /// `timetz`
     Timetz = 23,
+    /// `int2[]`
+    Int2Array = 24,
+    /// `int4[]`
+    Int4Array = 25,
+    /// `int8[]`
+    Int8Array = 26,
+    /// `float4[]`
+    Float4Array = 27,
+    /// `float8[]`
+    Float8Array = 28,
+    /// `numeric[]`
+    NumericArray = 29,
+    /// `uuid[]`
+    UuidArray = 30,
+    /// `bool[]`
+    BoolArray = 31,
 }
 
 /// PostgreSQL integer array type OID.
@@ -134,6 +150,14 @@ impl PgType {
             "bpchar" => Ok(Self::Bpchar),
             "time" => Ok(Self::Time),
             "timetz" => Ok(Self::Timetz),
+            "int2[]" => Ok(Self::Int2Array),
+            "int4[]" => Ok(Self::Int4Array),
+            "int8[]" => Ok(Self::Int8Array),
+            "float4[]" => Ok(Self::Float4Array),
+            "float8[]" => Ok(Self::Float8Array),
+            "numeric[]" => Ok(Self::NumericArray),
+            "uuid[]" => Ok(Self::UuidArray),
+            "bool[]" => Ok(Self::BoolArray),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -172,6 +196,14 @@ impl PgType {
             21 => Some(Self::Bpchar),
             22 => Some(Self::Time),
             23 => Some(Self::Timetz),
+            24 => Some(Self::Int2Array),
+            25 => Some(Self::Int4Array),
+            26 => Some(Self::Int8Array),
+            27 => Some(Self::Float4Array),
+            28 => Some(Self::Float8Array),
+            29 => Some(Self::NumericArray),
+            30 => Some(Self::UuidArray),
+            31 => Some(Self::BoolArray),
             _ => None,
         }
     }
@@ -204,6 +236,14 @@ impl PgType {
             Self::Bpchar => "bpchar",
             Self::Time => "time",
             Self::Timetz => "timetz",
+            Self::Int2Array => "int2[]",
+            Self::Int4Array => "int4[]",
+            Self::Int8Array => "int8[]",
+            Self::Float4Array => "float4[]",
+            Self::Float8Array => "float8[]",
+            Self::NumericArray => "numeric[]",
+            Self::UuidArray => "uuid[]",
+            Self::BoolArray => "bool[]",
         }
     }
 
@@ -269,6 +309,14 @@ impl PgType {
             Self::Bpchar => 1042,
             Self::Time => 1083,
             Self::Timetz => 1266,
+            Self::Int2Array => 1005,
+            Self::Int4Array => 1007,
+            Self::Int8Array => 1016,
+            Self::Float4Array => 1021,
+            Self::Float8Array => 1022,
+            Self::NumericArray => 1231,
+            Self::UuidArray => 2951,
+            Self::BoolArray => 1000,
         }
     }
 
@@ -423,6 +471,14 @@ mod tests {
             PgType::Bpchar,
             PgType::Time,
             PgType::Timetz,
+            PgType::Int2Array,
+            PgType::Int4Array,
+            PgType::Int8Array,
+            PgType::Float4Array,
+            PgType::Float8Array,
+            PgType::NumericArray,
+            PgType::UuidArray,
+            PgType::BoolArray,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

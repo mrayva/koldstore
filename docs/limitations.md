@@ -389,18 +389,19 @@ indexes) is answered over the merged hot and cold rows, whichever scan types the
 use, and stale cold versions of updated rows never match. The cold side of such a query is a
 filtered scan of the segments that min/max statistics and Bloom filters cannot rule out; list
 the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narrow it. The
-`merge/cold_index_predicates` e2e test pins this against a plain-table reference. Arrays are
-supported only as one-dimensional `text[]`; other array types are rejected at `manage_table`,
-and a multi-dimensional `text[]` value fails the flush. Cold reads keep a `text[]`'s explicit lower
-bound (`[0:2]={x,y,z}`) and every `jsonb` value, bare JSON strings included
-(`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, so it renumbers a `text[]`'s
-lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
+`merge/cold_index_predicates` e2e test pins this against a plain-table reference. One-dimensional `text[]` and
+`smallint[]`, `int[]`, `bigint[]`, `real[]`, `double precision[]`, `numeric[]`, `uuid[]` and `bool[]` are supported, including
+NULL elements, `NaN`/`Infinity`, explicit lower bounds (`[0:2]={x,y,z}`) and multi-dimensional values (scalar
+arrays: `tests/sql/scalar_array_types.sql`); other array types are rejected at `manage_table`, and a
+multi-dimensional `text[]` value fails the flush. Cold reads keep every `jsonb` value, bare JSON strings included
+(`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, with array columns carried as their text
+literal so bounds survive; a JSON `null` in a `jsonb` column still becomes SQL `NULL`.
 
 `json`, `inet`, `cidr`, `macaddr`, `char(n)`, `time` and `timetz` are managed the same way, as their text
 form, so a cold read returns exactly what was stored (`json` keeps its whitespace and key order; `char(n)` keeps its
 padding; `tests/sql/text_form_types.sql`). They carry no min/max statistics and cannot be a migration-order column.
 Still unsupported, and refused by `manage_table`: `interval` (its text form depends on `IntervalStyle`), `money`,
-enums, domains, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays other than `text[]`.
+enums, domains, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays of other element types (`timestamptz[]`, `text`-like or enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold

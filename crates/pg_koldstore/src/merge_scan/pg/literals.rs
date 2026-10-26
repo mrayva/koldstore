@@ -161,6 +161,14 @@ unsafe fn datum_typed_sql(
         | PgType::Bpchar
         | PgType::Time
         | PgType::Timetz
+        | PgType::Int2Array
+        | PgType::Int4Array
+        | PgType::Int8Array
+        | PgType::Float4Array
+        | PgType::Float8Array
+        | PgType::NumericArray
+        | PgType::UuidArray
+        | PgType::BoolArray
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp

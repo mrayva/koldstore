@@ -8,13 +8,13 @@
 \set ON_ERROR_STOP off
 
 -- ------------------------------------------------ arrays
--- Only one-dimensional text[] is supported; every other array type is refused up front.
-CREATE TABLE sqlreg.arr_int (id bigint PRIMARY KEY, a int[], n int NOT NULL);
+-- Arrays of types koldstore cannot store are refused up front.
+CREATE TABLE sqlreg.arr_int (id bigint PRIMARY KEY, a timestamptz[], n int NOT NULL);
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.arr_int'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
   min_flush_rows => 1, migration_order_by => 'n', auto_flush => false
 ) IS NOT NULL AS int_array_managed;
-CREATE TABLE sqlreg.arr_num (id bigint PRIMARY KEY, a numeric[], n int NOT NULL);
+CREATE TABLE sqlreg.arr_num (id bigint PRIMARY KEY, a interval[], n int NOT NULL);
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.arr_num'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
   min_flush_rows => 1, migration_order_by => 'n', auto_flush => false
@@ -48,8 +48,7 @@ SELECT count(*) AS arrfid_rows FROM sqlreg.arrfid;
 SET koldstore.hydrate_on_write = on;
 UPDATE sqlreg.arrfid SET n = n;
 RESET koldstore.hydrate_on_write;
--- Hydration goes through to_jsonb(row) -> jsonb_populate_recordset, and a JSON array has no lower bound:
--- elements, NULL elements and escaping survive, explicit bounds are renumbered from 1 (documented limitation).
+-- Hydration carries array columns as their text literal, so explicit lower bounds survive too.
 SELECT a.id, a.ta::text AS hydrated, b.ta::text AS expected
 FROM sqlreg.arrfid a JOIN sqlreg.arrfid_ctl b USING (id)
 WHERE (SELECT array_agg(e) FROM unnest(a.ta) e) IS DISTINCT FROM (SELECT array_agg(e) FROM unnest(b.ta) e)

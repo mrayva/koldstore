@@ -30,7 +30,15 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Macaddr
         | PgType::Bpchar
         | PgType::Time
-        | PgType::Timetz => {
+        | PgType::Timetz
+        | PgType::Int2Array
+        | PgType::Int4Array
+        | PgType::Int8Array
+        | PgType::Float4Array
+        | PgType::Float8Array
+        | PgType::NumericArray
+        | PgType::UuidArray
+        | PgType::BoolArray => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -203,6 +211,14 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Cidr => CellValue::Utf8("0.0.0.0/0".to_string()),
         PgType::Macaddr => CellValue::Utf8("00:00:00:00:00:00".to_string()),
         PgType::Time | PgType::Timetz => CellValue::Utf8("00:00:00".to_string()),
+        PgType::Int2Array => CellValue::Utf8("{}".to_string()),
+        PgType::Int4Array => CellValue::Utf8("{}".to_string()),
+        PgType::Int8Array => CellValue::Utf8("{}".to_string()),
+        PgType::Float4Array => CellValue::Utf8("{}".to_string()),
+        PgType::Float8Array => CellValue::Utf8("{}".to_string()),
+        PgType::NumericArray => CellValue::Utf8("{}".to_string()),
+        PgType::UuidArray => CellValue::Utf8("{}".to_string()),
+        PgType::BoolArray => CellValue::Utf8("{}".to_string()),
         PgType::Json => CellValue::Utf8("null".to_string()),
         PgType::Text
         | PgType::Jsonb
@@ -253,7 +269,15 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::Macaddr
             | PgType::Bpchar
             | PgType::Time
-            | PgType::Timetz,
+            | PgType::Timetz
+            | PgType::Int2Array
+            | PgType::Int4Array
+            | PgType::Int8Array
+            | PgType::Float4Array
+            | PgType::Float8Array
+            | PgType::NumericArray
+            | PgType::UuidArray
+            | PgType::BoolArray,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -491,7 +515,15 @@ fn read_column(
         | PgType::Macaddr
         | PgType::Bpchar
         | PgType::Time
-        | PgType::Timetz => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+        | PgType::Timetz
+        | PgType::Int2Array
+        | PgType::Int4Array
+        | PgType::Int8Array
+        | PgType::Float4Array
+        | PgType::Float8Array
+        | PgType::NumericArray
+        | PgType::UuidArray
+        | PgType::BoolArray => match tuple.get::<pgrx::AnyElement>(ordinal)? {
             Some(element) => {
                 let datum = element.datum();
                 // SAFETY: `datum` is a non-null value of this column's type read from this tuple.

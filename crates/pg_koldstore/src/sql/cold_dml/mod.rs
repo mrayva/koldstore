@@ -274,7 +274,11 @@ fn locate_row_json(
         return Ok(None);
     }
 
-    let locate_sql = format!("SELECT to_jsonb(t.*) FROM {quoted} AS t WHERE {}", lookup.predicate);
+    let locate_sql = format!(
+        "SELECT {} FROM {quoted} AS t WHERE {}",
+        row_json_sql(table_oid, "t")?,
+        lookup.predicate
+    );
     let mut locate_args = vec![DatumWithOid::from(pgrx::JsonB(pk_json.clone()))];
     locate_args.extend(lookup.temporal.iter().map(TemporalKeyBind::datum));
     // `get_one_with_args` positions its cursor at row 0 unconditionally
@@ -311,6 +315,27 @@ fn insertable_columns(table_oid: pgrx::pg_sys::Oid) -> Result<String, String> {
     })
     .map_err(|error| error.to_string())?;
     columns.ok_or_else(|| "hydrate: table has no insertable columns".to_string())
+}
+
+/// SQL for "the row aliased `alias` as a jsonb object", with each array column carried as its text
+/// literal. `to_jsonb` would turn an array into a JSON array, which loses a custom lower bound
+/// (`[0:2]={..}`) when `jsonb_populate_record` rebuilds it; the literal round-trips exactly.
+#[cfg(feature = "pg")]
+pub(crate) fn row_json_sql(table_oid: pgrx::pg_sys::Oid, alias: &str) -> Result<String, String> {
+    let args = [DatumWithOid::from(table_oid), DatumWithOid::from(alias.to_string())];
+    let overrides = crate::txn_writes::with_check_suppressed(|| {
+        pgrx::Spi::get_one_with_args::<String>(
+            "SELECT string_agg(format('%L, %I.%I::text', a.attname, $2, a.attname), ', ' ORDER BY a.attnum) \
+             FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+             WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND t.typcategory = 'A'",
+            &args,
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(match overrides {
+        Some(pairs) => format!("(to_jsonb({alias}.*) || jsonb_build_object({pairs}))"),
+        None => format!("to_jsonb({alias}.*)"),
+    })
 }
 
 /// Materializes `pk` into the heap from cold storage if it is not already a
@@ -497,11 +522,12 @@ fn update_row_impl(
         .collect::<Vec<_>>()
         .join(", ");
 
+    let row_json = row_json_sql(table_oid, "t")?;
     let update_sql = format!(
         "WITH pk AS (SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1)) \
          UPDATE {quoted} AS t \
          SET ({col_list}) = ( \
-           SELECT {col_list} FROM jsonb_populate_record(NULL::{quoted}, to_jsonb(t.*) || $2::jsonb) \
+           SELECT {col_list} FROM jsonb_populate_record(NULL::{quoted}, {row_json} || $2::jsonb) \
          ) \
          FROM pk \
          WHERE {predicate}"

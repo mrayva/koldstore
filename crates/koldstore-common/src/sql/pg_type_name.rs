@@ -12,6 +12,10 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    // `numeric(10,2)[]`, `integer[]`, ...: canonicalize the element type, keep the array suffix.
+    if let Some(element) = normalized.strip_suffix("[]") {
+        return format!("{}[]", canonical_postgres_type_name(element));
+    }
     if normalized == "timestamp with time zone" {
         return "timestamptz".to_string();
     }
