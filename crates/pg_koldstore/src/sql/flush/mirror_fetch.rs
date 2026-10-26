@@ -511,9 +511,15 @@ fn read_column(
                 let header = array.into_array_type();
                 let ndim = unsafe { (*header).ndim };
                 if ndim > 1 {
-                    pgrx::error!(
-                        "multi-dimensional text[] columns cannot be flushed to cold storage"
-                    );
+                    // A multi-dimensional array keeps its shape (and any bounds) in `array_out`'s text.
+                    // SAFETY: `header` is the detoasted `text[]` datum read from this tuple.
+                    let text = unsafe {
+                        crate::merge_scan::pg::literals::datum_output_text(
+                            pgrx::pg_sys::Datum::from(header),
+                            pgrx::pg_sys::TEXTARRAYOID,
+                        )
+                    };
+                    return Ok(text.map_or(CellValue::Null, CellValue::Utf8));
                 }
                 // SAFETY: as above; a one-dimensional array stores its lower bound right after its
                 // dimension length, both `int`s following the 16-byte `ArrayType` header.

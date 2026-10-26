@@ -392,8 +392,7 @@ the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narro
 `merge/cold_index_predicates` e2e test pins this against a plain-table reference. One-dimensional `text[]` and
 `smallint[]`, `int[]`, `bigint[]`, `real[]`, `double precision[]`, `numeric[]`, `uuid[]`, `bool[]`, `date[]`, `timestamp[]`, `timestamptz[]` and `interval[]` are supported, including
 NULL elements, `NaN`/`Infinity`, explicit lower bounds (`[0:2]={x,y,z}`) and multi-dimensional values (scalar
-arrays: `tests/sql/scalar_array_types.sql`; the temporal ones are stored as ISO text, so values are exact whatever `DateStyle`, `TimeZone` and `IntervalStyle` the flush ran under: `tests/sql/temporal_array_types.sql`); other array types are rejected at `manage_table`, and a
-multi-dimensional `text[]` value fails the flush. Cold reads keep every `jsonb` value, bare JSON strings included
+arrays: `tests/sql/scalar_array_types.sql`; the temporal ones are stored as ISO text, so values are exact whatever `DateStyle`, `TimeZone` and `IntervalStyle` the flush ran under: `tests/sql/temporal_array_types.sql`); other array types are rejected at `manage_table`. A multi-dimensional `text[]` is stored as its `array_out` text, so shape and bounds survive (`cold_array_jsonb_fidelity`), but a segment holding one gets no term filter for that column, so `@>`/`&&` predicates read that segment in full. Cold reads keep every `jsonb` value, bare JSON strings included
 (`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, with array columns carried as their text
 literal so bounds survive; a JSON `null` in a `jsonb` column still becomes SQL `NULL`.
 

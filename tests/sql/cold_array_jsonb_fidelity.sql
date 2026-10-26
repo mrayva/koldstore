@@ -56,16 +56,33 @@ WHERE (SELECT array_agg(e) FROM unnest(a.ta) e) IS DISTINCT FROM (SELECT array_a
 ORDER BY a.id;
 SELECT id, array_dims(ta) AS hydrated_dims FROM sqlreg.arrfid WHERE id IN (1, 6) ORDER BY id;
 
--- a multi-dimensional text[] must not be silently flattened
-CREATE TABLE sqlreg.arr_md (id bigint PRIMARY KEY, ta text[], n int NOT NULL);
+-- a multi-dimensional text[] keeps its shape, bounds, NULL elements and awkward text
+CREATE TABLE sqlreg.arr_md (id bigint PRIMARY KEY, ta text[], n int NOT NULL, tag text);
+INSERT INTO sqlreg.arr_md (id, ta, n) VALUES
+  (1, '{{a,b},{c,d}}', 1),
+  (2, '{x}', 2),
+  (3, '{{{1,2},{3,4}},{{5,NULL},{"q\"uote","comma,here"}}}', 3),
+  (4, '[0:1][2:3]={{a,b},{c,d}}', 4),
+  (5, '{{}}', 5),
+  (6, NULL, 6),
+  (7, '{{"",NULL}}', 7);
+CREATE TABLE sqlreg.arr_md_ctl AS SELECT * FROM sqlreg.arr_md;
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.arr_md'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
   min_flush_rows => 1, migration_order_by => 'n', auto_flush => false
 ) IS NOT NULL AS md_managed;
-INSERT INTO sqlreg.arr_md VALUES (1, '{{a,b},{c,d}}', 1), (2, '{x}', 2);
 SELECT sqlreg.flush_table('sqlreg.arr_md'::regclass) IS NOT NULL AS md_flush_returned;
-SELECT id, ta::text AS md_value, array_dims(ta) AS md_dims FROM sqlreg.arr_md ORDER BY id;
 SELECT (koldstore.table_status('sqlreg.arr_md'::regclass) ->> 'cold_row_count')::int AS md_cold_rows;
+SELECT id, ta::text AS md_value, array_dims(ta) AS md_dims FROM sqlreg.arr_md ORDER BY id;
+SELECT a.id FROM sqlreg.arr_md a JOIN sqlreg.arr_md_ctl b USING (id) WHERE a.ta::text IS DISTINCT FROM b.ta::text ORDER BY a.id;
+SELECT count(*) AS md_contains FROM sqlreg.arr_md WHERE ta @> ARRAY['a'];
+SELECT count(*) AS md_contains_ctl FROM sqlreg.arr_md_ctl WHERE ta @> ARRAY['a'];
+SET koldstore.hydrate_on_write = on;
+UPDATE sqlreg.arr_md SET tag = 'changed' WHERE id IN (1, 3, 4);
+UPDATE sqlreg.arr_md_ctl SET tag = 'changed' WHERE id IN (1, 3, 4);
+RESET koldstore.hydrate_on_write;
+SELECT a.id FROM sqlreg.arr_md a FULL JOIN sqlreg.arr_md_ctl b USING (id)
+WHERE a.ta::text IS DISTINCT FROM b.ta::text OR a.tag IS DISTINCT FROM b.tag ORDER BY a.id;
 
 -- ------------------------------------------------ jsonb
 CREATE TABLE sqlreg.jsfid (id bigint PRIMARY KEY, data jsonb, n int NOT NULL);
