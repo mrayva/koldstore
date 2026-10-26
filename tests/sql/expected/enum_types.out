@@ -1,0 +1,129 @@
+CREATE FUNCTION
+CREATE TYPE
+CREATE TYPE
+CREATE TABLE
+INSERT 0 5
+INSERT 0 55
+SELECT 60
+ en_managed
+------------
+ t
+(1 row)
+
+ en_flushed
+------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+   m_type    |    l_type
+-------------+--------------
+ sqlreg.mood | sqlreg.level
+(1 row)
+
+ gt_ok
+-------
+    30
+(1 row)
+
+ gt_ok_ctl
+-----------
+        30
+(1 row)
+
+ eq_happy
+----------
+       15
+(1 row)
+
+ eq_happy_ctl
+--------------
+           15
+(1 row)
+
+ in_two
+--------
+     30
+(1 row)
+
+ in_two_ctl
+------------
+         30
+(1 row)
+
+ id
+----
+  5
+(1 row)
+
+     m      | count
+------------+-------
+ sad        |    15
+ ok         |    14
+ happy      |    15
+ it's "odd" |    15
+            |     1
+(5 rows)
+
+   max_m    | min_m
+------------+-------
+ it's "odd" | sad
+(1 row)
+
+ALTER TYPE
+ALTER TYPE
+INSERT 0 2
+INSERT 0 2
+ id |     m
+----+------------
+  4 | it's "odd"
+  7 | it's "odd"
+ 11 | it's "odd"
+(3 rows)
+
+SET
+UPDATE 3
+UPDATE 3
+UPDATE 2
+UPDATE 2
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ en_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ en_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: primary key column `m` is an enum, which is not supported as a key
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: sqlreg.level[] at line 1 column 380

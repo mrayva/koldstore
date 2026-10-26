@@ -295,7 +295,7 @@ impl TypedColumnBuilder {
             | PgType::Varbit
             | PgType::Macaddr8
             | PgType::Name
-            | PgType::Oid
+            | PgType::Oid | PgType::Enum
             | PgType::Bytea => Self::Utf8(StringBuilder::new()),
             PgType::Timestamptz => Self::Timestamptz(TimestampMicrosecondBuilder::new()),
             PgType::Timestamp => Self::Timestamp(TimestampMicrosecondBuilder::new()),
@@ -545,7 +545,7 @@ fn plan_value_to_flush_cell(
             | PgType::Varbit
             | PgType::Macaddr8
             | PgType::Name
-            | PgType::Oid
+            | PgType::Oid | PgType::Enum
         | PgType::Bytea => Ok(CellValue::Utf8(
             json_string_cell(Some(value))?.expect("non-null"),
         )),

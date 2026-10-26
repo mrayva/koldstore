@@ -98,6 +98,8 @@ pub enum PgType {
     Name = 40,
     /// `oid`
     Oid = 41,
+    /// A user-defined enum, stored as its label; the type OID is per column.
+    Enum = 42,
 }
 
 /// PostgreSQL integer array type OID.
@@ -188,6 +190,7 @@ impl PgType {
             "macaddr8" => Ok(Self::Macaddr8),
             "name" => Ok(Self::Name),
             "oid" => Ok(Self::Oid),
+            "enum" => Ok(Self::Enum),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -244,6 +247,7 @@ impl PgType {
             39 => Some(Self::Macaddr8),
             40 => Some(Self::Name),
             41 => Some(Self::Oid),
+            42 => Some(Self::Enum),
             _ => None,
         }
     }
@@ -294,6 +298,7 @@ impl PgType {
             Self::Macaddr8 => "macaddr8",
             Self::Name => "name",
             Self::Oid => "oid",
+            Self::Enum => "enum",
         }
     }
 
@@ -377,6 +382,8 @@ impl PgType {
             Self::Macaddr8 => 774,
             Self::Name => 19,
             Self::Oid => 26,
+            // Enums have no fixed OID; callers resolve the column's own type.
+            Self::Enum => 0,
         }
     }
 
@@ -549,6 +556,7 @@ mod tests {
             PgType::Macaddr8,
             PgType::Name,
             PgType::Oid,
+            PgType::Enum,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

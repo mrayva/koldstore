@@ -17,6 +17,8 @@ pub(super) struct ScanProjectionColumn {
     pub(super) catalog: koldstore_migrate::order::CatalogColumn,
     /// Zero-based position in the base relation's scan tuple.
     pub(super) slot_index: usize,
+    /// The base column's own type OID; only set for enums, whose OID differs per column.
+    pub(super) type_oid: pg_sys::Oid,
 }
 
 /// Minimal base-relation projection used to build tuples for PostgreSQL `ExecScan`.
@@ -71,6 +73,7 @@ pub(super) fn physical_scan_projection(
         projection.push(ScanProjectionColumn {
             catalog: column.clone(),
             slot_index,
+            type_oid: pg_sys::InvalidOid,
         });
     }
     Ok(ScanProjection {
@@ -154,6 +157,7 @@ pub(super) unsafe fn required_scan_projection(
         projection.push(ScanProjectionColumn {
             catalog: column.clone(),
             slot_index,
+            type_oid: pg_sys::InvalidOid,
         });
     }
 

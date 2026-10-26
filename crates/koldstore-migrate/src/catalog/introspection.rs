@@ -92,7 +92,8 @@ SELECT COALESCE(
         jsonb_build_object(
             'column_id', a.attnum,
             'name', a.attname,
-            'type_name', format_type(base.typid, base.typmod),
+            'type_name', CASE WHEN EXISTS (SELECT 1 FROM pg_type e WHERE e.oid = base.typid AND e.typtype = 'e')
+                           THEN 'enum' ELSE format_type(base.typid, base.typmod) END,
             'is_primary_key', pk.attnum IS NOT NULL,
             'nullable', NOT a.attnotnull,
             'identity', a.attidentity <> '',

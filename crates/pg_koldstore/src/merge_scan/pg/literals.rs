@@ -143,6 +143,8 @@ unsafe fn datum_typed_sql(
 ) -> Option<String> {
     let pg_type = column.pg_type;
     match pg_type {
+        // An enum's type OID is per column and not carried here: leave the predicate to the executor.
+        PgType::Enum => None,
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
@@ -337,6 +339,9 @@ unsafe fn datum_json_value_via_output(
     datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
 ) -> Option<serde_json::Value> {
+    if column.pg_type == PgType::Enum {
+        return None;
+    }
     let mut typoutput = pg_sys::InvalidOid;
     let mut typisvarlena = false;
     let oid = column_type_oid(column.pg_type);

@@ -48,7 +48,7 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid => {
+        | PgType::Oid | PgType::Enum => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -238,7 +238,7 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid => CellValue::Utf8("{}".to_string()),
+        | PgType::Oid | PgType::Enum => CellValue::Utf8("{}".to_string()),
         PgType::Json => CellValue::Utf8("null".to_string()),
         PgType::Text
         | PgType::Jsonb
@@ -307,7 +307,7 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::Varbit
             | PgType::Macaddr8
             | PgType::Name
-            | PgType::Oid,
+            | PgType::Oid | PgType::Enum,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -563,14 +563,21 @@ fn read_column(
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+        | PgType::Oid
+        | PgType::Enum => match tuple.get::<pgrx::AnyElement>(ordinal)? {
             Some(element) => {
                 let datum = element.datum();
+                // Enums carry their own per-column type OID; the others have a fixed one.
+                let type_oid = if column.pg_type == PgType::Enum {
+                    element.oid()
+                } else {
+                    pgrx::pg_sys::Oid::from(column.pg_type.type_oid())
+                };
                 // SAFETY: `datum` is a non-null value of this column's type read from this tuple.
                 let text = unsafe {
                     crate::merge_scan::pg::literals::datum_output_text(
                         datum,
-                        pgrx::pg_sys::Oid::from(column.pg_type.type_oid()),
+                        type_oid,
                     )
                 };
                 CellValue::Utf8(text.unwrap_or_else(|| {

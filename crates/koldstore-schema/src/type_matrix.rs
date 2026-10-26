@@ -90,6 +90,7 @@ impl TypeMatrix {
             "macaddr8",
             "name",
             "oid",
+            "enum",
         ];
         Self {
             entries: supported

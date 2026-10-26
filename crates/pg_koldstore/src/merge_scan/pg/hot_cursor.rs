@@ -234,7 +234,14 @@ unsafe fn hot_row_from_slot(
             CellValue::Null
         } else {
             let datum = *(*slot).tts_values.add(index);
-            datum_to_cell_value(datum, column).unwrap_or(CellValue::Null)
+            if column.pg_type == koldstore_schema::PgType::Enum {
+                // An enum's type OID is per column: take it from the slot's own descriptor.
+                let attr = pg_sys::TupleDescAttr((*slot).tts_tupleDescriptor, index as i32);
+                super::literals::datum_output_text(datum, (*attr).atttypid)
+                    .map_or(CellValue::Null, CellValue::Utf8)
+            } else {
+                datum_to_cell_value(datum, column).unwrap_or(CellValue::Null)
+            }
         };
         if let Some(pk) = pk_columns
             .iter()

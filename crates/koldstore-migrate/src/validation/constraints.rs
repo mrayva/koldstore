@@ -89,6 +89,9 @@ pub enum MigrationConstraintError {
     /// Explicit migration ordering names a column absent from the table.
     #[error("migration order column `{0}` does not exist")]
     MissingOrderColumn(String),
+    /// Enum primary keys cannot be paged by the flush keyset.
+    #[error("primary key column `{0}` is an enum, which is not supported as a key")]
+    EnumPrimaryKey(String),
     /// Segment order column must be physically present and non-null.
     #[error("segment order column `{0}` must be NOT NULL")]
     NullableSegmentOrderColumn(String),
@@ -421,10 +424,13 @@ impl MigrationValidationInput {
             return Err(MigrationConstraintError::ExpressionPrimaryKey);
         }
         for pk_column in &self.primary_key {
-            if !self.columns.iter().any(|column| column.name == *pk_column) {
+            let Some(column) = self.columns.iter().find(|column| column.name == *pk_column) else {
                 return Err(MigrationConstraintError::MissingPrimaryKeyColumn(
                     pk_column.clone(),
                 ));
+            };
+            if column.pg_type == Some(PgType::Enum) {
+                return Err(MigrationConstraintError::EnumPrimaryKey(pk_column.clone()));
             }
         }
         Ok(())

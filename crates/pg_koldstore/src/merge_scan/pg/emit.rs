@@ -34,14 +34,24 @@ pub(super) unsafe fn materialize_scan_row_from_image(
             is_null.push(true);
             continue;
         }
-        values.push(cell_value_to_datum(value, projected.catalog.pg_type)?);
+        values.push(cell_value_to_datum(value, projected.catalog.pg_type, projected.type_oid)?);
         is_null.push(false);
     }
     Ok(MaterializedRow { values, is_null })
 }
 
-unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_sys::Datum, String> {
+unsafe fn cell_value_to_datum(
+    value: &CellValue,
+    pg_type: PgType,
+    type_oid: pg_sys::Oid,
+) -> Result<pg_sys::Datum, String> {
     match (pg_type, value) {
+        (PgType::Enum, _) => {
+            if type_oid == pg_sys::InvalidOid {
+                return Err("enum column has no resolved type OID".to_string());
+            }
+            input_datum_from_text_oid(&cell_input_text(value, pg_type)?, type_oid)
+        }
         (PgType::Bool, CellValue::Bool(flag)) => Ok(pg_sys::Datum::from(*flag)),
         (PgType::Int2, cell) => {
             let number = cell_i64(cell)?;
@@ -177,6 +187,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Macaddr8
         | PgType::Name
         | PgType::Oid
+        | PgType::Enum
         | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),
@@ -221,6 +232,10 @@ unsafe fn input_datum_from_text(text: &str, pg_type: PgType) -> Result<pg_sys::D
         PgType::Vector => super::literals::vector_type_oid(),
         _ => pg_sys::Oid::from(pg_type.type_oid()),
     };
+    input_datum_from_text_oid(text, type_oid)
+}
+
+unsafe fn input_datum_from_text_oid(text: &str, type_oid: pg_sys::Oid) -> Result<pg_sys::Datum, String> {
     let mut typinput = pg_sys::InvalidOid;
     let mut typioparam = pg_sys::InvalidOid;
     pg_sys::getTypeInputInfo(type_oid, &mut typinput, &mut typioparam);

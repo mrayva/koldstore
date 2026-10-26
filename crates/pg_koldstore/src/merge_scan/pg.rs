@@ -1081,7 +1081,7 @@ unsafe fn initialize_fallback_scan(
     let tuple_width = unsafe { slot_attribute_count((*node).ss.ss_ScanTupleSlot) }
         .unwrap_or_else(|| pgrx::error!("{CUSTOM_PATH_NAME} scan tuple descriptor is unavailable"));
     let custom_scan = plan.cast::<pg_sys::CustomScan>();
-    let scan_projection = unsafe {
+    let mut scan_projection = unsafe {
         if !custom_scan.is_null() && !(*custom_scan).custom_scan_tlist.is_null() {
             // After setrefs, targetlist/qual Vars are INDEX_VAR against
             // custom_scan_tlist. pull_varattnos(scanrelid) would see nothing;
@@ -1092,6 +1092,12 @@ unsafe fn initialize_fallback_scan(
         }
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
+    for column in &mut scan_projection.columns {
+        if column.catalog.pg_type == koldstore_schema::PgType::Enum {
+            // SAFETY: a syscache lookup of a column of the relation being scanned.
+            column.type_oid = unsafe { pg_sys::get_atttype(table_oid, (column.slot_index + 1) as i16) };
+        }
+    }
     let residual = unsafe { residual_filters(scanrelid, qual, &catalog, params) };
     // Hot heap is current-state only, so PK + scope equality and PK range
     // predicates can be pushed into the SPI load. Mutable columns stay residual
