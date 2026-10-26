@@ -174,6 +174,11 @@ unsafe fn datum_typed_sql(
         | PgType::TimestampArray
         | PgType::TimestamptzArray
         | PgType::IntervalArray
+        | PgType::Bit
+        | PgType::Varbit
+        | PgType::Macaddr8
+        | PgType::Name
+        | PgType::Oid
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp

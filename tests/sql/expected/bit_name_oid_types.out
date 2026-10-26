@@ -1,0 +1,98 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 5
+INSERT 0 55
+SELECT 60
+ bno_managed
+-------------
+ t
+(1 row)
+
+ bno_flushed
+-------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id | vb_len | b_len | nm_len
+----+--------+-------+--------
+  1 |      1 |     8 |      5
+  2 |      0 |     8 |      4
+  3 |      4 |     8 |     63
+  5 |     70 |     8 |     14
+(4 rows)
+
+ b_eq
+------
+    1
+(1 row)
+
+ b_eq_ctl
+----------
+        1
+(1 row)
+
+ o_big
+-------
+     1
+(1 row)
+
+ o_big_ctl
+-----------
+         1
+(1 row)
+
+ id
+----
+  2
+(1 row)
+
+ m8_eq
+-------
+     1
+(1 row)
+
+SET
+UPDATE 4
+UPDATE 4
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ bno_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ bno_unmanaged
+---------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+

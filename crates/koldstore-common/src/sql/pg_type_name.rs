@@ -56,6 +56,7 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
         "real" => "float4".to_string(),
         "double precision" => "float8".to_string(),
         "character varying" => "varchar".to_string(),
+        "bit varying" => "varbit".to_string(),
         "character" | "bpchar" => "bpchar".to_string(),
         "timestamp with time zone" => "timestamptz".to_string(),
         _ => normalized,

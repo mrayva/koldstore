@@ -43,7 +43,12 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::DateArray
         | PgType::TimestampArray
         | PgType::TimestamptzArray
-        | PgType::IntervalArray => {
+        | PgType::IntervalArray
+        | PgType::Bit
+        | PgType::Varbit
+        | PgType::Macaddr8
+        | PgType::Name
+        | PgType::Oid => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -228,7 +233,12 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         | PgType::DateArray
         | PgType::TimestampArray
         | PgType::TimestamptzArray
-        | PgType::IntervalArray => CellValue::Utf8("{}".to_string()),
+        | PgType::IntervalArray
+        | PgType::Bit
+        | PgType::Varbit
+        | PgType::Macaddr8
+        | PgType::Name
+        | PgType::Oid => CellValue::Utf8("{}".to_string()),
         PgType::Json => CellValue::Utf8("null".to_string()),
         PgType::Text
         | PgType::Jsonb
@@ -292,7 +302,12 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::DateArray
             | PgType::TimestampArray
             | PgType::TimestamptzArray
-            | PgType::IntervalArray,
+            | PgType::IntervalArray
+            | PgType::Bit
+            | PgType::Varbit
+            | PgType::Macaddr8
+            | PgType::Name
+            | PgType::Oid,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -543,7 +558,12 @@ fn read_column(
         | PgType::DateArray
         | PgType::TimestampArray
         | PgType::TimestamptzArray
-        | PgType::IntervalArray => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+        | PgType::IntervalArray
+        | PgType::Bit
+        | PgType::Varbit
+        | PgType::Macaddr8
+        | PgType::Name
+        | PgType::Oid => match tuple.get::<pgrx::AnyElement>(ordinal)? {
             Some(element) => {
                 let datum = element.datum();
                 // SAFETY: `datum` is a non-null value of this column's type read from this tuple.

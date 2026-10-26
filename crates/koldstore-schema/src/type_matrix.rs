@@ -85,6 +85,11 @@ impl TypeMatrix {
             "timestamp[]",
             "timestamptz[]",
             "interval[]",
+            "bit",
+            "varbit",
+            "macaddr8",
+            "name",
+            "oid",
         ];
         Self {
             entries: supported

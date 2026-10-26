@@ -88,6 +88,16 @@ pub enum PgType {
     TimestamptzArray = 35,
     /// `interval[]`
     IntervalArray = 36,
+    /// `bit(n)`
+    Bit = 37,
+    /// `bit varying(n)`
+    Varbit = 38,
+    /// `macaddr8`
+    Macaddr8 = 39,
+    /// `name`
+    Name = 40,
+    /// `oid`
+    Oid = 41,
 }
 
 /// PostgreSQL integer array type OID.
@@ -173,6 +183,11 @@ impl PgType {
             "timestamp[]" => Ok(Self::TimestampArray),
             "timestamptz[]" => Ok(Self::TimestamptzArray),
             "interval[]" => Ok(Self::IntervalArray),
+            "bit" => Ok(Self::Bit),
+            "varbit" => Ok(Self::Varbit),
+            "macaddr8" => Ok(Self::Macaddr8),
+            "name" => Ok(Self::Name),
+            "oid" => Ok(Self::Oid),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -224,6 +239,11 @@ impl PgType {
             34 => Some(Self::TimestampArray),
             35 => Some(Self::TimestamptzArray),
             36 => Some(Self::IntervalArray),
+            37 => Some(Self::Bit),
+            38 => Some(Self::Varbit),
+            39 => Some(Self::Macaddr8),
+            40 => Some(Self::Name),
+            41 => Some(Self::Oid),
             _ => None,
         }
     }
@@ -269,6 +289,11 @@ impl PgType {
             Self::TimestampArray => "timestamp[]",
             Self::TimestamptzArray => "timestamptz[]",
             Self::IntervalArray => "interval[]",
+            Self::Bit => "bit",
+            Self::Varbit => "varbit",
+            Self::Macaddr8 => "macaddr8",
+            Self::Name => "name",
+            Self::Oid => "oid",
         }
     }
 
@@ -347,6 +372,11 @@ impl PgType {
             Self::TimestampArray => 1115,
             Self::TimestamptzArray => 1185,
             Self::IntervalArray => 1187,
+            Self::Bit => 1560,
+            Self::Varbit => 1562,
+            Self::Macaddr8 => 774,
+            Self::Name => 19,
+            Self::Oid => 26,
         }
     }
 
@@ -514,6 +544,11 @@ mod tests {
             PgType::TimestampArray,
             PgType::TimestamptzArray,
             PgType::IntervalArray,
+            PgType::Bit,
+            PgType::Varbit,
+            PgType::Macaddr8,
+            PgType::Name,
+            PgType::Oid,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),
