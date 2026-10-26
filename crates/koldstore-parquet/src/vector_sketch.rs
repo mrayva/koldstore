@@ -117,6 +117,28 @@ impl BallBuilder {
     }
 }
 
+/// Rebuilds the sketch flush would have written for the `vector` column of a segment object that predates
+/// the column's listing in `pruning_columns`.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be read or lacks the column.
+pub fn rebuild_vector_sketch_from_parquet(
+    data: impl Into<bytes::Bytes>,
+    column: &str,
+) -> Result<crate::term_filter::RebuiltColumnSummary, String> {
+    let mut builder = VectorSketchBuilder::new();
+    let mut rows = 0_usize;
+    crate::term_filter::for_each_column_batch(data, column, |batch| {
+        rows += batch.num_rows();
+        builder.add_batch(batch, column);
+    })?;
+    Ok(crate::term_filter::RebuiltColumnSummary {
+        summary: builder.finish(),
+        rows,
+    })
+}
+
 /// Accumulates the sketch of the vector column of the segment being written.
 #[derive(Debug, Default)]
 pub struct VectorSketchBuilder {

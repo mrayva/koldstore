@@ -7,7 +7,7 @@ fn demigration_sql_deactivates_managed_metadata() {
 
     assert_eq!(
         catalog.sql,
-        "UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true"
+        "WITH unpinned AS (DELETE FROM koldstore.table_prefix_pins WHERE table_oid = $1) UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true"
     );
     assert_eq!(
         flush.sql,

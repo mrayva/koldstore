@@ -1,0 +1,111 @@
+CREATE EXTENSION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+INSERT 0 1
+SELECT 401
+ rtf_managed
+-------------
+ t
+(1 row)
+
+ rtf_caught_up
+---------------
+ t
+(1 row)
+
+ rtf_flushed
+-------------
+ t
+(1 row)
+
+SELECT 80
+ filtered_columns | filters_written
+------------------+-----------------
+                4 | t
+(1 row)
+
+ tags_prune_before
+-------------------
+ t
+(1 row)
+
+ tsv_prune_before
+------------------
+ t
+(1 row)
+
+DELETE 80
+ tags_read_all
+---------------
+ t
+(1 row)
+
+ tsv_read_all
+--------------
+ t
+(1 row)
+
+ col  | missing
+------+---------
+ doc  | t
+ emb  | t
+ tags | t
+ tsv  | t
+(4 rows)
+
+ first_pass_rebuilt
+--------------------
+                 12
+(1 row)
+
+ second_pass_rebuilt | no_failures
+---------------------+-------------
+ t                   | t
+(1 row)
+
+ idempotent_rebuilt
+--------------------
+                  0
+(1 row)
+
+ differing
+-----------
+         0
+(1 row)
+
+ extra_rows
+------------
+          0
+(1 row)
+
+ tags_prune_after
+------------------
+ t
+(1 row)
+
+ doc_prune_after
+-----------------
+ t
+(1 row)
+
+ tsv_prune_after
+-----------------
+ t
+(1 row)
+
+ tags_rows_match
+-----------------
+ t
+(1 row)
+
+ tsv_rows_match
+----------------
+ t
+(1 row)
+
+ knn_rows_match
+----------------
+ t
+(1 row)
+

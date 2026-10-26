@@ -45,11 +45,11 @@ pub use key_bounds::{
     KeyBoundsBuilder, frame_component, rebuild_key_bounds_from_parquet, supports_key_bounds,
 };
 pub use term_filter::{
-    TermClauses, TermFilterBuilder, TermFilterKind, array_contains_clauses, array_overlap_clauses,
-    jsonb_contains_clauses, jsonb_exists_clauses, parse_tsvector_lexemes, term_hash, tsquery_clauses,
+    RebuiltColumnSummary, TermClauses, TermFilterBuilder, TermFilterKind, array_contains_clauses, array_overlap_clauses,
+    jsonb_contains_clauses, jsonb_exists_clauses, parse_tsvector_lexemes, rebuild_term_filter_from_parquet, term_hash, tsquery_clauses,
 };
 pub use vector_sketch::{
-    KnnMetric, VectorSketch, VectorSketchBuilder, knn_excluded, parse_vector_text,
+    KnnMetric, VectorSketch, rebuild_vector_sketch_from_parquet, VectorSketchBuilder, knn_excluded, parse_vector_text,
 };
 pub use value_summary::{
     RebuiltSummary, add_column_to_value_summary, add_key_columns_to_value_summary,

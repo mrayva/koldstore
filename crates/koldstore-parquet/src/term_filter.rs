@@ -541,6 +541,64 @@ impl TermFilterBuilder {
     }
 }
 
+/// A term filter or sketch rebuilt from a segment object (see `rebuild_term_filter_from_parquet`).
+#[derive(Debug)]
+pub struct RebuiltColumnSummary {
+    /// The encoded bitmap or sketch; `None` when the segment cannot carry one.
+    pub summary: Option<Vec<u8>>,
+    /// Rows read, to be checked against the catalog's row count.
+    pub rows: usize,
+}
+
+/// Reads one column of a Parquet object batch by batch.
+pub(crate) fn for_each_column_batch(
+    data: impl Into<bytes::Bytes>,
+    column: &str,
+    mut visit: impl FnMut(&RecordBatch),
+) -> Result<(), String> {
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data.into())
+        .map_err(|error| format!("cannot read parquet object: {error}"))?;
+    let root = builder
+        .schema()
+        .index_of(column)
+        .map_err(|_| format!("column `{column}` is not in the object"))?;
+    let mask = ProjectionMask::roots(builder.parquet_schema(), [root]);
+    let reader = builder
+        .with_projection(mask)
+        .build()
+        .map_err(|error| format!("cannot read parquet object: {error}"))?;
+    for batch in reader {
+        visit(&batch.map_err(|error| format!("cannot read parquet object: {error}"))?);
+    }
+    Ok(())
+}
+
+/// Rebuilds the term filter flush would have written for `column` of a segment object that predates the
+/// column's listing in `pruning_columns`. The result is a pure function of the (immutable) object.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be read or lacks the column.
+pub fn rebuild_term_filter_from_parquet(
+    data: impl Into<bytes::Bytes>,
+    column: &str,
+    kind: TermFilterKind,
+) -> Result<RebuiltColumnSummary, String> {
+    let mut builder = TermFilterBuilder::new(kind);
+    let mut rows = 0_usize;
+    for_each_column_batch(data, column, |batch| {
+        rows += batch.num_rows();
+        builder.add_batch(batch, column);
+    })?;
+    Ok(RebuiltColumnSummary {
+        summary: builder.finish(rows),
+        rows,
+    })
+}
+
 /// `tags @> ARRAY[..]`: every element must be present. `None` when the probe proves nothing (empty
 /// array) or can never match (a NULL element), in which case the segment is simply not pruned.
 #[must_use]

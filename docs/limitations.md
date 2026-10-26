@@ -407,7 +407,9 @@ constant or parameter `@>`, `&&`, `?`, `?|` or `?&` predicate then skips the seg
 filter rules it out. It prunes only while no key is stored in two active segments (otherwise a
 newer version could be hidden and a stale one resurrected), never for a NULL or empty probe,
 a bare scalar `jsonb @>` probe or a non-deterministic collation, and never for segments
-written before the column was listed (they carry no filter and are always read). The filter
+written before the column was listed (they carry no filter and are always read until
+`koldstore.rebuild_segment_summaries()` gives them one; it rebuilds term filters and `vector`
+sketches from the objects, byte-identical to what flush writes, `tests/sql/rebuild_term_filters.sql`). The filter
 can only over-read, never under-read; `tests/sql/term_filter_pruning.sql` pins both.
 
 For a `tsvector` the filter holds the lexemes, and `tsv @@ q` (either order) with a constant or
