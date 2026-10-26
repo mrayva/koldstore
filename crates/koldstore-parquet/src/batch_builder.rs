@@ -15,7 +15,9 @@ use arrow_schema::SchemaRef;
 use koldstore_common::CellValue;
 use koldstore_schema::PgType;
 
-use crate::pg_type_codec::{json_bool, json_f32, json_f64, json_i16, json_i64, json_string_cell};
+use crate::pg_type_codec::{
+    json_bool, json_f32, json_f64, json_i16, json_i64, json_jsonb_cell, json_string_cell,
+};
 use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 use crate::writer::CleanColdRecordPlan;
 
@@ -484,10 +486,12 @@ fn plan_value_to_flush_cell(
         PgType::Float8 => Ok(CellValue::Float64(
             json_f64(Some(value))?.expect("non-null"),
         )),
+        PgType::Jsonb => Ok(CellValue::Utf8(
+            json_jsonb_cell(Some(value))?.expect("non-null"),
+        )),
         PgType::Text
         | PgType::Numeric
         | PgType::Uuid
-        | PgType::Jsonb
         | PgType::TextArray
         | PgType::Vector
         | PgType::Bytea => Ok(CellValue::Utf8(

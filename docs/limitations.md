@@ -391,7 +391,10 @@ filtered scan of the segments that min/max statistics and Bloom filters cannot r
 the columns you filter on in `pruning_columns` / `bloom_filter_columns` to narrow it. The
 `merge/cold_index_predicates` e2e test pins this against a plain-table reference. Arrays are
 supported only as one-dimensional `text[]`; other array types are rejected at `manage_table`,
-and a multi-dimensional `text[]` value fails the flush.
+and a multi-dimensional `text[]` value fails the flush. Cold reads keep a `text[]`'s explicit lower
+bound (`[0:2]={x,y,z}`) and every `jsonb` value, bare JSON strings included
+(`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, so it renumbers a `text[]`'s
+lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
 
 Listing a `text[]` or `jsonb` column in `pruning_columns` also gives every new segment a *term
 filter* (a one-hash membership bitmap in `cold_segment_index.value_summary`, built from the

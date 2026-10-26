@@ -328,8 +328,16 @@ fn decode_mirror_row(
 }
 
 /// Renders a one-dimensional `text[]` as its array literal (`{"a","b",NULL}`).
-fn text_array_literal(items: &[Option<String>]) -> String {
-    let mut out = String::from("{");
+///
+/// A lower bound other than 1 is kept as an explicit `[lo:hi]=` prefix so the bounds survive the
+/// round trip through cold storage.
+fn text_array_literal(items: &[Option<String>], lower_bound: i32) -> String {
+    let mut out = String::new();
+    if lower_bound != 1 && !items.is_empty() {
+        let upper = i64::from(lower_bound) + items.len() as i64 - 1;
+        out.push_str(&format!("[{lower_bound}:{upper}]="));
+    }
+    out.push('{');
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -408,13 +416,23 @@ fn read_column(
             Some(array) => {
                 let items: Vec<Option<String>> = array.iter().collect();
                 // SAFETY: the array pointer comes from the `Array` just read from this tuple.
-                let ndim = unsafe { (*array.into_array_type()).ndim };
+                let header = array.into_array_type();
+                let ndim = unsafe { (*header).ndim };
                 if ndim > 1 {
                     pgrx::error!(
                         "multi-dimensional text[] columns cannot be flushed to cold storage"
                     );
                 }
-                CellValue::Utf8(text_array_literal(&items))
+                // SAFETY: as above; a one-dimensional array stores its lower bound right after its
+                // dimension length, both `int`s following the 16-byte `ArrayType` header.
+                let lower_bound = unsafe {
+                    if ndim == 1 {
+                        header.cast::<u8>().add(16 + 4).cast::<i32>().read_unaligned()
+                    } else {
+                        1
+                    }
+                };
+                CellValue::Utf8(text_array_literal(&items, lower_bound))
             }
             None => CellValue::Null,
         },

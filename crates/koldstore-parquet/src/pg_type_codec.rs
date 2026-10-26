@@ -18,13 +18,11 @@ use crate::schema::PgColumn;
 
 /// Converts a JSONB cell into the UTF-8 form stored in Parquet Utf8 columns.
 ///
-/// JSON strings stay unquoted; other JSON values are serialized compactly.
+/// Every JSON value, strings included, is serialized compactly: the stored text must stay valid
+/// `jsonb` input, and a bare JSON string such as `"x"` is only valid with its quotes.
 #[must_use]
 pub fn jsonb_cell_to_utf8(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 /// Encodes raw bytes in PostgreSQL `bytea` hex output form (`\xdeadbeef`).
@@ -125,10 +123,15 @@ pub fn arrow_array_from_json(
                 .map(|value| json_f64(*value))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        PgType::Jsonb => Arc::new(StringArray::from_iter(
+            json_values
+                .iter()
+                .map(|value| json_jsonb_cell(*value))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         PgType::Text
         | PgType::Numeric
         | PgType::Uuid
-        | PgType::Jsonb
         | PgType::TextArray
         | PgType::Vector
         | PgType::Bytea => Arc::new(StringArray::from_iter(
@@ -420,6 +423,19 @@ pub fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String
     }
 }
 
+/// Coerces a JSON cell of a `jsonb` column to its stored text; strings keep their quotes.
+pub fn json_jsonb_cell(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(other) => Ok(Some(jsonb_cell_to_utf8(other))),
+    }
+}
+
+/// Coerces a JSON cell to its string form.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be serialized.
 pub fn json_string_cell(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
     match json_string_borrowed(value)? {
         None => Ok(None),
@@ -515,10 +531,10 @@ mod tests {
     }
 
     #[test]
-    fn jsonb_cell_to_utf8_keeps_strings_unquoted() {
+    fn jsonb_cell_to_utf8_keeps_strings_quoted() {
         assert_eq!(
             super::jsonb_cell_to_utf8(&serde_json::json!("hello")),
-            "hello"
+            "\"hello\""
         );
         assert_eq!(
             super::jsonb_cell_to_utf8(&serde_json::json!({"a": 1})),

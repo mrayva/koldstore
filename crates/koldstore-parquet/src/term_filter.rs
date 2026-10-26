@@ -137,10 +137,28 @@ fn emit_json_terms(value: &Value, top_level: bool, emit: &mut impl FnMut(Vec<u8>
     }
 }
 
+/// Drops the explicit bounds a non-default lower bound adds to an array literal (`[0:2]={x,y,z}`).
+fn strip_dimension_prefix(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix('[') else {
+        return text;
+    };
+    let Some((bounds, tail)) = rest.split_once("]=") else {
+        return text;
+    };
+    let is_bound = |part: &str| {
+        let digits = part.strip_prefix('-').unwrap_or(part);
+        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+    };
+    match bounds.split_once(':') {
+        Some((low, high)) if is_bound(low) && is_bound(high) => tail,
+        _ => text,
+    }
+}
+
 /// Parses a one-dimensional PostgreSQL text-array literal (`{a,"b c",NULL}`) or a JSON array.
 #[must_use]
 pub fn parse_text_array(text: &str) -> Option<Vec<Option<String>>> {
-    let trimmed = text.trim();
+    let trimmed = strip_dimension_prefix(text.trim());
     if trimmed.starts_with('[') {
         let Value::Array(items) = serde_json::from_str::<Value>(trimmed).ok()? else {
             return None;
@@ -430,6 +448,14 @@ mod tests {
             Some(vec![some("alpha"), None, some("b")])
         );
         assert_eq!(parse_text_array("{{1,2},{3,4}}"), None);
+        assert_eq!(
+            parse_text_array("[0:2]={x,y,z}"),
+            Some(vec![Some("x".into()), Some("y".into()), Some("z".into())])
+        );
+        assert_eq!(
+            parse_text_array("[-3:-2]={a,NULL}"),
+            Some(vec![Some("a".into()), None])
+        );
         assert_eq!(parse_text_array("garbage"), None);
     }
 
