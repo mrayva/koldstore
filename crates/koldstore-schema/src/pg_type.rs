@@ -100,6 +100,8 @@ pub enum PgType {
     Oid = 41,
     /// A user-defined enum, stored as its label; the type OID is per column.
     Enum = 42,
+    /// A user-defined composite type, stored as its `record_out` text; the type OID is per column.
+    Composite = 58,
     /// `xml`, stored as its text.
     Xml = 43,
     /// `money`, stored as its raw int64 (locale independent).
@@ -221,6 +223,7 @@ impl PgType {
             "name" => Ok(Self::Name),
             "oid" => Ok(Self::Oid),
             "enum" => Ok(Self::Enum),
+            "composite" => Ok(Self::Composite),
             "xml" => Ok(Self::Xml),
             "money" => Ok(Self::Money),
             "int4range" => Ok(Self::Int4Range),
@@ -293,6 +296,7 @@ impl PgType {
             40 => Some(Self::Name),
             41 => Some(Self::Oid),
             42 => Some(Self::Enum),
+            58 => Some(Self::Composite),
             43 => Some(Self::Xml),
             44 => Some(Self::Money),
             45 => Some(Self::Int4Range),
@@ -359,6 +363,7 @@ impl PgType {
             Self::Name => "name",
             Self::Oid => "oid",
             Self::Enum => "enum",
+            Self::Composite => "composite",
             Self::Xml => "xml",
             Self::Money => "money",
             Self::Int4Range => "int4range",
@@ -458,7 +463,7 @@ impl PgType {
             Self::Name => 19,
             Self::Oid => 26,
             // Enums have no fixed OID; callers resolve the column's own type.
-            Self::Enum => 0,
+            Self::Enum | Self::Composite => 0,
             Self::Xml => 142,
             Self::Money => 790,
             Self::Int4Range => 3904,
@@ -647,6 +652,7 @@ mod tests {
             PgType::Name,
             PgType::Oid,
             PgType::Enum,
+            PgType::Composite,
             PgType::Xml,
             PgType::Money,
             PgType::Int4Range,

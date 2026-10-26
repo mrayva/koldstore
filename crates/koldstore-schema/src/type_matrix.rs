@@ -99,6 +99,7 @@ impl TypeMatrix {
             "tsrange",
             "tstzrange",
             "daterange",
+            "composite",
             "point",
             "lseg",
             "path",

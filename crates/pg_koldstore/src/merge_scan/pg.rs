@@ -1093,7 +1093,10 @@ unsafe fn initialize_fallback_scan(
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
     for column in &mut scan_projection.columns {
-        if column.catalog.pg_type == koldstore_schema::PgType::Enum {
+        if matches!(
+            column.catalog.pg_type,
+            koldstore_schema::PgType::Enum | koldstore_schema::PgType::Composite
+        ) {
             // SAFETY: a syscache lookup of a column of the relation being scanned.
             column.type_oid = unsafe { pg_sys::get_atttype(table_oid, (column.slot_index + 1) as i16) };
         }

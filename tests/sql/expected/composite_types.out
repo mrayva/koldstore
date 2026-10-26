@@ -1,0 +1,128 @@
+CREATE FUNCTION
+SET
+CREATE TYPE
+CREATE TYPE
+CREATE DOMAIN
+CREATE TABLE
+INSERT 0 5
+INSERT 0 55
+SELECT 60
+ cmp_managed
+-------------
+ t
+(1 row)
+
+SET
+SET
+SET
+SET
+SET
+ cmp_flushed
+-------------
+ t
+(1 row)
+
+RESET
+RESET
+RESET
+RESET
+SET
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id |                                                                                c                                                                                |                                dm
+----+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------
+  1 | (1,plain,0.1,"<TS>",2024-01-02,"1 day 02:03:04","\\xdeadbeef","{""a"": [1, 2]}","(1.50,""{x,y}"")")                                           | (7,dom,1,"<TS>",2024-02-02,"1 mon","\\x00",{},)
+  2 | (,,,,,,,,)                                                                                                                                                      |
+  3 |                                                                                                                                                                 |
+  4 | (-5,"quote "" comma , paren ( ) backslash \\ end",0.30000000000000004,infinity,-infinity,"-1 years -2 days","\\x","""s""","(,""{NULL,""""a b"""",""""""""}"")") |
+  5 | (0,"",NaN,"<TS>",0001-01-01,00:00:00,"\\x5c","{""k"": null}","(0,{})")                                                                 |
+(5 rows)
+
+ id | c_null | i  |                     t                     |         inner_v          |        iv
+----+--------+----+-------------------------------------------+--------------------------+------------------
+  1 | f      |  1 | plain                                     | (1.50,"{x,y}")           | 1 day 02:03:04
+  2 | t      |    |                                           |                          |
+  3 | t      |    |                                           |                          |
+  4 | f      | -5 | quote " comma , paren ( ) backslash \ end | (,"{NULL,""a b"",""""}") | -1 years -2 days
+  5 | f      |  0 |                                           | (0,{})                   | 00:00:00
+(5 rows)
+
+ big_i
+-------
+    30
+(1 row)
+
+ big_i_ctl
+-----------
+        30
+(1 row)
+
+ null_composites
+-----------------
+               2
+(1 row)
+
+ null_composites_ctl
+---------------------
+                   2
+(1 row)
+
+ inner_match
+-------------
+           1
+(1 row)
+
+ eq_match
+----------
+        1
+(1 row)
+
+SET
+UPDATE 5
+UPDATE 5
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ cmp_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ cmp_unmanaged
+---------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: primary key column `c` is a composite type, which is not supported as a key
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: sqlreg.inner_t[] at line 1 column 381

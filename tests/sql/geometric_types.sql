@@ -63,9 +63,8 @@ SELECT sqlreg.fingerprint('sqlreg.geo', 'id') = sqlreg.fingerprint('sqlreg.geo_c
 SELECT koldstore.unmanage_table('sqlreg.geo'::regclass, true, true) IS NOT NULL AS geo_unmanaged;
 SELECT sqlreg.fingerprint('sqlreg.geo', 'id') = sqlreg.fingerprint('sqlreg.geo_ctl', 'id') AS rows_match_after_unmanage;
 
--- composite types and geometric arrays are still refused
-CREATE TYPE sqlreg.pair AS (a int, b int);
-CREATE TABLE sqlreg.geo_comp (id bigint PRIMARY KEY, c sqlreg.pair);
+-- multiranges and geometric arrays are still refused
+CREATE TABLE sqlreg.geo_comp (id bigint PRIMARY KEY, c int4multirange);
 SELECT koldstore.manage_table(table_name => 'sqlreg.geo_comp'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
   min_flush_rows => 1, max_rows_per_file => 20, migration_order_by => 'id', auto_flush => false) IS NOT NULL AS comp_managed;
 CREATE TABLE sqlreg.geo_arr (id bigint PRIMARY KEY, p point[]);

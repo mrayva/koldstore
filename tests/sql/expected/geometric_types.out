@@ -98,8 +98,7 @@ RESET
  t
 (1 row)
 
-CREATE TYPE
 CREATE TABLE
-psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: sqlreg.pair at line 1 column 376
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: int4multirange at line 1 column 379
 CREATE TABLE
 psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: point[] at line 1 column 372

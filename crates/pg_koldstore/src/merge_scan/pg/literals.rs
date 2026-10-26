@@ -144,7 +144,7 @@ unsafe fn datum_typed_sql(
     let pg_type = column.pg_type;
     match pg_type {
         // An enum's type OID is per column and not carried here: leave the predicate to the executor.
-        PgType::Enum | PgType::Money | PgType::Int4Range | PgType::Int8Range | PgType::NumRange
+        PgType::Enum | PgType::Composite | PgType::Money | PgType::Int4Range | PgType::Int8Range | PgType::NumRange
         | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle => None,
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
@@ -340,7 +340,7 @@ unsafe fn datum_json_value_via_output(
     datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
 ) -> Option<serde_json::Value> {
-    if column.pg_type == PgType::Enum {
+    if matches!(column.pg_type, PgType::Enum | PgType::Composite) {
         return None;
     }
     let mut typoutput = pg_sys::InvalidOid;
@@ -397,21 +397,20 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     // An interval's text form follows the session's IntervalStyle; ISO 8601 is stable and `interval_in`
     // accepts it under every style, so a stored value reads back identically.
     // Dates and timestamps likewise follow DateStyle; ISO output parses back under every style, and a
-    // timestamptz carries its UTC offset, so the instant survives any TimeZone. Array output calls
-    // the element output functions, so the same styles apply to date[], timestamp[], timestamptz[], interval[].
-    let (saved_interval, saved_date) = (pg_sys::IntervalStyle, pg_sys::DateStyle);
-    // Geometric types print float8 coordinates, whose precision follows extra_float_digits; > 0 is the
-    // shortest text that parses back to the same bits.
-    let saved_digits = pg_sys::extra_float_digits;
-    if matches!(oid.to_u32(), 600 | 601 | 602 | 603 | 604 | 628 | 718) {
-        pg_sys::extra_float_digits = 1;
-    }
-    if oid == pg_sys::INTERVALOID || oid == pg_sys::INTERVALARRAYOID {
+    // timestamptz carries its UTC offset, so the instant survives any TimeZone. Array, range and
+    // composite output call the element/field output functions, so the same styles apply to them.
+    // Geometric coordinates are float8, whose digits follow extra_float_digits; > 0 is the shortest
+    // text that parses back to the same bits.
+    let composite = pg_sys::get_typtype(oid) as u8 == b'c';
+    let (saved_interval, saved_date, saved_digits) =
+        (pg_sys::IntervalStyle, pg_sys::DateStyle, pg_sys::extra_float_digits);
+    if composite || oid == pg_sys::INTERVALOID || oid == pg_sys::INTERVALARRAYOID {
         pg_sys::IntervalStyle = pg_sys::INTSTYLE_ISO_8601 as _;
     }
     // The timestamp/date range types (tsrange, tstzrange, daterange) print their bounds the same way.
     let range_oid = matches!(oid.to_u32(), 3908 | 3910 | 3912);
-    if range_oid
+    if composite
+        || range_oid
         || matches!(
             oid,
             pg_sys::DATEARRAYOID | pg_sys::TIMESTAMPARRAYOID | pg_sys::TIMESTAMPTZARRAYOID
@@ -419,9 +418,12 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     {
         pg_sys::DateStyle = pg_sys::USE_ISO_DATES as _;
     }
+    if composite || matches!(oid.to_u32(), 600 | 601 | 602 | 603 | 604 | 628 | 718) {
+        pg_sys::extra_float_digits = 1;
+    }
     let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));
-    (pg_sys::IntervalStyle, pg_sys::DateStyle) = (saved_interval, saved_date);
-    pg_sys::extra_float_digits = saved_digits;
+    (pg_sys::IntervalStyle, pg_sys::DateStyle, pg_sys::extra_float_digits) =
+        (saved_interval, saved_date, saved_digits);
     text
 }
 

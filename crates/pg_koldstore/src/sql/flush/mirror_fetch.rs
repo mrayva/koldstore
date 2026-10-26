@@ -48,7 +48,7 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum | PgType::Money => {
+        | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum | PgType::Composite | PgType::Money => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -238,7 +238,7 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum => CellValue::Utf8("{}".to_string()),
+        | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum | PgType::Composite => CellValue::Utf8("{}".to_string()),
         PgType::Json => CellValue::Utf8("null".to_string()),
         PgType::Text
         | PgType::Jsonb
@@ -307,7 +307,7 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::Varbit
             | PgType::Macaddr8
             | PgType::Name
-            | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum,
+            | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle | PgType::Enum | PgType::Composite,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -570,11 +570,11 @@ fn read_column(
         | PgType::Macaddr8
         | PgType::Name
         | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle
-        | PgType::Enum => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+        | PgType::Enum | PgType::Composite => match tuple.get::<pgrx::AnyElement>(ordinal)? {
             Some(element) => {
                 let datum = element.datum();
                 // Enums carry their own per-column type OID; the others have a fixed one.
-                let type_oid = if column.pg_type == PgType::Enum {
+                let type_oid = if matches!(column.pg_type, PgType::Enum | PgType::Composite) {
                     element.oid()
                 } else {
                     pgrx::pg_sys::Oid::from(column.pg_type.type_oid())

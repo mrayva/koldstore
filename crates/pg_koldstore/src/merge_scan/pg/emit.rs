@@ -46,7 +46,7 @@ unsafe fn cell_value_to_datum(
     type_oid: pg_sys::Oid,
 ) -> Result<pg_sys::Datum, String> {
     match (pg_type, value) {
-        (PgType::Enum, _) => {
+        (PgType::Enum | PgType::Composite, _) => {
             if type_oid == pg_sys::InvalidOid {
                 return Err("enum column has no resolved type OID".to_string());
             }
@@ -190,7 +190,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Macaddr8
         | PgType::Name
         | PgType::Oid | PgType::Xml | PgType::Int4Range | PgType::Int8Range | PgType::NumRange | PgType::TsRange | PgType::TstzRange | PgType::DateRange | PgType::Point | PgType::Lseg | PgType::Path | PgType::Box | PgType::Polygon | PgType::Line | PgType::Circle
-        | PgType::Enum
+        | PgType::Enum | PgType::Composite
         | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),

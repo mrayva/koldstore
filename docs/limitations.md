@@ -415,8 +415,14 @@ The built-in geometric types (`point`, `lseg`, `path`, `box`, `polygon`, `line`,
 printed with enough float digits to read back bit-identically whatever `extra_float_digits` the flushing session
 uses (`tests/sql/geometric_types.sql`). Their predicates are evaluated by the executor, and they have no min/max
 statistics.
+User-defined composite types (nested composites, array and `jsonb` fields included, and domains over them) are
+stored as their `record_out` text and read back through `record_in` (`tests/sql/composite_types.sql`); the text is
+rendered with ISO date and interval styles and `extra_float_digits` forced, so it does not depend on the flushing
+session. Field access and predicates are evaluated by the executor. A composite cannot be a primary key. One
+caveat: hydrate-on-write rewrites a cold row through `to_jsonb`, which turns a `jsonb` field holding the JSON `null`
+literal inside a composite into SQL NULL.
 Still unsupported, and refused by `manage_table`:
-composite types, multiranges, user-defined range types, geometric arrays, and arrays of other element types (`money[]`, enum arrays, …).
+multiranges, user-defined range types, composite and geometric arrays, and arrays of other element types (`money[]`, enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
