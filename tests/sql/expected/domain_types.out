@@ -1,0 +1,123 @@
+CREATE FUNCTION
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE TABLE
+INSERT 0 60
+INSERT 0 1
+SELECT 61
+ dom_managed
+-------------
+ t
+(1 row)
+
+ dom_flushed
+-------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ cold_pred_rows
+----------------
+              1
+(1 row)
+
+ cold_tag_rows
+---------------
+             1
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+psql:<PATH>: ERROR:  value for domain sqlreg.email violates check constraint "email_check"
+psql:<PATH>: ERROR:  value for domain sqlreg.posint_small violates check constraint "posint_check"
+DELETE 1
+DELETE 1
+RESET
+psql:<PATH>: ERROR:  value for domain sqlreg.email violates check constraint "email_check"
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ dom_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ dom_unmanaged
+---------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE DOMAIN
+CREATE DOMAIN
+CREATE TABLE
+INSERT 0 60
+SELECT 60
+ dom_ord_managed
+-----------------
+ t
+(1 row)
+
+ dom_ord_flushed
+-----------------
+ t
+(1 row)
+
+ range_rows
+------------
+         10
+(1 row)
+
+ range_rows_ctl
+----------------
+             10
+(1 row)
+
+ key_lookup
+------------
+ r7
+(1 row)
+
+SET
+UPDATE 1
+UPDATE 1
+RESET
+ dom_ord_mirror_caught_up
+--------------------------
+ t
+(1 row)
+
+ dom_ord_match
+---------------
+ t
+(1 row)
+
+CREATE DOMAIN
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: interval at line 1 column 374

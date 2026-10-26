@@ -7,7 +7,7 @@
 #[cfg(feature = "pg")]
 use koldstore_sortkey::{encode_sort_key, SortKeyValue};
 #[cfg(feature = "pg")]
-use pgrx::datum::AnyElement;
+use pgrx::datum::{AnyElement, FromDatum};
 
 /// Encodes one supported PostgreSQL scalar as Sort Key V1 `bytea`.
 ///
@@ -21,20 +21,23 @@ use pgrx::datum::AnyElement;
     parallel_safe
 )]
 pub fn internal_encode_sort_key(value: AnyElement) -> Vec<u8> {
-    let type_oid = u32::from(value.oid());
+    // A domain-typed key is encoded as its base type; AnyElement::into would reject the domain OID.
+    let base_oid = unsafe { pgrx::pg_sys::getBaseType(value.oid()) };
+    let type_oid = u32::from(base_oid);
+    let datum = value.datum();
     let encoded = unsafe {
         match type_oid {
-            16 => AnyElement::into::<bool>(&value).map(SortKeyValue::Bool),
-            21 => AnyElement::into::<i16>(&value).map(SortKeyValue::Int2),
-            23 => AnyElement::into::<i32>(&value).map(SortKeyValue::Int4),
-            20 => AnyElement::into::<i64>(&value).map(SortKeyValue::Int8),
-            1082 => AnyElement::into::<pgrx::datum::Date>(&value)
+            16 => bool::from_polymorphic_datum(datum, false, base_oid).map(SortKeyValue::Bool),
+            21 => i16::from_polymorphic_datum(datum, false, base_oid).map(SortKeyValue::Int2),
+            23 => i32::from_polymorphic_datum(datum, false, base_oid).map(SortKeyValue::Int4),
+            20 => i64::from_polymorphic_datum(datum, false, base_oid).map(SortKeyValue::Int8),
+            1082 => pgrx::datum::Date::from_polymorphic_datum(datum, false, base_oid)
                 .map(|date| SortKeyValue::Date(date.into_inner())),
-            1114 => AnyElement::into::<pgrx::datum::Timestamp>(&value)
+            1114 => pgrx::datum::Timestamp::from_polymorphic_datum(datum, false, base_oid)
                 .map(|timestamp| SortKeyValue::Timestamp(timestamp.into_inner())),
-            1184 => AnyElement::into::<pgrx::datum::TimestampWithTimeZone>(&value)
+            1184 => pgrx::datum::TimestampWithTimeZone::from_polymorphic_datum(datum, false, base_oid)
                 .map(|timestamp| SortKeyValue::Timestamptz(timestamp.into_inner())),
-            2950 => AnyElement::into::<pgrx::datum::Uuid>(&value)
+            2950 => pgrx::datum::Uuid::from_polymorphic_datum(datum, false, base_oid)
                 .map(|uuid| SortKeyValue::Uuid(uuid::Uuid::from_bytes(*uuid.as_bytes()))),
             _ => pgrx::error!("unsupported Sort Key V1 PostgreSQL type OID {type_oid}"),
         }

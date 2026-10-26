@@ -127,7 +127,15 @@ SELECT (SELECT jsonb_build_object(
       LIMIT 1
     ),
     'segment_order_type_oid', (
-      SELECT a.atttypid::bigint
+      -- a domain-typed column encodes as its base type
+      SELECT (
+        WITH RECURSIVE chain(typid) AS (
+          SELECT a.atttypid
+          UNION ALL
+          SELECT t.typbasetype FROM chain JOIN pg_catalog.pg_type t ON t.oid = chain.typid WHERE t.typtype = 'd'
+        )
+        SELECT chain.typid FROM chain JOIN pg_catalog.pg_type t ON t.oid = chain.typid WHERE t.typtype <> 'd'
+      )::bigint
       FROM jsonb_array_elements(s.columns) AS c
       JOIN pg_catalog.pg_attribute a
         ON a.attrelid = s.table_oid

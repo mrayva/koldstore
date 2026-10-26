@@ -92,7 +92,7 @@ SELECT COALESCE(
         jsonb_build_object(
             'column_id', a.attnum,
             'name', a.attname,
-            'type_name', format_type(a.atttypid, a.atttypmod),
+            'type_name', format_type(base.typid, base.typmod),
             'is_primary_key', pk.attnum IS NOT NULL,
             'nullable', NOT a.attnotnull,
             'identity', a.attidentity <> '',
@@ -105,6 +105,20 @@ SELECT COALESCE(
     '[]'
 )
 FROM pg_attribute a
+CROSS JOIN LATERAL (
+    -- a domain is stored as its base type; its constraints still run on the heap
+    WITH RECURSIVE chain(typid, typmod, is_domain) AS (
+        SELECT t.oid, a.atttypmod, t.typtype = 'd'
+        FROM pg_type t WHERE t.oid = a.atttypid
+        UNION ALL
+        SELECT b.oid, CASE WHEN dt.typtypmod <> -1 THEN dt.typtypmod ELSE chain.typmod END, b.typtype = 'd'
+        FROM chain
+        JOIN pg_type dt ON dt.oid = chain.typid
+        JOIN pg_type b ON b.oid = dt.typbasetype
+        WHERE chain.is_domain
+    )
+    SELECT typid, typmod FROM chain WHERE NOT is_domain
+) AS base
 LEFT JOIN pg_attrdef d
   ON d.adrelid = a.attrelid
  AND d.adnum = a.attnum

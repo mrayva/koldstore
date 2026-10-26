@@ -56,6 +56,9 @@ fn summarizable_key(
         let Some(type_oid) = type_oid else {
             return Ok(None);
         };
+        // A domain key is summarised as its base type.
+        // SAFETY: syscache lookup by OID.
+        let type_oid = unsafe { pgrx::pg_sys::getBaseType(type_oid) };
         let Some(ty) = koldstore_sortkey::SortKeyType::from_type_oid(type_oid.to_u32())
             .filter(|ty| koldstore_parquet::supports_value_summary(*ty))
         else {
@@ -477,6 +480,9 @@ fn tuple_bounds_key(
         let Some(type_oid) = type_oid else {
             return Ok(None);
         };
+        // A domain key is summarised as its base type.
+        // SAFETY: syscache lookup by OID.
+        let type_oid = unsafe { pgrx::pg_sys::getBaseType(type_oid) };
         let Some(ty) = koldstore_sortkey::SortKeyType::from_type_oid_for_bounds(type_oid.to_u32())
             .filter(|ty| koldstore_parquet::supports_key_bounds(*ty))
         else {
