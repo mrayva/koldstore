@@ -102,6 +102,8 @@ pub enum PgType {
     Enum = 42,
     /// `xml`, stored as its text.
     Xml = 43,
+    /// `money`, stored as its raw int64 (locale independent).
+    Money = 44,
 }
 
 /// PostgreSQL integer array type OID.
@@ -194,6 +196,7 @@ impl PgType {
             "oid" => Ok(Self::Oid),
             "enum" => Ok(Self::Enum),
             "xml" => Ok(Self::Xml),
+            "money" => Ok(Self::Money),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -252,6 +255,7 @@ impl PgType {
             41 => Some(Self::Oid),
             42 => Some(Self::Enum),
             43 => Some(Self::Xml),
+            44 => Some(Self::Money),
             _ => None,
         }
     }
@@ -304,6 +308,7 @@ impl PgType {
             Self::Oid => "oid",
             Self::Enum => "enum",
             Self::Xml => "xml",
+            Self::Money => "money",
         }
     }
 
@@ -390,6 +395,7 @@ impl PgType {
             // Enums have no fixed OID; callers resolve the column's own type.
             Self::Enum => 0,
             Self::Xml => 142,
+            Self::Money => 790,
         }
     }
 
@@ -564,6 +570,7 @@ mod tests {
             PgType::Oid,
             PgType::Enum,
             PgType::Xml,
+            PgType::Money,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

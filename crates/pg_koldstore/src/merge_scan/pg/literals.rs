@@ -144,7 +144,7 @@ unsafe fn datum_typed_sql(
     let pg_type = column.pg_type;
     match pg_type {
         // An enum's type OID is per column and not carried here: leave the predicate to the executor.
-        PgType::Enum => None,
+        PgType::Enum | PgType::Money => None,
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
@@ -316,7 +316,7 @@ unsafe fn datum_cell_value(
             let narrowed = i32::try_from(datum.value() as i64).ok()?;
             Some(CellValue::Int32(narrowed))
         }
-        PgType::Int8 => Some(CellValue::Int64(datum.value() as i64)),
+        PgType::Int8 | PgType::Money => Some(CellValue::Int64(datum.value() as i64)),
         // `float4` / `float8` datums hold the IEEE bits by value (a 64-bit build; the extension
         // supports no other).
         PgType::Float4 => Some(CellValue::Float32(f32::from_bits(datum.value() as u32))),

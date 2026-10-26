@@ -1,0 +1,100 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 7
+INSERT 0 53
+SELECT 60
+ mo_managed
+------------
+ t
+(1 row)
+
+ mo_flushed
+------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id |          amt
+----+-----------------------
+  1 |                  0.00
+  2 |              12345.67
+  3 |                 -0.01
+  4 |
+  5 |  92233720368547758.07
+  6 | -92233720368547758.08
+  7 |            1000000.00
+(7 rows)
+
+ big
+-----
+  31
+(1 row)
+
+ big_ctl
+---------
+      31
+(1 row)
+
+ sum_matches
+-------------
+ t
+(1 row)
+
+SET
+ sum_matches_under_c
+---------------------
+ t
+(1 row)
+
+   two
+----------
+ 12345.67
+(1 row)
+
+RESET
+SET
+UPDATE 5
+UPDATE 5
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ mo_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ mo_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+

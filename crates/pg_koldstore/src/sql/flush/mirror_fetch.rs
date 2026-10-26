@@ -48,7 +48,7 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid | PgType::Xml | PgType::Enum => {
+        | PgType::Oid | PgType::Xml | PgType::Enum | PgType::Money => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -204,7 +204,7 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Bool => CellValue::Bool(false),
         PgType::Int2 => CellValue::Int16(0),
         PgType::Int4 => CellValue::Int32(0),
-        PgType::Int8 => CellValue::Int64(0),
+        PgType::Int8 | PgType::Money => CellValue::Int64(0),
         PgType::Timestamptz => CellValue::TimestamptzMicros(0),
         PgType::Timestamp => CellValue::TimestampMicros(0),
         PgType::Date => CellValue::DateDays(0),
@@ -464,6 +464,12 @@ fn read_column(
             .get::<i32>(ordinal)?
             .map(CellValue::Int32)
             .unwrap_or(CellValue::Null),
+        // `money` is a by-value int64 (cents or the locale's smallest unit); keep it raw so the cold
+        // copy does not depend on `lc_monetary`.
+        PgType::Money => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+            Some(element) => CellValue::Int64(element.datum().value() as i64),
+            None => CellValue::Null,
+        },
         PgType::Int8 => tuple
             .get::<i64>(ordinal)?
             .map(CellValue::Int64)

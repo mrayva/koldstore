@@ -261,7 +261,7 @@ impl TypedColumnBuilder {
             PgType::Bool => Self::Bool(BooleanBuilder::new()),
             PgType::Int2 => Self::Int16(Int16Builder::new()),
             PgType::Int4 => Self::Int32(Int32Builder::new()),
-            PgType::Int8 => Self::Int64(Int64Builder::new()),
+            PgType::Int8 | PgType::Money => Self::Int64(Int64Builder::new()),
             PgType::Float4 => Self::Float32(Float32Builder::new()),
             PgType::Float8 => Self::Float64(Float64Builder::new()),
             PgType::Text
@@ -505,7 +505,7 @@ fn plan_value_to_flush_cell(
                 .and_then(|value| i32::try_from(value).ok())
                 .ok_or_else(|| format!("int4 value out of range: {value}"))?,
         )),
-        PgType::Int8 => Ok(CellValue::Int64(json_i64(Some(value))?.expect("non-null"))),
+        PgType::Int8 | PgType::Money => Ok(CellValue::Int64(json_i64(Some(value))?.expect("non-null"))),
         PgType::Float4 => Ok(CellValue::Float32(
             json_f32(Some(value))?.expect("non-null"),
         )),

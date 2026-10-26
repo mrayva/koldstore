@@ -47,7 +47,7 @@ pub const fn arrow_data_type(pg_type: PgType) -> DataType {
         PgType::Bool => DataType::Boolean,
         PgType::Int2 => DataType::Int16,
         PgType::Int4 => DataType::Int32,
-        PgType::Int8 => DataType::Int64,
+        PgType::Int8 | PgType::Money => DataType::Int64,
         PgType::Float4 => DataType::Float32,
         PgType::Float8 => DataType::Float64,
         PgType::Text
@@ -131,7 +131,7 @@ pub fn arrow_array_from_json(
                 .map(|value| json_i32(*value))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        PgType::Int8 => Arc::new(Int64Array::from_iter(
+        PgType::Int8 | PgType::Money => Arc::new(Int64Array::from_iter(
             json_values
                 .iter()
                 .map(|value| json_i64(*value))
@@ -246,7 +246,7 @@ pub fn cell_from_arrow_cell(
             i32::try_from(widened_int(array, column_name, row_index, 32)?)
                 .map_err(|error| error.to_string())?,
         )),
-        PgType::Int8 => Ok(CellValue::Int64(widened_int(array, column_name, row_index, 64)?)),
+        PgType::Int8 | PgType::Money => Ok(CellValue::Int64(widened_int(array, column_name, row_index, 64)?)),
         PgType::Float4 => Ok(CellValue::Float32(
             array_for::<Float32Array>(array, column_name)?.value(row_index),
         )),
@@ -336,7 +336,7 @@ pub fn json_from_arrow_cell(
             column_name
         )?
         .value(row_index))),
-        PgType::Int4 | PgType::Int8 => Ok(serde_json::json!(widened_int(
+        PgType::Int4 | PgType::Int8 | PgType::Money => Ok(serde_json::json!(widened_int(
             array,
             column_name,
             row_index,

@@ -92,6 +92,7 @@ impl TypeMatrix {
             "oid",
             "enum",
             "xml",
+            "money",
         ];
         Self {
             entries: supported

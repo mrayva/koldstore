@@ -88,7 +88,7 @@ SELECT koldstore.wait_for_async_mirror() IS NOT NULL AS dom_ord_mirror_caught_up
 SELECT sqlreg.fingerprint('sqlreg.dom_ord', 'at') = sqlreg.fingerprint('sqlreg.dom_ord_ctl', 'at') AS dom_ord_match;
 
 -- a domain over an unsupported type is still refused
-CREATE DOMAIN sqlreg.span AS money;
+CREATE DOMAIN sqlreg.span AS int4range;
 CREATE TABLE sqlreg.dom_bad (id bigint PRIMARY KEY, d sqlreg.span, n int NOT NULL);
 SELECT koldstore.manage_table(
   table_name => 'sqlreg.dom_bad'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,

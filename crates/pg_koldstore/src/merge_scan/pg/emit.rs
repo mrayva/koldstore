@@ -64,6 +64,9 @@ unsafe fn cell_value_to_datum(
             Ok(pg_sys::Datum::from(narrowed))
         }
         (PgType::Int8, cell) => Ok(pg_sys::Datum::from(cell_i64(cell)?)),
+        // Cold and native hot rows carry the raw int64; SPI `to_jsonb` rows carry the locale text.
+        (PgType::Money, CellValue::Utf8(text)) => input_datum_from_text(text, pg_type),
+        (PgType::Money, cell) => Ok(pg_sys::Datum::from(cell_i64(cell)?)),
         (PgType::Float4, cell) => {
             let number = cell_f64(cell)? as f32;
             Ok(pg_sys::Datum::from(f32::to_bits(number)))

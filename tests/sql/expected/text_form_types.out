@@ -104,4 +104,4 @@ RESET
 (1 row)
 
 CREATE TABLE
-psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: money at line 1 column 370
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: int4range at line 1 column 374
