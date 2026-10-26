@@ -1,0 +1,83 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 6
+INSERT 0 54
+SELECT 60
+ xm_managed
+------------
+ t
+(1 row)
+
+ xm_flushed
+------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+  2
+(1 row)
+
+ id |              doc
+----+-------------------------------
+  1 | <a x="1">hi</a>
+  2 | <root><k>v &amp; w</k></root>
+  3 | text <b/> more <c>d</c>
+  4 |
+  5 | <e>é ü 日本</e>
+  6 | <!-- c --><p>  spaced  </p>
+(6 rows)
+
+ id | x
+----+---
+  1 | 1
+(1 row)
+
+ with_doc
+----------
+       59
+(1 row)
+
+SET
+UPDATE 5
+UPDATE 5
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ xm_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ xm_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+

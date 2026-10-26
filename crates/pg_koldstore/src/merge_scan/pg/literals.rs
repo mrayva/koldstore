@@ -180,7 +180,7 @@ unsafe fn datum_typed_sql(
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid
+        | PgType::Oid | PgType::Xml
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp

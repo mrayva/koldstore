@@ -100,6 +100,8 @@ pub enum PgType {
     Oid = 41,
     /// A user-defined enum, stored as its label; the type OID is per column.
     Enum = 42,
+    /// `xml`, stored as its text.
+    Xml = 43,
 }
 
 /// PostgreSQL integer array type OID.
@@ -191,6 +193,7 @@ impl PgType {
             "name" => Ok(Self::Name),
             "oid" => Ok(Self::Oid),
             "enum" => Ok(Self::Enum),
+            "xml" => Ok(Self::Xml),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -248,6 +251,7 @@ impl PgType {
             40 => Some(Self::Name),
             41 => Some(Self::Oid),
             42 => Some(Self::Enum),
+            43 => Some(Self::Xml),
             _ => None,
         }
     }
@@ -299,6 +303,7 @@ impl PgType {
             Self::Name => "name",
             Self::Oid => "oid",
             Self::Enum => "enum",
+            Self::Xml => "xml",
         }
     }
 
@@ -384,6 +389,7 @@ impl PgType {
             Self::Oid => 26,
             // Enums have no fixed OID; callers resolve the column's own type.
             Self::Enum => 0,
+            Self::Xml => 142,
         }
     }
 
@@ -557,6 +563,7 @@ mod tests {
             PgType::Name,
             PgType::Oid,
             PgType::Enum,
+            PgType::Xml,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

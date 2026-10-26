@@ -104,7 +104,7 @@ unsafe fn cell_value_to_datum(
             | PgType::Varbit
             | PgType::Macaddr8
             | PgType::Name
-            | PgType::Oid
+            | PgType::Oid | PgType::Xml
             | PgType::Bytea,
             _,
         ) => input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type),
@@ -186,7 +186,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Varbit
         | PgType::Macaddr8
         | PgType::Name
-        | PgType::Oid
+        | PgType::Oid | PgType::Xml
         | PgType::Enum
         | PgType::Bytea => {
             match value {
