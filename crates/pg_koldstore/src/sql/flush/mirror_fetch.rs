@@ -18,7 +18,12 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         PgType::Int2 | PgType::Int4 => Ok(SqlParamType::Integer),
         PgType::Int8 => Ok(SqlParamType::BigInt),
         PgType::Numeric => Ok(SqlParamType::Numeric),
-        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::TextArray | PgType::Vector => {
+        PgType::Text
+        | PgType::Jsonb
+        | PgType::Bytea
+        | PgType::TextArray
+        | PgType::Vector
+        | PgType::Tsvector => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -186,7 +191,12 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Uuid => CellValue::Utf8(NIL_UUID_PLACEHOLDER.to_string()),
         // Bound but never compared on the first page, yet it must parse as `numeric`.
         PgType::Numeric => CellValue::Utf8("0".to_string()),
-        PgType::Text | PgType::Jsonb | PgType::Bytea | PgType::TextArray | PgType::Vector => {
+        PgType::Text
+        | PgType::Jsonb
+        | PgType::Bytea
+        | PgType::TextArray
+        | PgType::Vector
+        | PgType::Tsvector => {
             CellValue::Utf8(String::new())
         }
     }
@@ -221,7 +231,8 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::Jsonb
             | PgType::TextArray
             | PgType::Bytea
-            | PgType::Vector,
+            | PgType::Vector
+            | PgType::Tsvector,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -447,6 +458,20 @@ fn read_column(
                 ) };
                 CellValue::Utf8(text.unwrap_or_else(|| {
                     pgrx::error!("could not render a vector column for cold storage")
+                }))
+            }
+            None => CellValue::Null,
+        },
+        // A tsvector datum is not a text datum either: render it with the type's own output function.
+        PgType::Tsvector => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+            Some(element) => {
+                let datum = element.datum();
+                // SAFETY: `datum` is a non-null `tsvector` value read from this tuple.
+                let text = unsafe {
+                    crate::merge_scan::pg::literals::datum_output_text(datum, pgrx::pg_sys::TSVECTOROID)
+                };
+                CellValue::Utf8(text.unwrap_or_else(|| {
+                    pgrx::error!("could not render a tsvector column for cold storage")
                 }))
             }
             None => CellValue::Null,

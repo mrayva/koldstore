@@ -29,6 +29,7 @@ const TAG_ARRAY_ELEMENT: u8 = 0x01;
 const TAG_JSON_KEY: u8 = 0x02;
 const TAG_JSON_PAIR: u8 = 0x03;
 const TAG_JSON_ELEMENT: u8 = 0x04;
+const TAG_TSVECTOR_LEXEME: u8 = 0x05;
 
 /// Which column type a filter is built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub enum TermFilterKind {
     TextArray,
     /// A `jsonb` document stored as JSON text.
     Jsonb,
+    /// A `tsvector`, stored as its text form (`'a':1A,2B 'b':3`).
+    Tsvector,
 }
 
 /// The hash a term is stored under, as the `bigint` the catalog query compares against.
@@ -50,6 +53,222 @@ fn array_element_term(element: &str) -> Vec<u8> {
     term.push(TAG_ARRAY_ELEMENT);
     term.extend_from_slice(element.as_bytes());
     term
+}
+
+fn lexeme_term(lexeme: &str) -> Vec<u8> {
+    let mut term = Vec::with_capacity(lexeme.len() + 1);
+    term.push(TAG_TSVECTOR_LEXEME);
+    term.extend_from_slice(lexeme.as_bytes());
+    term
+}
+
+/// Reads one single-quoted token (`''` and backslash escapes) starting at the opening quote; returns the
+/// unescaped text and the index just past the closing quote.
+fn read_quoted(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                out.push(*chars.get(i + 1)?);
+                i += 2;
+            }
+            '\'' if chars.get(i + 1) == Some(&'\'') => {
+                out.push('\'');
+                i += 2;
+            }
+            '\'' => return Some((out, i + 1)),
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The lexemes of a `tsvector` text value. `None` when the text is not in the canonical output form.
+#[must_use]
+pub fn parse_tsvector_lexemes(text: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lexemes = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' => i += 1,
+            '\'' => {
+                let (lexeme, next) = read_quoted(&chars, i)?;
+                lexemes.push(lexeme);
+                i = next;
+                // Positions and weights (`:1A,2B`) hold no quotes or spaces.
+                if chars.get(i) == Some(&':') {
+                    while i < chars.len() && chars[i] != ' ' {
+                        i += 1;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(lexemes)
+}
+
+#[derive(Debug)]
+enum QueryNode {
+    /// A lexeme every matching document must contain.
+    Lexeme(String),
+    /// Prefix operands, `!` and anything else that proves nothing.
+    Unknown,
+    And(Vec<QueryNode>),
+    Or(Vec<QueryNode>),
+}
+
+struct QueryParser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl QueryParser {
+    fn skip_ws(&mut self) {
+        while self.chars.get(self.pos) == Some(&' ') {
+            self.pos += 1;
+        }
+    }
+
+    fn eat(&mut self, c: char) -> bool {
+        self.skip_ws();
+        if self.chars.get(self.pos) == Some(&c) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn or(&mut self) -> Option<QueryNode> {
+        let mut nodes = vec![self.and()?];
+        while self.eat('|') {
+            nodes.push(self.and()?);
+        }
+        Some(if nodes.len() == 1 { nodes.pop()? } else { QueryNode::Or(nodes) })
+    }
+
+    fn and(&mut self) -> Option<QueryNode> {
+        let mut nodes = vec![self.phrase()?];
+        while self.eat('&') {
+            nodes.push(self.phrase()?);
+        }
+        Some(if nodes.len() == 1 { nodes.pop()? } else { QueryNode::And(nodes) })
+    }
+
+    /// `<->` and `<N>` both require the two operands, so they prune like `&`.
+    fn phrase(&mut self) -> Option<QueryNode> {
+        let mut nodes = vec![self.unary()?];
+        loop {
+            self.skip_ws();
+            if self.chars.get(self.pos) != Some(&'<') {
+                break;
+            }
+            while self.chars.get(self.pos).is_some_and(|c| *c != '>') {
+                self.pos += 1;
+            }
+            self.pos += 1;
+            nodes.push(self.unary()?);
+        }
+        Some(if nodes.len() == 1 { nodes.pop()? } else { QueryNode::And(nodes) })
+    }
+
+    fn unary(&mut self) -> Option<QueryNode> {
+        if self.eat('!') {
+            self.unary()?;
+            return Some(QueryNode::Unknown);
+        }
+        if self.eat('(') {
+            let node = self.or()?;
+            return self.eat(')').then_some(node);
+        }
+        self.skip_ws();
+        if self.chars.get(self.pos) != Some(&'\'') {
+            return None;
+        }
+        let (lexeme, next) = read_quoted(&self.chars, self.pos)?;
+        self.pos = next;
+        let mut prefix = false;
+        if self.chars.get(self.pos) == Some(&':') {
+            self.pos += 1;
+            while let Some(c) = self.chars.get(self.pos).copied() {
+                match c {
+                    '*' => prefix = true,
+                    'A'..='D' | 'a'..='d' => {}
+                    _ => break,
+                }
+                self.pos += 1;
+            }
+        }
+        Some(if prefix { QueryNode::Unknown } else { QueryNode::Lexeme(lexeme) })
+    }
+}
+
+/// Most clauses a `tsquery` may expand to; beyond it the probe proves nothing.
+const MAX_QUERY_CLAUSES: usize = 64;
+
+/// CNF of a node; `None` means "no constraint".
+fn query_cnf(node: &QueryNode) -> Option<Option<TermClauses>> {
+    match node {
+        QueryNode::Unknown => Some(None),
+        QueryNode::Lexeme(lexeme) => Some(Some(vec![vec![lexeme_term(lexeme)]])),
+        QueryNode::And(children) => {
+            let mut clauses = Vec::new();
+            for child in children {
+                if let Some(mut more) = query_cnf(child)? {
+                    clauses.append(&mut more);
+                }
+            }
+            (clauses.len() <= MAX_QUERY_CLAUSES).then_some(Some(clauses))
+        }
+        QueryNode::Or(children) => {
+            let mut acc: TermClauses = Vec::new();
+            for (index, child) in children.iter().enumerate() {
+                // An unconstrained branch makes the whole disjunction unconstrained.
+                let Some(child_clauses) = query_cnf(child)? else {
+                    return Some(None);
+                };
+                if index == 0 {
+                    acc = child_clauses;
+                    continue;
+                }
+                let mut next = Vec::with_capacity(acc.len() * child_clauses.len());
+                for left in &acc {
+                    for right in &child_clauses {
+                        let mut merged = left.clone();
+                        merged.extend(right.iter().cloned());
+                        next.push(merged);
+                    }
+                }
+                if next.len() > MAX_QUERY_CLAUSES {
+                    return None;
+                }
+                acc = next;
+            }
+            Some(Some(acc))
+        }
+    }
+}
+
+/// `tsv @@ <tsquery>`: the lexemes a matching document must contain, from the query's text form.
+/// `None` when the query proves nothing (negation, prefixes, too many alternatives) or cannot be parsed.
+#[must_use]
+pub fn tsquery_clauses(text: &str) -> Option<TermClauses> {
+    let mut parser = QueryParser {
+        chars: text.chars().collect(),
+        pos: 0,
+    };
+    let node = parser.or()?;
+    parser.skip_ws();
+    if parser.pos != parser.chars.len() {
+        return None;
+    }
+    query_cnf(&node)?.filter(|clauses| !clauses.is_empty())
 }
 
 fn json_key_term(key: &str) -> Vec<u8> {
@@ -295,6 +514,15 @@ impl TermFilterBuilder {
                 Ok(value) => emit_json_terms(&value, true, &mut emit),
                 Err(_) => false,
             },
+            TermFilterKind::Tsvector => match parse_tsvector_lexemes(text) {
+                Some(lexemes) => {
+                    for lexeme in lexemes {
+                        emit(lexeme_term(&lexeme));
+                    }
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -428,7 +656,49 @@ mod tests {
     }
 
     #[test]
+    fn tsvector_filter_and_tsquery_clauses() {
+        let summary = filter(
+            TermFilterKind::Tsvector,
+            &[
+                Some("'a':1A,2B 'b':3 'it''s':5 'back\\\\slash':6"),
+                None,
+                Some("'quoted lexeme':4 '日本語':1"),
+                Some(""),
+            ],
+        );
+        let probe = |q: &str| tsquery_clauses(q).map(|c| may_match(&summary, &c));
+        assert_eq!(probe("'a' & 'b'"), Some(true));
+        assert_eq!(probe("'it''s'"), Some(true));
+        assert_eq!(probe("'quoted lexeme'"), Some(true));
+        assert_eq!(probe("'日本語'"), Some(true));
+        assert_eq!(probe("'back\\\\slash'"), Some(true));
+        assert_eq!(probe("'a' <-> 'b'"), Some(true));
+        assert_eq!(probe("'a' <3> 'b'"), Some(true));
+        assert_eq!(probe("'a':A"), Some(true));
+        assert_eq!(probe("('zzz' | 'b') & 'a'"), Some(true));
+        // Mostly-empty summaries can still collide, so only assert absence for lexemes chosen to miss.
+        assert_eq!(probe("'a' & 'zzzzzz-not-here'"), Some(false));
+        assert_eq!(probe("'zzzzzz-not-here' | 'qqqqqq-not-here'"), Some(false));
+        // Unconstrained shapes prove nothing.
+        assert_eq!(probe("!'a'"), None);
+        assert_eq!(probe("'a':*"), None);
+        assert_eq!(probe("'a' | 'b':*"), None);
+        assert_eq!(probe("'a' | !'b'"), None);
+        assert_eq!(probe(""), None);
+        assert_eq!(probe("'a' &"), None);
+        // `!` under AND leaves the other side.
+        assert_eq!(tsquery_clauses("'a' & !'b'").map(|c| c.len()), Some(1));
+        // OR of ANDs distributes.
+        assert_eq!(
+            tsquery_clauses("('a' & 'b') | 'c'").map(|c| c.len()),
+            Some(2)
+        );
+        assert_eq!(parse_tsvector_lexemes("'a' junk"), None);
+    }
+
+    #[test]
     fn term_encoding_is_frozen() {
+        assert_eq!(lexeme_term("w"), vec![5, b'w']);
         assert_eq!(term_hash(&array_element_term("x")), term_hash(&[1, b'x']));
         assert_eq!(json_key_term("k"), vec![2, b'k']);
         assert_eq!(json_element_term(b"t"), vec![4, b't']);

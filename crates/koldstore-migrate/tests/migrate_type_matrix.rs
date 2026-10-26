@@ -28,7 +28,7 @@ fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
             "{supported} should be supported"
         );
     }
-    for unsupported in ["inet", "geometry", "tsvector", "cidr"] {
+    for unsupported in ["inet", "geometry", "tsquery", "cidr"] {
         assert!(
             !koldstore_migrate::constraints::type_supported(unsupported),
             "{unsupported} should be unsupported"
@@ -42,7 +42,7 @@ fn migration_validation_rejects_unsupported_generated_and_expression_shapes() {
     input
         .columns
         .push(koldstore_migrate::constraints::ColumnDefinition::new(
-            "search", "tsvector", true,
+            "search", "tsquery", true,
         ));
     assert!(input.validate().is_err());
 

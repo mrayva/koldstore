@@ -1,0 +1,109 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 4
+SELECT 64
+ doc_managed
+-------------
+ t
+(1 row)
+
+ doc_flushed
+-------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+ cold_type
+-----------
+ tsvector
+(1 row)
+
+ id  |                             tsv
+-----+-------------------------------------------------------------
+ 103 | 'a':1A,2B 'b':3 'back\\slash':6 'it''s':5 'quoted lexeme':4
+ 104 | 'café':3 'naïve':2 'ünïcode':1 '日本語':4
+(2 rows)
+
+SET
+UPDATE 2
+UPDATE 2
+UPDATE 3
+UPDATE 3
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ doc_reflushed
+---------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ and_matches
+-------------
+ t
+(1 row)
+
+ or_matches
+------------
+ t
+(1 row)
+
+ not_matches
+-------------
+ t
+(1 row)
+
+ prefix_matches
+----------------
+ t
+(1 row)
+
+ phrase_matches
+----------------
+ t
+(1 row)
+
+ weight_matches
+----------------
+ t
+(1 row)
+
+ commuted_matches
+------------------
+ t
+(1 row)
+
+ ranking_matches
+-----------------
+ t
+(1 row)
+
+ lexeme_count_matches
+----------------------
+ t
+(1 row)
+

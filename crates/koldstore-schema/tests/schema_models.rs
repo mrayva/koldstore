@@ -10,7 +10,7 @@ fn type_matrix_reports_supported_and_unsupported_types() {
 
     assert!(matrix.support_for("int8").supported);
     assert!(matrix.support_for("text").supported);
-    let unsupported = matrix.support_for("tsvector");
+    let unsupported = matrix.support_for("tsquery");
     assert!(!unsupported.supported);
     assert!(unsupported
         .diagnostic

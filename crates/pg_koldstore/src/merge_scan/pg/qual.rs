@@ -445,12 +445,15 @@ unsafe fn term_predicate_from_op(
 ) -> Option<SegmentTermPredicate> {
     let op_expr = expr.cast::<pg_sys::OpExpr>();
     let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
-    if !matches!(opname, "@>" | "&&" | "?" | "?|" | "?&") || !operator_is_pg_catalog((*op_expr).opno) {
+    if !matches!(opname, "@>" | "&&" | "?" | "?|" | "?&" | "@@") || !operator_is_pg_catalog((*op_expr).opno) {
         return None;
     }
     let args = list_node_pointers((*op_expr).args);
     if args.len() != 2 {
         return None;
+    }
+    if opname == "@@" {
+        return tsvector_match_predicate(&args, catalog, params);
     }
     // `&&` is commutative; the others only mean what we need with the column on the left.
     let (column, literal) = match var_column(args[0].cast::<pg_sys::Expr>(), catalog) {
@@ -502,6 +505,72 @@ unsafe fn term_predicate_from_op(
         column_id: column.column_id.get(),
         clauses,
     })
+}
+
+/// `tsv @@ query` (either order) over a constant, bound or text-search-function-built `tsquery`.
+unsafe fn tsvector_match_predicate(
+    args: &[*mut std::ffi::c_void],
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<SegmentTermPredicate> {
+    let (column, query) = match var_column(args[0].cast::<pg_sys::Expr>(), catalog) {
+        Some(column) => (column, args[1]),
+        None => (var_column(args[1].cast::<pg_sys::Expr>(), catalog)?, args[0]),
+    };
+    if column.pg_type != koldstore_schema::PgType::Tsvector {
+        return None;
+    }
+    let tsquery_oid = pg_sys::Oid::from(3615_u32);
+    let query = super::literals::unwrap_relabel(query.cast::<pg_sys::Expr>());
+    if query.is_null() {
+        return None;
+    }
+    let datum = if (*query).type_ == pg_sys::NodeTag::T_FuncExpr {
+        tsquery_from_function(query.cast::<pg_sys::FuncExpr>(), params)?
+    } else {
+        let (datum, isnull, literal_type) = super::literals::const_or_param_datum(query, params)?;
+        if isnull || literal_type != tsquery_oid {
+            return None;
+        }
+        datum
+    };
+    let clauses = koldstore_parquet::tsquery_clauses(&datum_output_text(datum, tsquery_oid)?)?;
+    Some(SegmentTermPredicate {
+        column_id: column.column_id.get(),
+        clauses,
+    })
+}
+
+/// Evaluates `to_tsquery` / `plainto_tsquery` / `phraseto_tsquery` / `websearch_to_tsquery` over constant
+/// or bound arguments. They are stable, so the planner leaves them in place, yet their value is fixed for
+/// the statement and the scan prunes at its start.
+unsafe fn tsquery_from_function(
+    func: *mut pg_sys::FuncExpr,
+    params: pg_sys::ParamListInfo,
+) -> Option<pg_sys::Datum> {
+    let name = cstr_to_str(pg_sys::get_func_name((*func).funcid))?;
+    if !matches!(
+        name,
+        "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery" | "websearch_to_tsquery"
+    ) || pg_sys::get_func_namespace((*func).funcid) != pg_sys::PG_CATALOG_NAMESPACE.into()
+    {
+        return None;
+    }
+    let args = list_node_pointers((*func).args);
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        let (datum, isnull, _) = super::literals::const_or_param_datum(arg.cast::<pg_sys::Expr>(), params)?;
+        if isnull {
+            return None;
+        }
+        values.push(datum);
+    }
+    let collation = (*func).inputcollid;
+    match values.as_slice() {
+        [text] => Some(pg_sys::OidFunctionCall1Coll((*func).funcid, collation, *text)),
+        [config, text] => Some(pg_sys::OidFunctionCall2Coll((*func).funcid, collation, *config, *text)),
+        _ => None,
+    }
 }
 
 /// Renders a datum through its type's output function.

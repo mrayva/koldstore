@@ -396,7 +396,11 @@ bound (`[0:2]={x,y,z}`) and every `jsonb` value, bare JSON strings included
 (`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, so it renumbers a `text[]`'s
 lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
 
-Listing a `text[]` or `jsonb` column in `pruning_columns` also gives every new segment a *term
+`tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
+`tests/sql/tsvector_type.sql`). A `GENERATED ... STORED` `tsvector` column is still rejected, like
+every generated column; keep it a plain column maintained by a trigger or by the application.
+
+Listing a `text[]`, `jsonb` or `tsvector` column in `pruning_columns` also gives every new segment a *term
 filter* (a one-hash membership bitmap in `cold_segment_index.value_summary`, built from the
 array elements, or the keys, scalar values and key/value pairs of the JSON at any depth). A
 constant or parameter `@>`, `&&`, `?`, `?|` or `?&` predicate then skips the segments whose
@@ -405,6 +409,13 @@ newer version could be hidden and a stale one resurrected), never for a NULL or 
 a bare scalar `jsonb @>` probe or a non-deterministic collation, and never for segments
 written before the column was listed (they carry no filter and are always read). The filter
 can only over-read, never under-read; `tests/sql/term_filter_pruning.sql` pins both.
+
+For a `tsvector` the filter holds the lexemes, and `tsv @@ q` (either order) with a constant or
+parameter `tsquery`, or `to_tsquery` / `plainto_tsquery` / `phraseto_tsquery` /
+`websearch_to_tsquery` over constants or parameters, is reduced to the lexemes a match must contain:
+`&` and phrase operators require both sides, `|` requires either, weights are ignored. Negation and
+prefix (`:*`) operands prove nothing, so a query made only of them reads every segment
+(`tests/sql/tsvector_pruning.sql`).
 
 ## pgvector
 

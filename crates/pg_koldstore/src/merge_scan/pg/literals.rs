@@ -153,6 +153,7 @@ unsafe fn datum_typed_sql(
         | PgType::Jsonb
         | PgType::TextArray
         | PgType::Vector
+        | PgType::Tsvector
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp

@@ -357,6 +357,9 @@ impl TermFilterState {
                         koldstore_parquet::TermFilterKind::TextArray
                     }
                     koldstore_parquet::PgType::Jsonb => koldstore_parquet::TermFilterKind::Jsonb,
+                    koldstore_parquet::PgType::Tsvector => {
+                        koldstore_parquet::TermFilterKind::Tsvector
+                    }
                     _ => return None,
                 };
                 Some(Self {

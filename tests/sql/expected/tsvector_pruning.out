@@ -1,0 +1,128 @@
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 400
+INSERT 0 3
+SELECT 403
+ tsv_managed
+-------------
+ t
+(1 row)
+
+ tsv_caught_up
+---------------
+ t
+(1 row)
+
+ tsv_flushed
+-------------
+ t
+(1 row)
+
+ tsv_many_segments
+-------------------
+ t
+(1 row)
+
+ tsv_has_term_filters
+----------------------
+ t
+(1 row)
+
+ lexeme_prunes
+---------------
+ t
+(1 row)
+
+ and_prunes
+------------
+ t
+(1 row)
+
+ or_prunes
+-----------
+ t
+(1 row)
+
+ commuted_prunes
+-----------------
+ t
+(1 row)
+
+ plain_prunes
+--------------
+ t
+(1 row)
+
+ phrase_prunes
+---------------
+ t
+(1 row)
+
+ websearch_prunes
+------------------
+ t
+(1 row)
+
+ absent_opens_nothing
+----------------------
+ t
+(1 row)
+
+ common_reads_all
+------------------
+ t
+(1 row)
+
+ negation_reads_all
+--------------------
+ t
+(1 row)
+
+ prefix_reads_all
+------------------
+ t
+(1 row)
+
+ tsv_mismatches_before
+-----------------------
+                     0
+(1 row)
+
+PREPARE
+SET
+ count
+-------
+    21
+(1 row)
+
+RESET
+ param_matches
+---------------
+ t
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+RESET
+ tsv_fenced
+------------
+ t
+(1 row)
+
+ tsv_reflushed
+---------------
+ t
+(1 row)
+
+ tsv_fenced_2
+--------------
+ t
+(1 row)
+
+ tsv_mismatches_after
+----------------------
+                    0
+(1 row)
+

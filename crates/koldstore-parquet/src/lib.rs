@@ -46,7 +46,7 @@ pub use key_bounds::{
 };
 pub use term_filter::{
     TermClauses, TermFilterBuilder, TermFilterKind, array_contains_clauses, array_overlap_clauses,
-    jsonb_contains_clauses, jsonb_exists_clauses, term_hash,
+    jsonb_contains_clauses, jsonb_exists_clauses, parse_tsvector_lexemes, term_hash, tsquery_clauses,
 };
 pub use vector_sketch::{
     KnnMetric, VectorSketch, VectorSketchBuilder, knn_excluded, parse_vector_text,

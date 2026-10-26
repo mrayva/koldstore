@@ -69,6 +69,7 @@ unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_s
             | PgType::Jsonb
             | PgType::TextArray
             | PgType::Vector
+            | PgType::Tsvector
             | PgType::Bytea,
             _,
         ) => input_datum_from_text(&cell_input_text(value, pg_type)?, pg_type),
@@ -125,6 +126,7 @@ fn cell_input_text(value: &CellValue, pg_type: PgType) -> Result<String, String>
         | PgType::Timestamp
         | PgType::Date
         | PgType::Vector
+        | PgType::Tsvector
         | PgType::Bytea => {
             match value {
                 CellValue::Utf8(text) => Ok(text.clone()),

@@ -349,14 +349,14 @@ fn manage_rejects_table_without_primary_key() {
 }
 
 #[pg_test]
-#[should_panic(expected = "unsupported PostgreSQL type: tsvector")]
+#[should_panic(expected = "unsupported PostgreSQL type: inet")]
 fn manage_rejects_unsupported_column_type() {
     let suffix = unique_suffix("badtype");
     let schema = format!("pgtest_{suffix}");
     let storage = register_temp_storage(&suffix);
     Spi::run(&format!("CREATE SCHEMA {schema}")).expect("schema");
     Spi::run(&format!(
-        "CREATE TABLE {schema}.bad_types (id bigint PRIMARY KEY, search tsvector)"
+        "CREATE TABLE {schema}.bad_types (id bigint PRIMARY KEY, search inet)"
     ))
     .expect("create bad_types");
 
