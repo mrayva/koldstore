@@ -23,7 +23,14 @@ pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, S
         | PgType::Bytea
         | PgType::TextArray
         | PgType::Vector
-        | PgType::Tsvector => {
+        | PgType::Tsvector
+        | PgType::Json
+        | PgType::Inet
+        | PgType::Cidr
+        | PgType::Macaddr
+        | PgType::Bpchar
+        | PgType::Time
+        | PgType::Timetz => {
             Ok(SqlParamType::Text)
         }
         PgType::Uuid => Ok(SqlParamType::Uuid),
@@ -191,12 +198,19 @@ fn default_cell_value(pg_type: PgType) -> CellValue {
         PgType::Uuid => CellValue::Utf8(NIL_UUID_PLACEHOLDER.to_string()),
         // Bound but never compared on the first page, yet it must parse as `numeric`.
         PgType::Numeric => CellValue::Utf8("0".to_string()),
+        // Placeholders that still parse as the column's own type.
+        PgType::Inet => CellValue::Utf8("0.0.0.0".to_string()),
+        PgType::Cidr => CellValue::Utf8("0.0.0.0/0".to_string()),
+        PgType::Macaddr => CellValue::Utf8("00:00:00:00:00:00".to_string()),
+        PgType::Time | PgType::Timetz => CellValue::Utf8("00:00:00".to_string()),
+        PgType::Json => CellValue::Utf8("null".to_string()),
         PgType::Text
         | PgType::Jsonb
         | PgType::Bytea
         | PgType::TextArray
         | PgType::Vector
-        | PgType::Tsvector => {
+        | PgType::Tsvector
+        | PgType::Bpchar => {
             CellValue::Utf8(String::new())
         }
     }
@@ -232,7 +246,14 @@ fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedB
             | PgType::TextArray
             | PgType::Bytea
             | PgType::Vector
-            | PgType::Tsvector,
+            | PgType::Tsvector
+            | PgType::Json
+            | PgType::Inet
+            | PgType::Cidr
+            | PgType::Macaddr
+            | PgType::Bpchar
+            | PgType::Time
+            | PgType::Timetz,
             CellValue::Utf8(text),
         ) => Ok(OwnedBind::Text(text.clone())),
         (PgType::Uuid, CellValue::Utf8(text)) => {
@@ -462,16 +483,26 @@ fn read_column(
             }
             None => CellValue::Null,
         },
-        // A tsvector datum is not a text datum either: render it with the type's own output function.
-        PgType::Tsvector => match tuple.get::<pgrx::AnyElement>(ordinal)? {
+        // These datums are not text datums either: render each with its type's own output function.
+        PgType::Tsvector
+        | PgType::Json
+        | PgType::Inet
+        | PgType::Cidr
+        | PgType::Macaddr
+        | PgType::Bpchar
+        | PgType::Time
+        | PgType::Timetz => match tuple.get::<pgrx::AnyElement>(ordinal)? {
             Some(element) => {
                 let datum = element.datum();
-                // SAFETY: `datum` is a non-null `tsvector` value read from this tuple.
+                // SAFETY: `datum` is a non-null value of this column's type read from this tuple.
                 let text = unsafe {
-                    crate::merge_scan::pg::literals::datum_output_text(datum, pgrx::pg_sys::TSVECTOROID)
+                    crate::merge_scan::pg::literals::datum_output_text(
+                        datum,
+                        pgrx::pg_sys::Oid::from(column.pg_type.type_oid()),
+                    )
                 };
                 CellValue::Utf8(text.unwrap_or_else(|| {
-                    pgrx::error!("could not render a tsvector column for cold storage")
+                    pgrx::error!("could not render a {} column for cold storage", column.pg_type.catalog_type_name())
                 }))
             }
             None => CellValue::Null,

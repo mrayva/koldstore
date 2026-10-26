@@ -154,6 +154,13 @@ unsafe fn datum_typed_sql(
         | PgType::TextArray
         | PgType::Vector
         | PgType::Tsvector
+        | PgType::Json
+        | PgType::Inet
+        | PgType::Cidr
+        | PgType::Macaddr
+        | PgType::Bpchar
+        | PgType::Time
+        | PgType::Timetz
         | PgType::Bytea
         | PgType::Timestamptz
         | PgType::Timestamp

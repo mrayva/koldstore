@@ -65,6 +65,13 @@ impl TypeMatrix {
             "date",
             "vector",
             "tsvector",
+            "json",
+            "inet",
+            "cidr",
+            "macaddr",
+            "bpchar",
+            "time",
+            "timetz",
         ];
         Self {
             entries: supported

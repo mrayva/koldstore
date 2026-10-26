@@ -48,6 +48,20 @@ pub enum PgType {
     Vector = 15,
     /// `tsvector`
     Tsvector = 16,
+    /// `json`
+    Json = 17,
+    /// `inet`
+    Inet = 18,
+    /// `cidr`
+    Cidr = 19,
+    /// `macaddr`
+    Macaddr = 20,
+    /// `char(n)` / `bpchar`
+    Bpchar = 21,
+    /// `time` (without time zone)
+    Time = 22,
+    /// `timetz`
+    Timetz = 23,
 }
 
 /// PostgreSQL integer array type OID.
@@ -113,6 +127,13 @@ impl PgType {
             "timestamp" => Ok(Self::Timestamp),
             "vector" => Ok(Self::Vector),
             "tsvector" => Ok(Self::Tsvector),
+            "json" => Ok(Self::Json),
+            "inet" => Ok(Self::Inet),
+            "cidr" => Ok(Self::Cidr),
+            "macaddr" => Ok(Self::Macaddr),
+            "bpchar" => Ok(Self::Bpchar),
+            "time" => Ok(Self::Time),
+            "timetz" => Ok(Self::Timetz),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -144,6 +165,13 @@ impl PgType {
             14 => Some(Self::Timestamp),
             15 => Some(Self::Vector),
             16 => Some(Self::Tsvector),
+            17 => Some(Self::Json),
+            18 => Some(Self::Inet),
+            19 => Some(Self::Cidr),
+            20 => Some(Self::Macaddr),
+            21 => Some(Self::Bpchar),
+            22 => Some(Self::Time),
+            23 => Some(Self::Timetz),
             _ => None,
         }
     }
@@ -169,6 +197,13 @@ impl PgType {
             Self::Timestamp => "timestamp",
             Self::Vector => "vector",
             Self::Tsvector => "tsvector",
+            Self::Json => "json",
+            Self::Inet => "inet",
+            Self::Cidr => "cidr",
+            Self::Macaddr => "macaddr",
+            Self::Bpchar => "bpchar",
+            Self::Time => "time",
+            Self::Timetz => "timetz",
         }
     }
 
@@ -227,6 +262,13 @@ impl PgType {
             // Not a fixed OID: look it up from the column (`atttypid`) or `to_regtype('vector')`.
             Self::Vector => 0,
             Self::Tsvector => 3614,
+            Self::Json => 114,
+            Self::Inet => 869,
+            Self::Cidr => 650,
+            Self::Macaddr => 829,
+            Self::Bpchar => 1042,
+            Self::Time => 1083,
+            Self::Timetz => 1266,
         }
     }
 
@@ -374,6 +416,13 @@ mod tests {
             PgType::Timestamp,
             PgType::Vector,
             PgType::Tsvector,
+            PgType::Json,
+            PgType::Inet,
+            PgType::Cidr,
+            PgType::Macaddr,
+            PgType::Bpchar,
+            PgType::Time,
+            PgType::Timetz,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

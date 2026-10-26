@@ -1,0 +1,107 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 3
+SELECT 63
+ tf_managed
+------------
+ t
+(1 row)
+
+ tf_flushed
+------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ rows_identical_after_flush
+----------------------------
+ t
+(1 row)
+
+ pg_typeof | pg_typeof | pg_typeof | pg_typeof | pg_typeof |       pg_typeof        |      pg_typeof
+-----------+-----------+-----------+-----------+-----------+------------------------+---------------------
+ json      | inet      | cidr      | macaddr   | character | time without time zone | time with time zone
+(1 row)
+
+ id  |     j      |      ip       |   c    |        t
+-----+------------+---------------+--------+-----------------
+ 101 | {"a":null} | ::1           |        | 23:59:59.999999
+ 102 | []         | 2001:db8::/32 | x      | 00:00:00
+ 103 | null       | 10.0.0.1      | abcdef | 24:00:00
+(3 rows)
+
+ inet_contained
+----------------
+ t
+(1 row)
+
+ cidr_eq
+---------
+ t
+(1 row)
+
+ time_range
+------------
+ t
+(1 row)
+
+ bpchar_eq
+-----------
+ t
+(1 row)
+
+ json_extract
+--------------
+ t
+(1 row)
+
+ macaddr_eq
+------------
+ t
+(1 row)
+
+SET
+UPDATE 4
+UPDATE 4
+UPDATE 2
+UPDATE 2
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ tf_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ tf_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: interval at line 1 column 373

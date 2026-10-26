@@ -276,7 +276,7 @@ fn unsupported_types_are_rejected_through_migration_validation() {
     context
         .migration
         .columns
-        .push(ColumnDefinition::new("network", "inet", true));
+        .push(ColumnDefinition::new("network", "money", true));
 
     assert!(matches!(
         validate_manage_table(context),

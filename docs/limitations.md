@@ -396,6 +396,12 @@ bound (`[0:2]={x,y,z}`) and every `jsonb` value, bare JSON strings included
 (`cold_array_jsonb_fidelity`). Hydrate-on-write goes through row JSON, so it renumbers a `text[]`'s
 lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
 
+`json`, `inet`, `cidr`, `macaddr`, `char(n)`, `time` and `timetz` are managed the same way, as their text
+form, so a cold read returns exactly what was stored (`json` keeps its whitespace and key order; `char(n)` keeps its
+padding; `tests/sql/text_form_types.sql`). They carry no min/max statistics and cannot be a migration-order column.
+Still unsupported, and refused by `manage_table`: `interval` (its text form depends on `IntervalStyle`), `money`,
+enums, domains, composite and range types, geometric types, `bit`/`varbit`, `xml`, and arrays other than `text[]`.
+
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
 storage like any column, and hydrate-on-write and `unmanage_table` skip them on insert so PostgreSQL recomputes

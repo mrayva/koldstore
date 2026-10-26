@@ -24,6 +24,17 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
     if normalized.starts_with("timestamp(") && normalized.ends_with(" with time zone") {
         return "timestamptz".to_string();
     }
+    // `time [(p)] without|with time zone`; PostgreSQL reports the long form.
+    if normalized.starts_with("time") {
+        let bare = normalized.split_once('(').map_or(normalized.clone(), |(head, tail)| {
+            format!("{}{}", head.trim_end(), tail.split_once(')').map_or("", |(_, rest)| rest))
+        });
+        match bare.trim() {
+            "time" | "time without time zone" => return "time".to_string(),
+            "timetz" | "time with time zone" => return "timetz".to_string(),
+            _ => {}
+        }
+    }
     if let Some((prefix, suffix)) = normalized.split_once('(') {
         if suffix.ends_with(')') {
             normalized = prefix.trim().to_string();
@@ -37,6 +48,7 @@ pub fn canonical_postgres_type_name(type_name: &str) -> String {
         "real" => "float4".to_string(),
         "double precision" => "float8".to_string(),
         "character varying" => "varchar".to_string(),
+        "character" | "bpchar" => "bpchar".to_string(),
         "timestamp with time zone" => "timestamptz".to_string(),
         _ => normalized,
     }
