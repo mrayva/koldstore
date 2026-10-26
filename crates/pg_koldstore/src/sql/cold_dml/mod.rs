@@ -297,6 +297,22 @@ fn locate_row_json(
     }
 }
 
+/// Quoted, comma-separated list of the columns a hydration `INSERT` may supply: every live column
+/// except generated ones, which PostgreSQL recomputes from the (already restored) base columns.
+#[cfg(feature = "pg")]
+fn insertable_columns(table_oid: pgrx::pg_sys::Oid) -> Result<String, String> {
+    let args = [DatumWithOid::from(table_oid)];
+    let columns = crate::txn_writes::with_check_suppressed(|| {
+        pgrx::Spi::get_one_with_args::<String>(
+            "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) FROM pg_attribute \
+             WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped AND attgenerated = ''",
+            &args,
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    columns.ok_or_else(|| "hydrate: table has no insertable columns".to_string())
+}
+
 /// Materializes `pk` into the heap from cold storage if it is not already a
 /// live heap row. Returns the number of rows inserted (0 or 1).
 ///
@@ -325,9 +341,10 @@ fn hydrate_pk_impl(
     // jsonb_populate_record, never a scan on the target table, so this
     // step cannot hit the same planner blind spot as step 1 would if
     // combined. ON CONFLICT DO NOTHING absorbs a hot-race between steps.
+    let columns = insertable_columns(table_oid)?;
     let insert_sql = format!(
-        "INSERT INTO {quoted} \
-         SELECT * FROM jsonb_populate_record(NULL::{quoted}, $1) \
+        "INSERT INTO {quoted} ({columns}) \
+         SELECT {columns} FROM jsonb_populate_record(NULL::{quoted}, $1) \
          ON CONFLICT DO NOTHING"
     );
     let statement = koldstore_common::SqlStatement::write("koldstore hydrate_pk", &insert_sql)
@@ -391,9 +408,10 @@ pub(crate) fn hydrate_rows(table_oid: pgrx::pg_sys::Oid, rows: &[serde_json::Val
         return Ok(0);
     }
     let quoted = qualified_relation(table_oid)?.quoted();
+    let columns = insertable_columns(table_oid)?;
     let insert_sql = format!(
-        "INSERT INTO {quoted} \
-         SELECT * FROM jsonb_populate_recordset(NULL::{quoted}, $1) \
+        "INSERT INTO {quoted} ({columns}) \
+         SELECT {columns} FROM jsonb_populate_recordset(NULL::{quoted}, $1) \
          ON CONFLICT DO NOTHING"
     );
     let statement =

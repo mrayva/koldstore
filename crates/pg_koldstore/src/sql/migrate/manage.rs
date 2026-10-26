@@ -524,7 +524,7 @@ fn manage_table_validation_context<'a>(
                 column.pg_type,
                 column.catalog_type_name().to_string(),
                 column.nullable,
-                column.generated,
+                column.generated && !column.stored_generated,
             )
         })
         .collect();

@@ -97,6 +97,7 @@ SELECT COALESCE(
             'nullable', NOT a.attnotnull,
             'identity', a.attidentity <> '',
             'generated', a.attgenerated <> '',
+            'stored_generated', a.attgenerated = 's',
             'default_expr', pg_get_expr(d.adbin, d.adrelid)
         )
         ORDER BY a.attnum

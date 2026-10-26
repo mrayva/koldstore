@@ -1,0 +1,84 @@
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 60
+INSERT 0 1
+CREATE TABLE
+INSERT 0 61
+ same_before
+-------------
+ t
+(1 row)
+
+ gdoc_managed
+--------------
+ t
+(1 row)
+
+ gdoc_flushed
+--------------
+ t
+(1 row)
+
+ mostly_cold
+-------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+SET
+UPDATE 2
+UPDATE 2
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+INSERT 0 1
+INSERT 0 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ same_after_dml
+----------------
+ t
+(1 row)
+
+ gdoc_reflushed
+----------------
+ t
+(1 row)
+
+ same_after_reflush
+--------------------
+ t
+(1 row)
+
+ fts_matches
+-------------
+ t
+(1 row)
+
+ int_matches
+-------------
+ t
+(1 row)
+
+psql:<PATH>: ERROR:  column "n2" can only be updated to DEFAULT
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: generated column `b` is not supported
+ gdoc_unmanaged
+----------------
+ t
+(1 row)
+
+ same_after_unmanage
+---------------------
+ t
+(1 row)
+

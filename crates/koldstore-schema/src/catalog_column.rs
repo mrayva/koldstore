@@ -27,6 +27,9 @@ pub struct CatalogColumn {
     pub identity: bool,
     /// Whether PostgreSQL computes the column from a generation expression.
     pub generated: bool,
+    /// Whether the generation expression is `STORED` (the value lives in the heap and is copied to cold
+    /// storage as data; `VIRTUAL` columns have no storage and are unsupported).
+    pub stored_generated: bool,
     /// Default expression, when catalog metadata exposes one.
     pub default_expr: Option<String>,
 }
@@ -42,6 +45,8 @@ struct CatalogColumnWire {
     identity: bool,
     #[serde(default)]
     generated: bool,
+    #[serde(default)]
+    stored_generated: bool,
     #[serde(default)]
     default_expr: Option<String>,
 }
@@ -59,6 +64,7 @@ impl TryFrom<CatalogColumnWire> for CatalogColumn {
             nullable: wire.nullable,
             identity: wire.identity,
             generated: wire.generated,
+            stored_generated: wire.stored_generated,
             default_expr: wire.default_expr,
         })
     }
@@ -77,6 +83,7 @@ impl Serialize for CatalogColumn {
             nullable: self.nullable,
             identity: self.identity,
             generated: self.generated,
+            stored_generated: self.stored_generated,
             default_expr: self.default_expr.clone(),
         }
         .serialize(serializer)
@@ -147,6 +154,7 @@ impl CatalogColumn {
             nullable: false,
             identity: false,
             generated: false,
+            stored_generated: false,
             default_expr: None,
         }
     }

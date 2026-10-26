@@ -397,8 +397,10 @@ bound (`[0:2]={x,y,z}`) and every `jsonb` value, bare JSON strings included
 lower bound from 1 and turns a JSON `null` in a `jsonb` column into SQL `NULL`.
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
-`tests/sql/tsvector_type.sql`). A `GENERATED ... STORED` `tsvector` column is still rejected, like
-every generated column; keep it a plain column maintained by a trigger or by the application.
+`tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
+storage like any column, and hydrate-on-write and `unmanage_table` skip them on insert so PostgreSQL recomputes
+them from the restored base columns (`tests/sql/generated_columns.sql`). `VIRTUAL` generated columns have no
+storage and are still rejected.
 
 Listing a `text[]`, `jsonb` or `tsvector` column in `pruning_columns` also gives every new segment a *term
 filter* (a one-hash membership bitmap in `cold_segment_index.value_summary`, built from the

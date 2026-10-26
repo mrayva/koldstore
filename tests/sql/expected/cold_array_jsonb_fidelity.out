@@ -1,7 +1,7 @@
 CREATE TABLE
-psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: integer[] at line 1 column 321
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: integer[] at line 1 column 375
 CREATE TABLE
-psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: numeric[] at line 1 column 321
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: numeric[] at line 1 column 375
 CREATE TABLE
 INSERT 0 8
 SELECT 8

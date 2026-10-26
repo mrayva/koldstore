@@ -25,7 +25,7 @@ fn clean_schema_demigration_rehydrates_from_logical_reader_without_system_column
 
     assert!(sql.contains("CREATE TEMP TABLE pg_koldstore_demigrate_42 AS SELECT * FROM koldstore.logical_items_current"));
     assert!(sql.contains("TRUNCATE TABLE ONLY \"app\".\"items\""));
-    assert!(sql.contains("INSERT INTO \"app\".\"items\" SELECT * FROM pg_koldstore_demigrate_42"));
+    assert!(sql.contains("SELECT %1$s FROM pg_koldstore_demigrate_42"));
     assert!(sql.contains("DROP TABLE IF EXISTS \"koldstore\".\"items__cl\""));
     assert!(sql.contains("UPDATE koldstore.schemas"));
     assert!(!sql.contains("_deleted"));
