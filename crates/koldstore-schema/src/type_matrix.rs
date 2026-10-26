@@ -93,6 +93,12 @@ impl TypeMatrix {
             "enum",
             "xml",
             "money",
+            "int4range",
+            "int8range",
+            "numrange",
+            "tsrange",
+            "tstzrange",
+            "daterange",
         ];
         Self {
             entries: supported

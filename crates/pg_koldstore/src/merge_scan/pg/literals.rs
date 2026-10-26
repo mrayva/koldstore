@@ -144,7 +144,8 @@ unsafe fn datum_typed_sql(
     let pg_type = column.pg_type;
     match pg_type {
         // An enum's type OID is per column and not carried here: leave the predicate to the executor.
-        PgType::Enum | PgType::Money => None,
+        PgType::Enum | PgType::Money | PgType::Int4Range | PgType::Int8Range | PgType::NumRange
+        | PgType::TsRange | PgType::TstzRange | PgType::DateRange => None,
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
@@ -402,10 +403,14 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     if oid == pg_sys::INTERVALOID || oid == pg_sys::INTERVALARRAYOID {
         pg_sys::IntervalStyle = pg_sys::INTSTYLE_ISO_8601 as _;
     }
-    if matches!(
-        oid,
-        pg_sys::DATEARRAYOID | pg_sys::TIMESTAMPARRAYOID | pg_sys::TIMESTAMPTZARRAYOID
-    ) {
+    // The timestamp/date range types (tsrange, tstzrange, daterange) print their bounds the same way.
+    let range_oid = matches!(oid.to_u32(), 3908 | 3910 | 3912);
+    if range_oid
+        || matches!(
+            oid,
+            pg_sys::DATEARRAYOID | pg_sys::TIMESTAMPARRAYOID | pg_sys::TIMESTAMPTZARRAYOID
+        )
+    {
         pg_sys::DateStyle = pg_sys::USE_ISO_DATES as _;
     }
     let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));

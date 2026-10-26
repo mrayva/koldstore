@@ -104,6 +104,18 @@ pub enum PgType {
     Xml = 43,
     /// `money`, stored as its raw int64 (locale independent).
     Money = 44,
+    /// `int4range`, stored as its canonical text form.
+    Int4Range = 45,
+    /// `int8range`, stored as its canonical text form.
+    Int8Range = 46,
+    /// `numrange`, stored as its canonical text form.
+    NumRange = 47,
+    /// `tsrange`, stored as its canonical text form.
+    TsRange = 48,
+    /// `tstzrange`, stored as its canonical text form.
+    TstzRange = 49,
+    /// `daterange`, stored as its canonical text form.
+    DateRange = 50,
 }
 
 /// PostgreSQL integer array type OID.
@@ -197,6 +209,12 @@ impl PgType {
             "enum" => Ok(Self::Enum),
             "xml" => Ok(Self::Xml),
             "money" => Ok(Self::Money),
+            "int4range" => Ok(Self::Int4Range),
+            "int8range" => Ok(Self::Int8Range),
+            "numrange" => Ok(Self::NumRange),
+            "tsrange" => Ok(Self::TsRange),
+            "tstzrange" => Ok(Self::TstzRange),
+            "daterange" => Ok(Self::DateRange),
             normalized => Err(SchemaError::UnsupportedType(normalized.to_string())),
         }
     }
@@ -256,6 +274,12 @@ impl PgType {
             42 => Some(Self::Enum),
             43 => Some(Self::Xml),
             44 => Some(Self::Money),
+            45 => Some(Self::Int4Range),
+            46 => Some(Self::Int8Range),
+            47 => Some(Self::NumRange),
+            48 => Some(Self::TsRange),
+            49 => Some(Self::TstzRange),
+            50 => Some(Self::DateRange),
             _ => None,
         }
     }
@@ -309,6 +333,12 @@ impl PgType {
             Self::Enum => "enum",
             Self::Xml => "xml",
             Self::Money => "money",
+            Self::Int4Range => "int4range",
+            Self::Int8Range => "int8range",
+            Self::NumRange => "numrange",
+            Self::TsRange => "tsrange",
+            Self::TstzRange => "tstzrange",
+            Self::DateRange => "daterange",
         }
     }
 
@@ -396,6 +426,12 @@ impl PgType {
             Self::Enum => 0,
             Self::Xml => 142,
             Self::Money => 790,
+            Self::Int4Range => 3904,
+            Self::Int8Range => 3926,
+            Self::NumRange => 3906,
+            Self::TsRange => 3908,
+            Self::TstzRange => 3910,
+            Self::DateRange => 3912,
         }
     }
 
@@ -571,6 +607,12 @@ mod tests {
             PgType::Enum,
             PgType::Xml,
             PgType::Money,
+            PgType::Int4Range,
+            PgType::Int8Range,
+            PgType::NumRange,
+            PgType::TsRange,
+            PgType::TstzRange,
+            PgType::DateRange,
         ] {
             assert_eq!(
                 PgType::from_discriminant(pg_type.discriminant()),

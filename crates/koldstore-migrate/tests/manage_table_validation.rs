@@ -276,7 +276,7 @@ fn unsupported_types_are_rejected_through_migration_validation() {
     context
         .migration
         .columns
-        .push(ColumnDefinition::new("network", "int4range", true));
+        .push(ColumnDefinition::new("network", "int4multirange", true));
 
     assert!(matches!(
         validate_manage_table(context),

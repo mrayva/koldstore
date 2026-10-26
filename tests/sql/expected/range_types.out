@@ -1,0 +1,133 @@
+CREATE FUNCTION
+SET
+CREATE TABLE
+INSERT 0 5
+INSERT 0 55
+SELECT 60
+ rg_managed
+------------
+ t
+(1 row)
+
+ rg_flushed
+------------
+ t
+(1 row)
+
+ same_after_flush
+------------------
+ t
+(1 row)
+
+ id
+----
+(0 rows)
+
+ id |     i4     |        i8         |      nr       |           dr
+----+------------+-------------------+---------------+-------------------------
+  1 | [1,10)     | [1,9000000000000) | [1.5,2.25]    | [2024-01-01,2024-02-01)
+  2 | empty      | empty             | empty         | empty
+  3 | (,6)       | [7,)              | (,)           | (,)
+  4 |            |                   |               |
+  5 | [-100,-49) | empty             | [0.000,0.000] | [-infinity,infinity]
+(5 rows)
+
+ id |                      ts                       |                         tz
+----+-----------------------------------------------+-----------------------------------------------------
+  1 | ["<TS>","<TS>") | ["<TS>","<TS>")
+  2 | empty                                         | empty
+  3 | ["<TS>",)                      | (,"<TS>")
+  4 |                                               |
+  5 | (-infinity,infinity)                          | [-infinity,infinity]
+(5 rows)
+
+ overlap_i4
+------------
+          9
+(1 row)
+
+ overlap_i4_ctl
+----------------
+              9
+(1 row)
+
+ contains_date
+---------------
+            12
+(1 row)
+
+ contains_date_ctl
+-------------------
+                12
+(1 row)
+
+ empties
+---------
+       1
+(1 row)
+
+ id | lower | upper | upper_inf
+----+-------+-------+-----------
+  1 |     1 |    10 | f
+  3 |       |     6 | f
+(2 rows)
+
+SET
+SET
+ id |          tz_lo          |        ts_lo        |   dr_lo
+----+-------------------------+---------------------+------------
+  1 | 01.01.2024 09:00:00 JST | 01.01.2024 10:00:00 | 01.01.2024
+  6 | 07.01.2024 09:00:00 JST | 01.01.2024 06:00:00 | 07.01.2024
+(2 rows)
+
+ id |        tz_lo_ctl        |      ts_lo_ctl      | dr_lo_ctl
+----+-------------------------+---------------------+------------
+  1 | 01.01.2024 09:00:00 JST | 01.01.2024 10:00:00 | 01.01.2024
+  6 | 07.01.2024 09:00:00 JST | 01.01.2024 06:00:00 | 07.01.2024
+(2 rows)
+
+RESET
+SET
+SET
+UPDATE 4
+UPDATE 4
+UPDATE 1
+UPDATE 1
+DELETE 1
+DELETE 1
+RESET
+ mirror_caught_up
+------------------
+ t
+(1 row)
+
+ rows_match_after_dml
+----------------------
+ t
+(1 row)
+
+ rg_reflushed
+--------------
+ t
+(1 row)
+
+ rows_match_after_reflush
+--------------------------
+ t
+(1 row)
+
+ rg_unmanaged
+--------------
+ t
+(1 row)
+
+ rows_match_after_unmanage
+---------------------------
+ t
+(1 row)
+
+CREATE TYPE
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: sqlreg.floatrange at line 1 column 382
+CREATE TABLE
+psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: int4multirange at line 1 column 379

@@ -28,7 +28,7 @@ fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
             "{supported} should be supported"
         );
     }
-    for unsupported in ["box", "geometry", "tsquery", "int4range"] {
+    for unsupported in ["box", "geometry", "tsquery", "int4multirange"] {
         assert!(
             !koldstore_migrate::constraints::type_supported(unsupported),
             "{unsupported} should be unsupported"

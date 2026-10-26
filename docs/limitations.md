@@ -407,8 +407,12 @@ A user-defined enum column is stored as its label and read back as the column's 
 A domain over a supported type (nested domains included) is stored as its base type, as a column, a key or the
 migration-order column; the domain's constraints keep applying to the heap, hydrate-on-write included
 (`tests/sql/domain_types.sql`). A domain over an unsupported type is refused like the type itself.
+The built-in range types (`int4range`, `int8range`, `numrange`, `tsrange`, `tstzrange`, `daterange`) are managed in
+their canonical text form: empty, unbounded and infinite bounds round-trip, and `tstzrange`/date ranges read the same
+under any `TimeZone` or `DateStyle` (`tests/sql/range_types.sql`). Range predicates (`&&`, `@>`) are evaluated by the
+executor on the merged rows rather than pushed into the cold read, and ranges have no min/max statistics.
 Still unsupported, and refused by `manage_table`:
-composite and range types, geometric types, and arrays of other element types (`money[]`, enum arrays, …).
+composite types, multiranges, user-defined range types, geometric types, and arrays of other element types (`money[]`, enum arrays, …).
 
 `tsvector` columns are managed as their text form (lexemes, positions and weights round-trip;
 `tests/sql/tsvector_type.sql`). `STORED` generated columns (including a generated `tsvector`) are supported: their values are flushed to cold
