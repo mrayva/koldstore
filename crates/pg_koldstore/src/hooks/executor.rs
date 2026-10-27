@@ -663,7 +663,10 @@ mod live {
         let Some(where_sql) = candidate.where_sql.as_deref() else {
             return;
         };
-        if candidate.prior_write || crate::sql::cold_dml::guard::suspended() {
+        if candidate.prior_write
+            || crate::hooks::hydrate_on_write::covers_statement()
+            || crate::sql::cold_dml::guard::suspended()
+        {
             return;
         }
         let has_cold = matches!(

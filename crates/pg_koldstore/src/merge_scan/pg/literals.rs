@@ -399,7 +399,7 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     // Dates and timestamps likewise follow DateStyle; ISO output parses back under every style, and a
     // timestamptz carries its UTC offset, so the instant survives any TimeZone. Array, range and
     // composite output call the element/field output functions, so the same styles apply to them.
-    // Geometric coordinates are float8, whose digits follow extra_float_digits; > 0 is the shortest
+    // Geometric coordinates and float4[]/float8[] elements are floats, whose digits follow extra_float_digits; > 0 is the shortest
     // text that parses back to the same bits.
     let composite = pg_sys::get_typtype(oid) as u8 == b'c';
     let (saved_interval, saved_date, saved_digits) =
@@ -418,7 +418,10 @@ pub(crate) unsafe fn datum_output_text(datum: pg_sys::Datum, oid: pg_sys::Oid) -
     {
         pg_sys::DateStyle = pg_sys::USE_ISO_DATES as _;
     }
-    if composite || matches!(oid.to_u32(), 600 | 601 | 602 | 603 | 604 | 628 | 718) {
+    if composite
+        || matches!(oid, pg_sys::FLOAT4ARRAYOID | pg_sys::FLOAT8ARRAYOID)
+        || matches!(oid.to_u32(), 600 | 601 | 602 | 603 | 604 | 628 | 718)
+    {
         pg_sys::extra_float_digits = 1;
     }
     let text = cstr_owned_pfree(pg_sys::OidOutputFunctionCall(typoutput, datum));

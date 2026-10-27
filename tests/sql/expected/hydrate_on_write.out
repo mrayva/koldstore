@@ -637,3 +637,45 @@ RESET
  t
 (1 row)
 
+CREATE TABLE
+CREATE TABLE
+INSERT 0 30
+INSERT 0 30
+ stale_managed
+---------------
+ t
+(1 row)
+
+ stale_flushed
+---------------
+ t
+(1 row)
+
+ settle
+--------
+
+(1 row)
+
+SET
+UPDATE 3
+UPDATE 3
+DELETE 3
+DELETE 3
+DELETE 3
+DELETE 3
+RESET
+ settle
+--------
+
+(1 row)
+
+ stale_matches_control
+-----------------------
+ t
+(1 row)
+
+ stale_unmanaged
+-----------------
+ t
+(1 row)
+

@@ -102,3 +102,27 @@ RESET
 
 CREATE TABLE
 psql:<PATH>: ERROR:  migrate table failed: column catalog decode failed: unsupported PostgreSQL type: money[] at line 1 column 372
+CREATE TABLE
+INSERT 0 3
+SELECT 3
+ farr_managed
+--------------
+ t
+(1 row)
+
+SET
+ farr_flushed
+--------------
+ t
+(1 row)
+
+RESET
+ id
+----
+(0 rows)
+
+ id |                         f8
+----+----------------------------------------------------
+  1 | {0.30000000000000004,1e-300,133.66666666666666,-0}
+(1 row)
+

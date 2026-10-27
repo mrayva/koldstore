@@ -363,3 +363,29 @@ RESET koldstore.hydrate_on_write;
 
 -- the job lock is released after the statements: a flush still runs
 SELECT sqlreg.flush_table('sqlreg.h1'::regclass) IS NOT NULL AS flush_after_hydration;
+
+-- A range DELETE over rows an earlier hydrate-on-write UPDATE left hot (their superseded cold copy
+-- is still in the segment): the statement's own delete must not make the post-statement recount
+-- mistake that stale copy for an unhydrated cold-only match.
+CREATE TABLE sqlreg.h_stale (id bigint PRIMARY KEY, v text);
+CREATE TABLE sqlreg.h_stale_ctl (id bigint PRIMARY KEY, v text);
+INSERT INTO sqlreg.h_stale SELECT g, 'r' || g FROM generate_series(1, 30) g;
+INSERT INTO sqlreg.h_stale_ctl SELECT g, 'r' || g FROM generate_series(1, 30) g;
+SELECT koldstore.manage_table(
+  table_name => 'sqlreg.h_stale'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
+  min_flush_rows => 1, max_rows_per_file => 40, migration_order_by => 'id', auto_flush => false
+) IS NOT NULL AS stale_managed;
+SELECT sqlreg.flush_table('sqlreg.h_stale'::regclass) IS NOT NULL AS stale_flushed;
+SELECT sqlreg.settle();
+SET koldstore.hydrate_on_write = on;
+UPDATE sqlreg.h_stale SET v = 'upd' WHERE id BETWEEN 2 AND 4;
+UPDATE sqlreg.h_stale_ctl SET v = 'upd' WHERE id BETWEEN 2 AND 4;
+DELETE FROM sqlreg.h_stale WHERE id BETWEEN 2 AND 4;
+DELETE FROM sqlreg.h_stale_ctl WHERE id BETWEEN 2 AND 4;
+DELETE FROM sqlreg.h_stale WHERE id BETWEEN 10 AND 12;
+DELETE FROM sqlreg.h_stale_ctl WHERE id BETWEEN 10 AND 12;
+RESET koldstore.hydrate_on_write;
+SELECT sqlreg.settle();
+SELECT (SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM sqlreg.h_stale t)
+     = (SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM sqlreg.h_stale_ctl t) AS stale_matches_control;
+SELECT koldstore.unmanage_table('sqlreg.h_stale'::regclass, true, true) IS NOT NULL AS stale_unmanaged;

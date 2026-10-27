@@ -82,3 +82,19 @@ SELECT sqlreg.fingerprint('sqlreg.ar', 'id') = sqlreg.fingerprint('sqlreg.ar_ctl
 CREATE TABLE sqlreg.ar_ts (id bigint PRIMARY KEY, t money[]);
 SELECT koldstore.manage_table(table_name => 'sqlreg.ar_ts'::regclass, storage => 'sqlreg_fs', hot_row_limit => 5,
   min_flush_rows => 1, migration_order_by => 'id', auto_flush => false);
+
+-- float arrays flushed from a session with a low extra_float_digits keep every digit
+CREATE TABLE sqlreg.farr (id bigint PRIMARY KEY, f4 real[], f8 double precision[], n int NOT NULL);
+INSERT INTO sqlreg.farr VALUES
+  (1, '{0.1,1.17549435e-38,3.4028235e38}', '{0.30000000000000004,1e-300,133.66666666666666,-0}', 1),
+  (2, '{NaN,Infinity,-Infinity}', '{NaN,Infinity,-Infinity}', 2),
+  (3, '{{0.1,0.2},{0.3,0.4}}', '{{0.1,0.2},{0.30000000000000004,0.4}}', 3);
+CREATE TABLE sqlreg.farr_ctl AS SELECT * FROM sqlreg.farr;
+SELECT koldstore.manage_table(table_name => 'sqlreg.farr'::regclass, storage => 'sqlreg_fs', hot_row_limit => 1,
+  min_flush_rows => 1, max_rows_per_file => 20, migration_order_by => 'n', auto_flush => false) IS NOT NULL AS farr_managed;
+SET extra_float_digits = -3;
+SELECT sqlreg.flush_table('sqlreg.farr'::regclass) IS NOT NULL AS farr_flushed;
+RESET extra_float_digits;
+SELECT a.id FROM sqlreg.farr a JOIN sqlreg.farr_ctl b USING (id)
+WHERE a.f4::text IS DISTINCT FROM b.f4::text OR a.f8::text IS DISTINCT FROM b.f8::text ORDER BY a.id;
+SELECT id, f8 FROM sqlreg.farr WHERE id = 1;

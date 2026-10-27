@@ -334,6 +334,14 @@ unsafe fn leaf_lock_target(
     }
 }
 
+/// True when `hydrate_before_scan` ran for this statement with the same `WHERE` clause the cold-DML
+/// guard recounts, so every cold-only match was already hydrated (or the statement was refused).
+/// The post-statement recount is then redundant and can be wrong: a hydrated row the statement
+/// itself deleted un-masks its stale cold copy until the async mirror applies the tombstone.
+pub(crate) fn covers_statement() -> bool {
+    unsafe { crate::guc::hydrate_on_write() && !isolation_blocks_hydration() && pg_sys::ParallelWorkerNumber < 0 }
+}
+
 /// True when the session's isolation level (and, for `SERIALIZABLE`, the cold-read policy)
 /// rules hydration out for this statement entirely. See the module doc comment.
 unsafe fn isolation_blocks_hydration() -> bool {
