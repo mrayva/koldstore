@@ -34,6 +34,11 @@ PostgreSQL operation keeps its normal semantics across both tiers.
   cold data, and plain `EXPLAIN` are unaffected, and a rolled-back savepoint
   forgets its writes. `SET koldstore.allow_same_txn_cold_reads = on` accepts the
   stale-read risk instead.
+- A committed `DELETE` of a row that had already moved to cold storage (via hydrate-on-write)
+  is masked from reads only once the async mirror applies its tombstone, normally
+  within a few hundred milliseconds. A read issued right after the `COMMIT` can still return the
+  deleted row; call `wait_for_async_mirror()` first when the read must not see it. Updates are not
+  affected (the hot copy wins immediately).
 - `wait_for_async_mirror()` fences commits up to a captured WAL boundary. Call
   it before acquiring a fixed `REPEATABLE READ` or `SERIALIZABLE` snapshot; it
   cannot advance an existing snapshot or decode the caller's uncommitted work.

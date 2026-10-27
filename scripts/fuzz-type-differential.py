@@ -19,6 +19,8 @@ import os
 import random
 import sys
 import tempfile
+import threading
+import time
 
 import psycopg2
 
@@ -116,6 +118,9 @@ def main():
     ap.add_argument("--ops", type=int, default=400)
     ap.add_argument("--batch", type=int, default=25)
     ap.add_argument("--rows", type=int, default=120)
+    ap.add_argument("--no-hydrate", action="store_true", help="run with koldstore.hydrate_on_write off: cold-row DML must be refused or match the control")
+    ap.add_argument("--crash-every", type=int, default=0, help="SIGKILL this session's backend every N ops (crash recovery, then reconnect); needs the server on this host")
+    ap.add_argument("--crash-mid", type=float, default=0.0, help="probability that a flush/compact has its backend SIGKILLed mid-statement (then recovered and retried)")
     ap.add_argument("--stop-on-refusal", action="store_true", help="exit 3 at the first refused statement, leaving the database")
     args = ap.parse_args()
     rnd = random.Random(args.seed)
@@ -129,7 +134,14 @@ def main():
         conn.autocommit = True
         return conn
 
-    admin = connect("postgres")
+    for _ in range(60):  # the server may still be in crash recovery from a previous run
+        try:
+            admin = connect("postgres")
+            break
+        except psycopg2.OperationalError:
+            time.sleep(1)
+    else:
+        sys.exit("server not accepting connections")
     cur = admin.cursor()
     import time
     for attempt in range(30):  # the previous run's slot may still be releasing
@@ -157,11 +169,35 @@ def main():
     cur.execute("""SELECT koldstore.manage_table(table_name => 'fz.t'::regclass, storage => 'fuzz_fs',
         hot_row_limit => 5, min_flush_rows => 1, max_rows_per_file => 40, migration_order_by => 'id',
         auto_flush => false) IS NOT NULL""")
-    cur.execute("SET koldstore.hydrate_on_write = on")
+    def session_setup():
+        cur.execute("SET koldstore.min_max_rows_per_file = 1")
+        cur.execute("SET koldstore.flush_execution = 'inline'")
+        cur.execute(f"SET koldstore.hydrate_on_write = {'off' if args.no_hydrate else 'on'}")
+
+    session_setup()
+
+    def crash_and_reconnect():
+        nonlocal conn, cur
+        cur.execute("SELECT pg_backend_pid()")
+        pid = cur.fetchone()[0]
+        os.kill(pid, 9)
+        for _ in range(60):
+            time.sleep(1)
+            try:
+                conn = connect(args.db)
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                break
+            except psycopg2.Error:
+                continue
+        else:
+            fail("server did not come back after the backend kill")
+        session_setup()
+        stats["crash"] += 1
 
     names = [n for n, _, _ in COLUMNS]
     set_list = ", ".join(f"{n} = r.{n}" for n in names)
-    stats = dict(ins=0, dup=0, upd=0, rng_upd=0, dele=0, flush=0, compact=0, checks=0, refused=0)
+    stats = dict(ins=0, dup=0, upd=0, rng_upd=0, dele=0, flush=0, compact=0, checks=0, refused=0, crash=0)
     live = set()
     next_id = [1]
     salt = [0]
@@ -208,12 +244,45 @@ def main():
         for k in READ_SETTINGS:
             cur.execute(f"RESET {k}")
 
+    def arm_kill():
+        """Maybe SIGKILL this backend a few ms into the next statement."""
+        if not (args.crash_mid and rnd.random() < args.crash_mid):
+            return None
+        cur.execute("SELECT pg_backend_pid()")
+        pid = cur.fetchone()[0]
+        timer = threading.Timer(rnd.uniform(0.0, 0.25), lambda: os.kill(pid, 9))
+        timer.start()
+        return timer
+
+    def recover_connection():
+        nonlocal conn, cur
+        for _ in range(60):
+            time.sleep(1)
+            try:
+                conn = connect(args.db)
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                break
+            except psycopg2.Error:
+                continue
+        else:
+            fail("server did not come back after the backend kill")
+        session_setup()
+        stats["crash"] += 1
+
     def flush(force=True):
         random_settings()
         for attempt in range(40):
+            timer = arm_kill()
             try:
                 cur.execute("SELECT koldstore.flush_table('fz.t'::regclass, %s)", (force,))
+                if timer:
+                    timer.cancel()
                 break
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                recover_connection()
+                random_settings()
+                continue
             except psycopg2.Error as e:
                 m = str(e)
                 if attempt < 39 and any(k in m for k in ("apply lock", "retry shortly", "flush unavailable", "flush already in progress")):
@@ -225,10 +294,16 @@ def main():
 
     def compact():
         for attempt in range(40):
+            timer = arm_kill()
             try:
                 cur.execute("SELECT koldstore.compact_table('fz.t'::regclass)")
                 cur.execute("SELECT koldstore.reap_compacted_segments('fz.t'::regclass, 0)")
+                if timer:
+                    timer.cancel()
                 break
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                recover_connection()
+                continue
             except psycopg2.Error as e:
                 m = str(e)
                 if attempt < 39 and any(k in m for k in ("apply lock", "retry shortly", "already in progress", "unavailable")):
@@ -342,6 +417,9 @@ def main():
             flush(force=rnd.random() < 0.7)
         else:
             compact()
+        if args.crash_every and op_no % args.crash_every == 0:
+            crash_and_reconnect()
+            check(f"crash recovery at op {op_no}")
         if op_no % args.batch == 0:
             check(f"op {op_no}")
     flush()
