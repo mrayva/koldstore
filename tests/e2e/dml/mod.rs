@@ -12,6 +12,7 @@ mod persistent_wal_applier;
 mod fk_guard;
 mod copy_to_cold;
 mod inbound_fk_guard;
+mod alter_table;
 mod purge_where;
 mod cold_schema_evolution;
 mod rename_cold;

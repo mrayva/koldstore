@@ -350,7 +350,7 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
 
         db.client
             .batch_execute(&format!(
-                "ALTER TABLE {} ADD COLUMN search tsvector",
+                "ALTER TABLE {} ADD COLUMN search int4multirange",
                 table.relation
             ))
             .await?;
@@ -358,10 +358,10 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
         let flush_err = db
             .flush_table(&table.relation)
             .await
-            .expect_err("unsupported tsvector must fail the flush job");
+            .expect_err("unsupported int4multirange must fail the flush job");
         let detail = flush_err.to_string();
         assert!(
-            detail.contains("unsupported PostgreSQL type: tsvector")
+            detail.contains("unsupported PostgreSQL type: int4multirange")
                 || detail.contains("status=error"),
             "unexpected flush error: {detail}"
         );
@@ -384,7 +384,7 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
         assert_eq!(job.get::<_, String>(1), "failed");
         let error_trace = job.get::<_, Option<String>>(2).unwrap_or_default();
         assert!(
-            error_trace.contains("unsupported PostgreSQL type: tsvector"),
+            error_trace.contains("unsupported PostgreSQL type: int4multirange"),
             "unexpected error_trace: {error_trace}"
         );
         // Managed-table SELECT goes through merge scan, which re-introspects the

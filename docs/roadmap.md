@@ -160,8 +160,8 @@ Time-based `max_flush_interval` and predicate move policies remain deferred. See
 
 ## Table management and flush policy
 
-- `koldstore.alter_table` for changing managed-table settings after
-  registration.
+- `koldstore.alter_table` (flush limits and `auto_flush`) is implemented; changing storage,
+  compression, scope and Parquet options after registration is not.
 - Time- or age-based flush triggers such as `max_flush_interval`.
 - Background scheduling, richer retry controls, and operational policy tuning.
 

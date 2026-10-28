@@ -922,6 +922,15 @@ change a cold-only key are rejected rather than silently matching nothing
 (upstream #122). Rows changed in a transaction are visible to later reads only
 after `COMMIT`; see `koldstore.allow_same_txn_cold_reads` above.
 
+To change a managed table's flush settings without unmanaging it, use
+`koldstore.alter_table(table, hot_row_limit, min_flush_rows, max_rows_per_file, auto_flush)`; a NULL
+argument keeps the current value, and the result is the table's new options. The values are checked
+like `manage_table`'s (positive, `max_rows_per_file` at or above `koldstore.min_max_rows_per_file`).
+A table managed without a flush policy can opt in by passing `hot_row_limit` (the other two limits
+then default to 1000). Existing segments are untouched; the new limits apply from the next flush.
+On a partitioned parent it changes every managed leaf and the template for partitions created later.
+Owner or superuser only. Storage, compression, scope and Parquet options are not alterable.
+
 To delete many rows at once, cold ones included, use
 `koldstore.purge_where(table, predicate) → {purged_cold, deleted_hot}`. The predicate is a boolean
 expression over the table aliased `t`, e.g. `t.created_at < now() - interval '2 years'`. Owner or

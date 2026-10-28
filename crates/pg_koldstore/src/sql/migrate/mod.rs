@@ -7,6 +7,8 @@
 use koldstore_migrate::rehydrate::DemigrateOptions;
 
 #[cfg(feature = "pg")]
+mod alter;
+#[cfg(feature = "pg")]
 mod introspection_spi;
 #[cfg(feature = "pg")]
 mod manage;
@@ -170,6 +172,33 @@ pub fn set_table_auto_flush_pg(table_name: pgrx::PgRelation, enabled: bool) -> b
     }
     set_table_auto_flush_pg_impl(table_name.oid(), enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
+}
+
+/// Changes a managed table's flush settings in place; a NULL argument keeps the current value.
+///
+/// SQL contract: `koldstore.alter_table(table_name regclass, hot_row_limit bigint default null,
+/// min_flush_rows bigint default null, max_rows_per_file bigint default null, auto_flush boolean
+/// default null) returns jsonb` (the table's new options). Existing segments are untouched; the new
+/// limits apply to the next flush. On a partitioned parent it applies to every managed leaf and to
+/// the template used for partitions created later.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "alter_table", schema = "koldstore", security_definer)]
+pub fn alter_table_pg(
+    table_name: pgrx::PgRelation,
+    hot_row_limit: pgrx::default!(Option<i64>, "NULL"),
+    min_flush_rows: pgrx::default!(Option<i64>, "NULL"),
+    max_rows_per_file: pgrx::default!(Option<i64>, "NULL"),
+    auto_flush: pgrx::default!(Option<bool>, "NULL"),
+) -> pgrx::JsonB {
+    let table_oid = table_name.oid();
+    crate::security::require_relation_owner_or_superuser(table_oid, "change this table's settings");
+    crate::preload::require_shared_preload();
+    let changes = alter::FlushChanges { hot_row_limit, min_flush_rows, max_rows_per_file, auto_flush };
+    let fail = |error: String| -> ! { pgrx::error!("alter_table failed: {error}") };
+    if partition::is_partitioned_parent(table_oid) {
+        return pgrx::JsonB(partition::alter_parent(table_oid, changes).unwrap_or_else(|e| fail(e)));
+    }
+    pgrx::JsonB(alter::alter_table_impl(table_oid, changes).unwrap_or_else(|e| fail(e)))
 }
 
 /// Unmanages a managed table through the SQL API.

@@ -1352,6 +1352,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$rebuild_segment_summaries_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function alter_table(table_name regclass, hot_row_limit bigint DEFAULT NULL::bigint, min_flush_rows bigint DEFAULT NULL::bigint, max_rows_per_file bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT NULL::boolean) returns jsonb security definer [alter_table_pg_wrapper]": {
+            "add": "koldstore.alter_table(table_name regclass, hot_row_limit bigint, min_flush_rows bigint, max_rows_per_file bigint, auto_flush boolean)",
+            "name": "alter_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.alter_table(table_name regclass, hot_row_limit bigint DEFAULT NULL::bigint, min_flush_rows bigint DEFAULT NULL::bigint, max_rows_per_file bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT NULL::boolean)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$alter_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function rebuild_table(table_name regclass, ddl text) returns uuid security definer [rebuild_table_pg_wrapper]": {
             "add": "koldstore.rebuild_table(table_name regclass, ddl text)",
             "name": "rebuild_table",

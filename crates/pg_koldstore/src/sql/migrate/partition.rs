@@ -382,6 +382,21 @@ pub(crate) fn set_auto_flush_parent(parent: Oid, enabled: bool) -> bool {
     true
 }
 
+/// `alter_table(parent, ...)`: applies to every managed leaf and to the template. Validates
+/// against the template first (when present) so a bad value changes nothing; all leaves run in
+/// the caller's transaction, so a later failure still rolls everything back.
+#[cfg(feature = "pg")]
+pub(super) fn alter_parent(parent: Oid, changes: super::alter::FlushChanges) -> Result<serde_json::Value, String> {
+    let mut last = serde_json::Value::Null;
+    for leaf in managed_leaf_oids(parent)? {
+        last = super::alter::alter_table_impl(leaf, changes)?;
+    }
+    if templates_table_ready() {
+        super::alter::alter_template(parent, changes)?;
+    }
+    Ok(last)
+}
+
 /// `set_partition_auto_manage(parent, enabled)`: pauses or resumes managing new partitions.
 #[cfg(feature = "pg")]
 pub(crate) fn set_auto_manage(parent: Oid, enabled: bool) -> bool {

@@ -527,3 +527,14 @@ CREATE FUNCTION koldstore."rebuild_table"(
 STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'rebuild_table_pg_wrapper';
+
+CREATE FUNCTION koldstore."alter_table"(
+	"table_name" regclass,
+	"hot_row_limit" bigint DEFAULT NULL,
+	"min_flush_rows" bigint DEFAULT NULL,
+	"max_rows_per_file" bigint DEFAULT NULL,
+	"auto_flush" bool DEFAULT NULL
+) RETURNS jsonb
+SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'alter_table_pg_wrapper';
