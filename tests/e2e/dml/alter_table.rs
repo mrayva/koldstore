@@ -98,7 +98,9 @@ async fn alter_table_refuses_unmanaged_tables() -> Result<()> {
         let db = common::TestDb::start(target, "alter_table_unmanaged").await?;
         db.client.batch_execute("CREATE TABLE plain_t (id bigint PRIMARY KEY)").await?;
         let result = db.client.simple_query("SELECT koldstore.alter_table('plain_t'::regclass, hot_row_limit => 5)").await;
-        assert!(result.is_err());
+        let error = result.expect_err("unmanaged table must be refused");
+        let message = error.as_db_error().map(|db| db.message().to_owned()).unwrap_or_default();
+        assert!(message.contains("not an active managed table"), "unexpected error: {message}");
     }
     Ok(())
 }

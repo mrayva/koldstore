@@ -85,7 +85,7 @@ fn read_options(sql: &str, oid: Oid) -> Result<Option<Value>, String> {
 pub(super) fn alter_table_impl(table_oid: Oid, changes: FlushChanges) -> Result<Value, String> {
     let _table_lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)?;
     let current = read_options(
-        "SELECT COALESCE(options, '{}'::jsonb) FROM koldstore.schemas WHERE table_oid = $1 AND active",
+        "SELECT (SELECT COALESCE(options, '{}'::jsonb) FROM koldstore.schemas WHERE table_oid = $1 AND active)",
         table_oid,
     )?
     .ok_or("table is not an active managed table")?;
@@ -102,7 +102,7 @@ pub(super) fn alter_table_impl(table_oid: Oid, changes: FlushChanges) -> Result<
 
 /// Applies `changes` to the partition template of `parent`, so later partitions follow them.
 pub(super) fn alter_template(parent: Oid, changes: FlushChanges) -> Result<(), String> {
-    let Some(current) = read_options("SELECT options FROM koldstore.partition_templates WHERE parent_oid = $1", parent)?
+    let Some(current) = read_options("SELECT (SELECT options FROM koldstore.partition_templates WHERE parent_oid = $1)", parent)?
     else {
         return Ok(());
     };
