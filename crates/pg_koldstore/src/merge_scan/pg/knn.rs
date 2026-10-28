@@ -242,7 +242,7 @@ pub(super) fn masking_rows_bound(
     );
     let count = crate::catalog::owner::with_extension_owner(|| {
         super::with_hook_disabled(|| {
-            pgrx::Spi::get_one::<i64>(&sql).map_err(|error| error.to_string())
+            crate::spi::select_one_sql::<i64>(&sql, &[]).map_err(|error| error.to_string())
         })
     })??;
     Ok(u64::try_from(count.unwrap_or(0)).unwrap_or(u64::MAX))

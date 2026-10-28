@@ -17,7 +17,7 @@ pub(crate) fn load_migration_catalog(
     use pgrx::datum::DatumWithOid;
 
     let oid = pgrx::pg_sys::Oid::from(table_oid);
-    let primary_key_json = pgrx::Spi::get_one_with_args::<String>(
+    let primary_key_json = crate::spi::select_one_sql::<String>(
         &introspection::plan_primary_key_columns_probe()
             .map_err(|error| error.to_string())?
             .sql,
@@ -25,7 +25,7 @@ pub(crate) fn load_migration_catalog(
     )
     .map_err(|error| error.to_string())?
     .unwrap_or_else(|| "[]".to_string());
-    let columns_json = pgrx::Spi::get_one_with_args::<String>(
+    let columns_json = crate::spi::select_one_sql::<String>(
         &introspection::plan_table_columns_probe()
             .map_err(|error| error.to_string())?
             .sql,
@@ -33,7 +33,7 @@ pub(crate) fn load_migration_catalog(
     )
     .map_err(|error| error.to_string())?
     .unwrap_or_else(|| "[]".to_string());
-    let indexed_columns_json = pgrx::Spi::get_one_with_args::<String>(
+    let indexed_columns_json = crate::spi::select_one_sql::<String>(
         &introspection::plan_indexed_columns_probe()
             .map_err(|error| error.to_string())?
             .sql,
@@ -56,7 +56,7 @@ pub(super) fn manage_table_constraints_catalog(
 ) -> Result<koldstore_migrate::constraints::ManageTableConstraintsCatalog, String> {
     use pgrx::datum::DatumWithOid;
 
-    let json = pgrx::Spi::get_one_with_args::<String>(
+    let json = crate::spi::select_one_sql::<String>(
         &introspection::plan_manage_table_constraints_probe()
             .map_err(|error| error.to_string())?
             .sql,

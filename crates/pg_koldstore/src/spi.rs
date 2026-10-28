@@ -245,6 +245,33 @@ where
     }
 }
 
+/// Runs an ad-hoc read-only query and decodes the first column of the first row.
+///
+/// `pgrx::Spi::get_one_with_args` goes through `update` and so forces a real transaction id, which
+/// a hot standby refuses. During recovery this uses `select` instead; elsewhere it behaves exactly
+/// like `get_one_with_args`. Planner and executor reads must use it. The caller guarantees `sql`
+/// is a plain `SELECT`.
+///
+/// # Errors
+///
+/// Returns an error if SPI execution fails or the datum cannot be decoded as `T`.
+#[cfg(feature = "pg")]
+pub(crate) fn select_one_sql<T>(
+    sql: &str,
+    args: &[pgrx::datum::DatumWithOid],
+) -> pgrx::spi::Result<Option<T>>
+where
+    T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum,
+{
+    // Only a hot standby needs the read-only path. `select` runs on the caller's existing snapshot
+    // instead of taking a fresh one, which changed what flush saw on the primary (a regression in
+    // `composite_key_exact_disjoint`), so the primary keeps the original `get_one_with_args`.
+    if !unsafe { pgrx::pg_sys::RecoveryInProgress() } {
+        return pgrx::Spi::get_one_with_args::<T>(sql, args);
+    }
+    pgrx::Spi::connect(|client| first_row(client.select(sql, Some(1), args)?))
+}
+
 /// Executes a read-only parameterized statement and decodes the first column of
 /// the first row while the SPI connection is still open.
 ///

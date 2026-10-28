@@ -1088,6 +1088,18 @@ fn take_slot_lock_polling() -> Result<(), String> {
 /// and the slot is never advanced, so an abort discards them and the same WAL is decoded
 /// again later. Used by hydrate-on-write, whose statement may fail after the fence.
 pub fn fence_for_read() -> Result<(), String> {
+    // Both callers act on managed tables, so a missing slot means the mirror has stopped
+    // recording changes (e.g. a promoted standby that never received the slot). Proceeding
+    // would silently lose cold DML, so refuse instead of treating it as an empty backlog.
+    if !super::lifecycle::native_slot_exists(&current_slot_name()) {
+        return Err(format!(
+            "async mirror slot {} is missing, so cold changes cannot be tracked; \
+             on a promoted standby this means the slot was not synchronized from the \
+             primary (the slot is created with failover=true; the standby needs \
+             sync_replication_slots=on)",
+            current_slot_name()
+        ));
+    }
     let fence = capture_durable_wal_fence()?;
     // Free skip: the background WAL applier publishes its own *committed* progress (never a
     // foreground fence's, which runs inside the caller's own possibly-aborting transaction -- see

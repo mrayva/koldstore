@@ -112,7 +112,9 @@ fn create_logical_slot(slot: &str) {
             true,
             pgrx::pg_sys::ReplicationSlotPersistency::RS_EPHEMERAL,
             false,
-            false,
+            // failover: lets a physical standby with sync_replication_slots=on keep a copy of
+            // this slot, so a promoted standby resumes from the last confirmed LSN.
+            true,
             false,
         );
         let context = pgrx::pg_sys::CreateInitDecodingContext(
