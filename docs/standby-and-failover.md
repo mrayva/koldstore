@@ -12,6 +12,12 @@ replication copies it. The Parquet segments are objects in storage the standby c
 
 * Reads of managed tables on the standby: full scans, point and range lookups, aggregates and joins,
   hot and cold rows. Writes are refused as read-only, as on any standby.
+* Read-only SQL functions on the standby: `table_status`, `async_mirror_status`, `backup_manifest`,
+  `validate_cold_storage`, `validate_sql_objects`, `sync_sql_objects(dry_run => true)`,
+  `verify_table_integrity`, `changes_since`, `list_jobs`, `preload_status`.
+* Primary-only (they write, or apply the mirror, so a standby refuses them): `hydrate_pk`,
+  `export_table_metadata`, `wait_for_async_mirror`, flush, compaction, reap, and all manage,
+  unmanage and DDL paths.
 * Primary DML, flush and compaction replay to the standby and stay consistent.
 * Failover: the promoted node has every committed change, resumes the async mirror from the last
   confirmed LSN, and accepts DML, flush and compaction.

@@ -54,7 +54,7 @@ pub(super) fn authorize(table: Option<pgrx::pg_sys::Oid>, what: &str) {
 
 /// One query returning a single `jsonb` value rendered as text, bound with `args`.
 pub(super) fn json_query(sql: &str, args: &[DatumWithOid<'_>]) -> Result<Value, String> {
-    let text = pgrx::Spi::get_one_with_args::<String>(sql, args)
+    let text = crate::spi::select_one_sql::<String>(sql, args)
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| "null".to_string());
     serde_json::from_str(&text).map_err(|error| error.to_string())
@@ -106,7 +106,7 @@ fn backup_manifest_value(only: Option<pgrx::pg_sys::Oid>) -> Result<Value, Strin
              FROM koldstore.manifest WHERE table_oid = $1",
             &[DatumWithOid::from(oid)],
         )?;
-        let pending = pgrx::Spi::get_one_with_args::<i64>(
+        let pending = crate::spi::select_one_sql::<i64>(
             "SELECT count(*) FROM koldstore.cold_segments WHERE table_oid = $1 AND status = 'pending'",
             &[DatumWithOid::from(oid)],
         )

@@ -221,14 +221,14 @@ pub fn plan_async_mirror_slot_status() -> SqlResult<SqlStatement> {
               'active_pid', active_pid,\
               'restart_lsn', CAST(restart_lsn AS text),\
               'confirmed_flush_lsn', CAST(confirmed_flush_lsn AS text),\
-              'current_wal_lsn', CAST(pg_current_wal_lsn() AS text),\
-              'retained_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
+              'current_wal_lsn', CAST((CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END) AS text),\
+              'retained_bytes', pg_wal_lsn_diff((CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END), confirmed_flush_lsn)\
             ) AS text)\
             FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
            CAST(jsonb_build_object(\
               'slot_name', $1,\
               'present', false,\
-              'current_wal_lsn', CAST(pg_current_wal_lsn() AS text)\
+              'current_wal_lsn', CAST((CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END) AS text)\
             ) AS text)\
          )",
         [SqlParamType::Text],

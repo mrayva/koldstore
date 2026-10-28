@@ -68,7 +68,7 @@ fn live_objects() -> Result<Vec<String>, String> {
          FROM ({}) AS manifest(line, kind, ref_oid, ref_num, drop_sql)",
         object_manifest_sql()
     );
-    pgrx::Spi::get_one::<Vec<String>>(&sql)
+    crate::spi::select_one_sql::<Vec<String>>(&sql, &[])
         .map_err(|error| error.to_string())
         .map(Option::unwrap_or_default)
 }
@@ -141,7 +141,10 @@ pub(crate) fn drift_warning() -> Result<Option<String>, String> {
 
 #[cfg(feature = "pg")]
 fn installed_version() -> Result<Option<String>, String> {
-    pgrx::Spi::get_one::<String>("SELECT extversion FROM pg_extension WHERE extname = 'koldstore'")
+    crate::spi::select_one_sql::<String>(
+        "SELECT extversion FROM pg_extension WHERE extname = 'koldstore'",
+        &[],
+    )
         .map_err(|error| error.to_string())
 }
 

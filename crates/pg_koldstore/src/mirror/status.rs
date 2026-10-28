@@ -32,7 +32,7 @@ pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
     let metrics = crate::observability::async_apply_metrics();
 
     let slot_plan = plan_async_mirror_slot_status().map_err(|error| error.to_string())?;
-    let slot_row = pgrx::Spi::get_one_with_args::<String>(
+    let slot_row = crate::spi::select_one_sql::<String>(
         &slot_plan.sql,
         &[DatumWithOid::from(slot.as_str())],
     )
@@ -46,7 +46,7 @@ pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
     });
 
     let state_plan = plan_async_mirror_state_status().map_err(|error| error.to_string())?;
-    let state_row = pgrx::Spi::get_one_with_args::<String>(
+    let state_row = crate::spi::select_one_sql::<String>(
         &state_plan.sql,
         &[DatumWithOid::from(database_oid)],
     )
