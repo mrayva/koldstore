@@ -87,6 +87,7 @@ CREATE FUNCTION koldstore."_cold_fk_child_hydrate"(
 	"ref_cols" jsonb,
 	"new_row" jsonb
 ) RETURNS void
+STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'cold_fk_child_hydrate_pg_wrapper';
 
@@ -538,3 +539,26 @@ CREATE FUNCTION koldstore."alter_table"(
 SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'alter_table_pg_wrapper';
+
+-- SQL-object maintenance functions the fresh-install snapshot carries.
+CREATE FUNCTION koldstore."rebuild_segment_summaries"(
+	"table_name" regclass DEFAULT NULL,
+	"dry_run" bool DEFAULT false,
+	"max_segments" INT DEFAULT 100
+) RETURNS jsonb
+SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'rebuild_segment_summaries_pg_wrapper';
+
+CREATE FUNCTION koldstore."sync_sql_objects"(
+	"dry_run" bool DEFAULT true,
+	"drop_unexpected" bool DEFAULT false
+) RETURNS jsonb
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sync_sql_objects_pg_wrapper';
+
+CREATE FUNCTION koldstore."validate_sql_objects"() RETURNS jsonb
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'validate_sql_objects_pg_wrapper';
