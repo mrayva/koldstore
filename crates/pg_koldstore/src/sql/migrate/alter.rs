@@ -33,7 +33,7 @@ pub(super) fn apply_changes(options: &Value, changes: FlushChanges) -> Result<Va
             .and_then(Value::as_object_mut)
             .ok_or("table options hold a malformed flush policy")?;
         if policy.get("type").and_then(Value::as_str) != Some("row_limit") {
-            return Err("only row_limit flush policies can be altered".to_string());
+            return Err("only row_limit flush policies can be altered; use ALTER TABLE ... SET (koldstore_move_after = ...) for age-based ones".to_string());
         }
         for (key, value) in [
             ("hot_row_limit", changes.hot_row_limit),

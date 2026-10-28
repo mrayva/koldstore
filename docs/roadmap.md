@@ -145,7 +145,8 @@ than embedding large values in row storage.
 Built-in row-limit auto-flush scheduling is available via ephemeral maintenance
 (`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Auto-flush
 enqueues durable jobs for one-shot executors; it is not PostgreSQL autovacuum.
-Time-based `max_flush_interval` and predicate move policies remain deferred. See
+Age-based flushing is available as `koldstore_move_after` (`OlderThan` policy; set or changed with
+`ALTER TABLE ... SET (koldstore_move_after = '90 days')`). Predicate (`Filter`) move policies remain deferred. See
 [operations/scheduling.md](operations/scheduling.md).
 
 ## Storage layout and pruning
@@ -162,7 +163,7 @@ Time-based `max_flush_interval` and predicate move policies remain deferred. See
 
 - `koldstore.alter_table` (flush limits and `auto_flush`) is implemented; changing storage,
   compression, scope and Parquet options after registration is not.
-- Time- or age-based flush triggers such as `max_flush_interval`.
+- Predicate (`Filter`) move policies; `koldstore.alter_table` does not yet accept an age (`move_after`) policy.
 - Background scheduling, richer retry controls, and operational policy tuning.
 
 ## Query execution
