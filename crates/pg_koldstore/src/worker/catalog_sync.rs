@@ -69,7 +69,7 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
 
     let mut delay = FIRST_RUN_DELAY;
     // Generation last published per leader table, so an idle table costs one cheap query.
-    let mut published: HashMap<u32, i64> = HashMap::new();
+    let mut published: HashMap<u32, String> = HashMap::new();
     while super::wait_latch_interruptible(Some(delay)) {
         delay = interval;
         let tables = match super::txn::run_recoverable("catalog sync list", list_tables) {
@@ -85,11 +85,11 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
                 Role::Follower => super::txn::run_recoverable("follower sync", || sync_one(table_oid)),
                 Role::Leader => super::txn::run_recoverable("leader publish", || {
                     renew_lease(table_oid)?;
-                    publish_one(table_oid, published.get(&table_oid).copied())
+                    publish_one(table_oid, published.get(&table_oid).map(String::as_str))
                 })
                 .map(|outcome| {
-                    outcome.map(|(generation, summary)| {
-                        published.insert(table_oid, generation);
+                    outcome.map(|(fingerprint, summary)| {
+                        published.insert(table_oid, fingerprint);
                         summary
                     })
                 }),
@@ -158,13 +158,18 @@ fn sync_one(table_oid: u32) -> Result<Option<String>, String> {
 
 /// Publishes one leader's catalog when its generation moved; `Ok(None)` when nothing changed or
 /// the table was dropped. Returns the published generation with the report.
-fn publish_one(table_oid: u32, last: Option<i64>) -> Result<Option<(i64, String)>, String> {
+fn publish_one(table_oid: u32, last: Option<&str>) -> Result<Option<(String, String)>, String> {
     let generation = pgrx::Spi::get_one::<i64>(&format!(
         "SELECT (SELECT COALESCE(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = {table_oid})"
     ))
     .map_err(|error| error.to_string())?
     .unwrap_or(0);
-    if last == Some(generation) {
+    // The unflushed delete markers ride in the catalog too, so a change in them republishes.
+    let fingerprint = format!(
+        "{generation}/{}",
+        crate::sql::flush::peer_prune::tombstone_fingerprint(pgrx::pg_sys::Oid::from(table_oid)).unwrap_or_default()
+    );
+    if last == Some(fingerprint.as_str()) {
         return Ok(None);
     }
     let summary = pgrx::Spi::get_one::<String>(&format!(
@@ -172,7 +177,7 @@ fn publish_one(table_oid: u32, last: Option<i64>) -> Result<Option<(i64, String)
                      ELSE koldstore.publish_leader_catalog({table_oid}::oid::regclass)::text END"
     ))
     .map_err(|error| error.to_string())?;
-    Ok(summary.map(|summary| (generation, summary)))
+    Ok(summary.map(|summary| (fingerprint, summary)))
 }
 
 /// Renews the leader lease of a table that holds one; a lost lease surfaces as the error that

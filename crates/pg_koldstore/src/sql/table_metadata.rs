@@ -14,7 +14,8 @@
 //!   follower sharing the leader's cold storage tracks the leader's segments incrementally.
 //!
 //! Export refuses while the hot heap alone would not reproduce the table: unflushed delete markers
-//! shadowing cold rows, in-flight segments, or a manifest that is not in sync.
+//! shadowing cold rows, in-flight segments, or a manifest in a syncing, stale or error state (hot DML
+//! since the last flush, `pending_write`, leaves the cold manifest valid and does not block it).
 
 use pgrx::datum::DatumWithOid;
 use serde_json::{Value, json};
@@ -60,7 +61,7 @@ fn export_value(table_oid: pgrx::pg_sys::Oid, for_dump: bool) -> Result<Value, S
     }
 
     let unsynced = count(
-        "SELECT count(*) FROM koldstore.manifest WHERE table_oid = $1 AND sync_state <> 'in_sync'",
+        "SELECT count(*) FROM koldstore.manifest WHERE table_oid = $1 AND sync_state NOT IN ('in_sync', 'pending_write')",
         &[oid()],
     )?;
     if unsynced > 0 {
@@ -511,6 +512,13 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     if let Some(epoch) = epoch {
         metadata["lease_epoch"] = json!(epoch);
     }
+    // Unflushed delete markers: followers mask these keys until the marker reaches a segment.
+    if let Ok((keys, truncated)) = super::flush::peer_prune::leader_tombstones(table_oid) {
+        metadata["tombstones"] = keys;
+        if truncated {
+            metadata["tombstones_truncated"] = json!(true);
+        }
+    }
     let target = super::backup::table_target(table_oid)?;
     let client = super::backup::storage_client(&target.storage.storage_id)?;
     let key = leader_catalog_key(&target.namespace, &target.name);
@@ -590,6 +598,11 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         let pruned = super::flush::peer_prune::prune_covered(table_oid, Some(&added))?;
         result["hot_pruned"] = pruned["hot_pruned"].clone();
     }
+    if is_follower(table_oid)? && metadata.get("tombstones").is_some() {
+        let applied = super::flush::peer_prune::apply_leader_tombstones(table_oid, &metadata["tombstones"])?;
+        result["tombstones_added"] = applied["tombstones_added"].clone();
+        result["tombstones_removed"] = applied["tombstones_removed"].clone();
+    }
     Ok(result)
 }
 
@@ -601,8 +614,8 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
 /// `sync_from_leader()` already prunes the segments it adopts; this covers every active segment,
 /// for example those adopted by `import_table_metadata()` before follower mode was set. A hot row
 /// that differs from the cold copy in any column is left alone. Deletes are neither replicated
-/// nor mirrored. Rows the leader deleted after flushing are not propagated here (tombstones are
-/// not synced). Not supported on user-scoped tables.
+/// nor mirrored. A hot row whose key the leader has since deleted is dropped when it equals an older
+/// cold version of that key. Not supported on user-scoped tables.
 #[pgrx::pg_extern(name = "prune_follower_hot", schema = "koldstore", security_definer)]
 pub fn prune_follower_hot_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
     let oid = table_name.oid();
@@ -689,6 +702,9 @@ fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<boo
     .unwrap_or(false);
     if !updated {
         return Err("table is not an active managed table".to_string());
+    }
+    if !enabled {
+        super::flush::peer_prune::clear_synthetic_tombstones(table_oid)?;
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     Ok(true)
