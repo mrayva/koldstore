@@ -9,6 +9,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::pg_type_codec::json_from_arrow_cell;
 use crate::schema::PgColumn;
+use koldstore_schema::PgType;
 
 /// Decodes `bytes` batch by batch and hands each batch's rows (JSON objects keyed by column name)
 /// to `sink`. Every column in `columns` must be present in the file.
@@ -41,10 +42,18 @@ pub fn read_export_file_rows(
         for row_index in 0..batch.num_rows() {
             let mut object = serde_json::Map::with_capacity(columns.len());
             for (column, array) in columns.iter().zip(&arrays) {
-                object.insert(
-                    column.name.clone(),
-                    json_from_arrow_cell(column.pg_type, &column.name, array.as_ref(), row_index)?,
-                );
+                let mut value =
+                    json_from_arrow_cell(column.pg_type, &column.name, array.as_ref(), row_index)?;
+                // json/jsonb cells are stored as JSON text; embed the document itself, or the
+                // target column would receive a JSON string holding the text.
+                if matches!(column.pg_type, PgType::Jsonb | PgType::Json) {
+                    if let serde_json::Value::String(text) = &value {
+                        value = serde_json::from_str(text).map_err(|error| {
+                            format!("column `{}`: invalid JSON cell: {error}", column.name)
+                        })?;
+                    }
+                }
+                object.insert(column.name.clone(), value);
             }
             rows.push(serde_json::Value::Object(object));
         }

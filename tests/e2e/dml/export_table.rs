@@ -189,6 +189,42 @@ async fn export_table_writes_merged_snapshot() -> Result<()> {
             .await?
             .get(0);
         assert_eq!(diff, 0, "imported rows must equal the exported table");
+        // A second table with document, array and numeric columns round-trips value for value.
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {rel}_typed (id bigint PRIMARY KEY, doc jsonb, raw json, tags text[], amount numeric, b bytea);
+                 INSERT INTO {rel}_typed SELECT g, jsonb_build_object('k', g, 'n', jsonb_build_array(1, 'x')),
+                   ('{{\"a\": ' || g || '}}')::json, ARRAY['p', 'q' || g], g / 3.0, decode('00ff' || lpad(to_hex(g), 2, '0'), 'hex')
+                 FROM generate_series(1, 30) g"
+            ))
+            .await?;
+        db.manage_shared(&format!("{rel}_typed"), "id").await?;
+        db.client
+            .query_one(
+                &format!("SELECT koldstore.export_table('{rel}_typed'::regclass, '{storage}', 'exp/typed')::text"),
+                &[],
+            )
+            .await?;
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {rel}_typed_imp (LIKE {rel}_typed INCLUDING DEFAULTS);
+                 SELECT koldstore.import_table('{rel}_typed_imp'::regclass, '{storage}', 'exp/typed')"
+            ))
+            .await?;
+        let typed_diff: i64 = db
+            .client
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM ((SELECT id, doc, raw::text, tags, amount, b FROM {rel}_typed
+                       EXCEPT SELECT id, doc, raw::text, tags, amount, b FROM {rel}_typed_imp)
+                     UNION ALL (SELECT id, doc, raw::text, tags, amount, b FROM {rel}_typed_imp
+                       EXCEPT SELECT id, doc, raw::text, tags, amount, b FROM {rel}_typed)) d"
+                ),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(typed_diff, 0, "json/jsonb/array/numeric/bytea cells must survive export + import");
         // Refusals: non-empty target, managed target, unknown prefix.
         for target in [imp.as_str(), rel.as_str()] {
             let again = db
