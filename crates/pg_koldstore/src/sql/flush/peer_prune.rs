@@ -173,10 +173,6 @@ pub(crate) fn prune_covered(
     Ok(json!({ "segments": segments, "rows_read": rows_read, "hot_pruned": hot_pruned }))
 }
 
-/// Most unflushed delete markers a leader publishes; beyond it followers fall back to the
-/// reconciler for the remainder.
-const MAX_PUBLISHED_TOMBSTONES: usize = 10_000;
-
 struct MirrorParts {
     table: String,
     mirror: String,
@@ -214,6 +210,7 @@ pub(crate) fn tombstone_fingerprint(table_oid: pgrx::pg_sys::Oid) -> Result<Stri
 /// The leader's unflushed delete markers as `[{pk column: value}]`, capped, with a truncation flag.
 pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Value, bool), String> {
     let parts = mirror_parts(table_oid)?;
+    let limit = crate::guc::published_tombstone_limit();
     let object = parts
         .pk
         .iter()
@@ -226,15 +223,15 @@ pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Value, 
          (SELECT jsonb_build_object({object}) AS j FROM {} m \
           WHERE m.\"op\" = 3 AND m.\"seq\" > 0 ORDER BY m.\"seq\" LIMIT {}) x",
         parts.mirror,
-        MAX_PUBLISHED_TOMBSTONES + 1
+        limit + 1
     ))
     .map_err(|error| error.to_string())?
     .ok_or("no tombstone result")?
     else {
         return Err("unexpected tombstone result".into());
     };
-    let truncated = keys.len() > MAX_PUBLISHED_TOMBSTONES;
-    keys.truncate(MAX_PUBLISHED_TOMBSTONES);
+    let truncated = keys.len() > limit;
+    keys.truncate(limit);
     Ok((Value::Array(keys), truncated))
 }
 

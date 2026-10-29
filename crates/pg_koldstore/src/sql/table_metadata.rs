@@ -517,6 +517,11 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
         metadata["tombstones"] = keys;
         if truncated {
             metadata["tombstones_truncated"] = json!(true);
+            pgrx::warning!(
+                "koldstore: more unflushed delete markers than koldstore.published_tombstone_limit ({}); \
+                 followers see the rest only after the next flush",
+                crate::guc::published_tombstone_limit()
+            );
         }
     }
     let target = super::backup::table_target(table_oid)?;
@@ -544,7 +549,11 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     }
     let bytes = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
     koldstore_storage::publish_mutable_object(&client, &key, &bytes).map_err(|error| error.to_string())?;
-    Ok(json!({ "key": key, "bytes": bytes.len(), "generation": generation }))
+    Ok(json!({
+        "key": key, "bytes": bytes.len(), "generation": generation,
+        "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len),
+        "tombstones_truncated": metadata["tombstones_truncated"].as_bool().unwrap_or(false),
+    }))
 }
 
 /// Publishes this node's cold-tier catalog where followers can pull it.
@@ -602,6 +611,7 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         let applied = super::flush::peer_prune::apply_leader_tombstones(table_oid, &metadata["tombstones"])?;
         result["tombstones_added"] = applied["tombstones_added"].clone();
         result["tombstones_removed"] = applied["tombstones_removed"].clone();
+        result["tombstones_truncated"] = json!(metadata["tombstones_truncated"].as_bool().unwrap_or(false));
     }
     if is_follower(table_oid)? {
         if let Some(generation) = result["generation"].as_i64() {

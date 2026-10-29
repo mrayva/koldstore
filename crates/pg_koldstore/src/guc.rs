@@ -55,6 +55,7 @@ static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Opt
 #[cfg(feature = "pg")]
 static CATALOG_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 static FOLLOWER_ACK_MAX_AGE: GucSetting<i32> = GucSetting::<i32>::new(3600);
+static PUBLISHED_TOMBSTONE_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
 static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
@@ -278,6 +279,16 @@ pub fn define_gucs() {
         &FOLLOWER_ACK_MAX_AGE,
         0,
         31_536_000,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.published_tombstone_limit",
+        c"Most unflushed delete markers a tiering leader publishes to its followers.",
+        c"The leader's published catalog carries its delete markers that have not reached a segment yet, so followers stop returning those keys at once. Beyond this many, the oldest are published and a warning is logged; the remainder is masked on followers only after the leader flushes (or the Spock reconciler replays the delete). Larger values make every republish bigger. 0 publishes none. Superuser-only.",
+        &PUBLISHED_TOMBSTONE_LIMIT,
+        0,
+        1_000_000,
         GucContext::Suset,
         flags,
     );
@@ -638,6 +649,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "3600",
         },
         GucDefinition {
+            name: PUBLISHED_TOMBSTONE_LIMIT_GUC,
+            internal: false,
+            default_value: "10000",
+        },
+        GucDefinition {
             name: CATALOG_SYNC_DATABASES_GUC,
             internal: false,
             default_value: "",
@@ -825,6 +841,7 @@ pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interv
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CATALOG_SYNC_INTERVAL_GUC: &str = "koldstore.catalog_sync_interval_seconds";
 pub const FOLLOWER_ACK_MAX_AGE_GUC: &str = "koldstore.follower_ack_max_age_seconds";
+pub const PUBLISHED_TOMBSTONE_LIMIT_GUC: &str = "koldstore.published_tombstone_limit";
 pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
@@ -935,6 +952,20 @@ pub fn spock_reconcile_databases() -> Vec<String> {
     #[cfg(not(feature = "pg"))]
     {
         Vec::new()
+    }
+}
+
+/// Most unflushed delete markers published to followers.
+#[must_use]
+pub fn published_tombstone_limit() -> usize {
+    #[cfg(feature = "pg")]
+    {
+        usize::try_from(PUBLISHED_TOMBSTONE_LIMIT.get()).unwrap_or(0)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        10_000
     }
 }
 
