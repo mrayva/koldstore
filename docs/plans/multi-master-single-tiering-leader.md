@@ -27,6 +27,8 @@ Status: spike done; stages 0 to 6 are implemented and verified (see "Progress").
   - Found on the way: a leader with any hot DML since its last flush (`manifest.sync_state = 'pending_write'`) could not publish at all (export refused "manifest is not in sync"); that state leaves the cold manifest valid and no longer blocks export.
   - Limit: a key re-inserted on the leader between two worker ticks is masked on the follower until the next tick.
 
+- Hydrate-on-write check (scratch 3-node mesh, row cold on all nodes, UPDATE on follower n2 with `hydrate_on_write`): the update replicates, the reconciler replays it on the leader, and each node ends with its own mirror row (`op=2`, node-local seq; n1 and n2 differ). That is harmless: only the leader flushes, and its hot copy carries the leader's seq. After the leader's flush and the followers' peer prune the hot copies and mirror rows are gone on all nodes, count + md5 are equal everywhere, and compaction keeps them equal. A follower seq would matter only if that follower were promoted, and then its hot rows are simply flushed as its own. No code change needed. (`ONLY t` is a hybrid read on a managed table, so heap checks use pageinspect.)
+
 ## Goal
 
 Today every node in a multi-master mesh tiers independently (`docs/multi-master.md`): each node
@@ -92,9 +94,7 @@ defeats the purpose on followers (their storage grows unbounded).
    protocol. The write-router prototype (`lease_guard.py`) solves the same problem and can be reused.
 4. **Compaction and reaping.** Only the leader compacts; followers must not read a reaped segment.
    Reuse the standby rule: reap grace must exceed the slowest follower's sync lag.
-5. **Hydrate-on-write.** A follower hydrating a cold row into its heap writes a hot copy that Spock
-   replicates to everyone. Hydrated rows must carry the leader's seq so the leader's next compaction
-   treats them as already-cold. Not yet analysed in detail.
+5. **Hydrate-on-write.** Analysed and found not to need a fix (see "Hydrate-on-write check" in Progress): a follower's hydrated hot copy is an ordinary edit that Spock replicates; the leader holds its own copy with its own seq, so no seq has to cross nodes.
 
 ## Staged plan and cost
 
