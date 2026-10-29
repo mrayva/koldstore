@@ -9,6 +9,8 @@
 # koldstore package. Uses its own data dirs and ports; never touches another cluster.
 #
 #   SPOCK_PREFIX=~/pg-spock/install KOLDSTORE_PKG=/tmp/kl-stage/pkg-fol scripts/test-mesh-single-leader.sh
+#   MESH_STORAGE=s3 (needs a package built with the s3 feature, and S3_ENDPOINT / S3_ACCESS_KEY /
+#   S3_SECRET_KEY / KOLDSTORE_S3_BUCKET; defaults 127.0.0.1:18333, x/y, spike-bucket) runs it on S3.
 #
 # Prints a transcript with PASS/FAIL lines for each invariant (convergence of the per-node
 # "count:md5" snapshots, segment counts, lease fencing, cold-storage validation) and exits
@@ -59,8 +61,18 @@ for i in 1 2 3; do for j in 1 2 3; do [ $i = $j ] && continue
 done; done
 sleep 4
 for i in 1 2 3; do echo "n$i subs: $(q ${ports[$((i-1))]} spike -c "SELECT string_agg(status,',') FROM spock.sub_show_status()")"; done
-REG="SELECT koldstore.register_storage('sh','filesystem','$SHARE','{}'::jsonb,'{}'::jsonb) IS NOT NULL;"
-REGB="SELECT koldstore.register_storage('sh','filesystem','$SHARE','{}'::jsonb,'{}'::jsonb, \"check\"=>false) IS NOT NULL;"
+if [ "${MESH_STORAGE:-filesystem}" = s3 ]; then
+  # S3-compatible store (e.g. `weed server -s3`); a fresh prefix per run keeps runs apart.
+  S3_ENDPOINT=${S3_ENDPOINT:-http://127.0.0.1:18333}; S3_BUCKET=${KOLDSTORE_S3_BUCKET:-spike-bucket}
+  S3_URL="s3://$S3_BUCKET/mesh-$(date +%s)/"
+  S3_CREDS="{\"access_key_id\":\"${S3_ACCESS_KEY:-x}\",\"secret_access_key\":\"${S3_SECRET_KEY:-y}\"}"
+  S3_CFG="{\"endpoint\":\"$S3_ENDPOINT\",\"region\":\"us-east-1\",\"path_style\":true,\"allow_http\":true}"
+  REG="SELECT koldstore.register_storage('sh','s3','$S3_URL','$S3_CREDS'::jsonb,'$S3_CFG'::jsonb) IS NOT NULL;"
+  REGB="SELECT koldstore.register_storage('sh','s3','$S3_URL','$S3_CREDS'::jsonb,'$S3_CFG'::jsonb, \"check\"=>false) IS NOT NULL;"
+else
+  REG="SELECT koldstore.register_storage('sh','filesystem','$SHARE','{}'::jsonb,'{}'::jsonb) IS NOT NULL;"
+  REGB="SELECT koldstore.register_storage('sh','filesystem','$SHARE','{}'::jsonb,'{}'::jsonb, \"check\"=>false) IS NOT NULL;"
+fi
 for P in ${ports[@]}; do q $P spike -c "CREATE TABLE t (id bigint PRIMARY KEY, v text NOT NULL); SELECT spock.repset_add_table('default','t')" >/dev/null; done
 snap() { q $1 spike -c "SELECT count(*) || ':' || md5(string_agg(id||'='||v, ',' ORDER BY id)) FROM t"; }
 heapn() { q $1 spike -c "CREATE EXTENSION IF NOT EXISTS pageinspect; SELECT count(*) FROM generate_series(0, GREATEST(pg_relation_size('t')/8192-1,0)) p, heap_page_items(get_raw_page('t',p::int)) i WHERE i.lp_flags=1 AND (i.t_xmax=0 OR (i.t_infomask & 128)<>0 OR (i.t_infomask & 2048)<>0)"; }
