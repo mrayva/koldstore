@@ -287,8 +287,14 @@ operator, constants), not as SQL text, and re-checked on every `ALTER`.
   on its own; a cold row edited out of it hydrates and stays hot.
 - Delete markers (tombstones) are not subject to the predicate and always flush.
 - `NULL` follows SQL semantics: `col <> 'x'` does not match a NULL `col`.
-- Cannot be combined with `koldstore_hot_row_limit` or `koldstore_move_after`
-  in this version. `min_flush_rows`, `max_rows_per_file` and `max_rows_per_flush`
+- Cannot be combined with `koldstore_hot_row_limit`. Combine it with
+  `koldstore_move_after` to require both: a row moves only when it matches the
+  predicate **and** its latest captured mutation is older than the interval
+  (`SET (koldstore_move_when = 'status = ''closed''', koldstore_move_after = '90 days')`).
+  A row edited into the predicate restarts its age clock. Setting
+  `koldstore_move_after` alone later replaces the combined policy with a pure
+  age policy. Delete markers ignore the age condition too.
+  `min_flush_rows`, `max_rows_per_file` and `max_rows_per_flush`
   apply to the eligible rows.
 - `koldstore.flush_table(..., force => true)` ignores the predicate.
 - `koldstore.alter_table` does not take a predicate; use `ALTER TABLE ... SET`.

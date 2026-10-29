@@ -116,3 +116,91 @@ async fn move_when_flushes_only_matching_rows() -> Result<()> {
     }
     Ok(())
 }
+
+/// `koldstore_move_when` together with `koldstore_move_after`: a row moves only when it matches
+/// the predicate AND its latest mutation is older than the interval.
+#[tokio::test]
+async fn move_when_with_move_after_requires_both() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "move_when_age").await?;
+        let table = db.create_indexed_items_table("mwa_items", 20).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        let rel = &table.relation;
+        db.client.batch_execute("SET koldstore.min_max_rows_per_file = 1").await?;
+
+        let both = db
+            .client
+            .simple_query(&format!(
+                "ALTER TABLE {rel} SET (koldstore_hot_row_limit = 5, koldstore_move_after = '3 seconds')"
+            ))
+            .await;
+        assert!(both.is_err(), "hot_row_limit + move_after stays refused");
+
+        db.client
+            .batch_execute(&format!(
+                "ALTER TABLE {rel} SET (koldstore_move_when = 'category = ''even''', koldstore_move_after = '3 seconds', koldstore_min_flush_rows = 1, koldstore_max_rows_per_file = 1)"
+            ))
+            .await?;
+        let policy: String = db
+            .client
+            .query_one(
+                &format!("SELECT (options->'flush_policy')::text FROM koldstore.schemas WHERE table_oid = '{rel}'::regclass AND active"),
+                &[],
+            )
+            .await?
+            .get(0);
+        let policy: serde_json::Value = serde_json::from_str(&policy)?;
+        assert_eq!(policy["type"], "filter", "{policy}");
+        assert_eq!(policy["older_than"]["microseconds"], 3_000_000, "{policy}");
+
+        // Matching rows are still too young.
+        assert_eq!(db.flush_table(rel).await?, 0, "young matching rows must not move");
+
+        // Once old enough, only the matching rows move.
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert_eq!(db.flush_table(rel).await?, 10, "old matching rows move");
+        let status = common::table_status(&db.client, rel).await?;
+        assert_eq!((status.cold_row_count, status.hot_rows), (10, 10), "{status:?}");
+        assert_eq!(db.flush_table(rel).await?, 0, "old non-matching rows stay");
+
+        // A freshly edited row restarts its clock even though it now matches.
+        db.client
+            .batch_execute(&format!("UPDATE {rel} SET category = 'even' WHERE id = 3"))
+            .await?;
+        assert_eq!(db.flush_table(rel).await?, 0, "freshly matching row is too young");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert_eq!(db.flush_table(rel).await?, 1);
+        assert_eq!(count(&db, &format!("SELECT count(*) FROM {rel}")).await?, 20);
+
+        // Dropping move_when by setting move_after alone gives a pure age policy.
+        db.client
+            .batch_execute(&format!("ALTER TABLE {rel} SET (koldstore_move_after = '1 hour')"))
+            .await?;
+        let policy: String = db
+            .client
+            .query_one(
+                &format!("SELECT (options->'flush_policy'->>'type') FROM koldstore.schemas WHERE table_oid = '{rel}'::regclass AND active"),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(policy, "older_than");
+
+        // The pure age policy flushes through the same cutoff computation (fresh table: a
+        // prefix-based policy does not revisit rows below an earlier predicate flush's frontier).
+        let aged = db.create_indexed_items_table("mwa_aged", 12).await?;
+        db.manage_shared(&aged.relation, "id").await?;
+        let rel = &aged.relation;
+        db.client
+            .batch_execute(&format!("ALTER TABLE {rel} SET (koldstore_move_after = '1 second', koldstore_min_flush_rows = 1, koldstore_max_rows_per_file = 1)"))
+            .await?;
+        assert_eq!(db.flush_table(rel).await?, 0, "young rows stay");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // The background scheduler may win the race to flush; either way all 12 rows go cold.
+        db.flush_table(rel).await?;
+        let status = common::table_status(&db.client, rel).await?;
+        assert_eq!((status.cold_row_count, status.hot_rows), (12, 0), "{status:?}");
+        assert_eq!(count(&db, &format!("SELECT count(*) FROM {rel}")).await?, 12);
+    }
+    Ok(())
+}

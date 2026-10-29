@@ -172,6 +172,8 @@ pub fn plan_older_than_eligible_mirror_rows(
 ///
 /// `row_filter` is a boolean SQL expression over alias `hot`. Bind parameters:
 /// - `$1` max rows to consider for this flush
+/// - `$2` exclusive upper bound on `mirror.seq` for live rows (`i64::MAX` when the policy has no
+///   age condition); tombstones are always eligible
 ///
 /// # Errors
 ///
@@ -193,10 +195,10 @@ pub fn plan_filter_eligible_mirror_rows(
             "SELECT count(*)::bigint, max(seq)::bigint FROM (\
              SELECT mirror.seq FROM {mirror_quoted} AS mirror \
              LEFT JOIN ONLY {table_quoted} AS hot ON {join} \
-             WHERE mirror.\"op\" = 3 OR ({row_filter}) \
+             WHERE mirror.\"op\" = 3 OR (mirror.seq < $2 AND ({row_filter})) \
              ORDER BY mirror.seq LIMIT $1) eligible"
         ),
-        [SqlParamType::BigInt],
+        [SqlParamType::BigInt, SqlParamType::BigInt],
     )
     .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
 }

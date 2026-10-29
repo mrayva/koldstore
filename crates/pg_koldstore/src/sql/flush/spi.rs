@@ -65,14 +65,19 @@ pub(crate) fn resolve_flush_stats(
             )?,
             FlushPolicy::Filter {
                 predicate,
+                older_than,
                 min_flush_rows,
                 max_rows_per_file,
                 max_rows_per_flush,
             } => {
                 let row_filter = predicate.to_sql("hot");
+                let Some(max_live_seq) = filter_age_bound(*older_than)? else {
+                    return Ok(ResolvedFlushSelection::new(FlushStats::empty()));
+                };
                 let cutoff = filter_cutoff(
                     table_oid,
                     &row_filter,
+                    max_live_seq,
                     *min_flush_rows,
                     *max_rows_per_file,
                     *max_rows_per_flush,
@@ -152,6 +157,21 @@ fn active_options_json(table_oid: pgrx::pg_sys::Oid) -> Result<Option<serde_json
     Ok(options.map(|options| options.0))
 }
 
+/// Smallest mirror `seq` that is too young for a `move_after` interval, or `None` when the clock
+/// predates the sequence epoch (nothing can be old enough yet).
+fn age_cutoff_seq(age: koldstore_common::MoveAfter) -> Result<Option<i64>, String> {
+    use pgrx::datum::DatumWithOid;
+    let cutoff_ms = pgrx::Spi::get_one_with_args::<i64>(
+        "SELECT floor(extract(epoch FROM (statement_timestamp() - make_interval(months => $1::int, days => $2::int, secs => $3::double precision))) * 1000)::bigint",
+        &[
+            DatumWithOid::from(age.months),
+            DatumWithOid::from(age.days),
+            DatumWithOid::from(age.microseconds as f64 / 1_000_000.0),
+        ],
+    ).map_err(|error| error.to_string())?.ok_or_else(|| "failed to compute move_after cutoff".to_string())?;
+    Ok(koldstore_common::minimum_id_at_unix_millis(cutoff_ms))
+}
+
 fn older_than_cutoff(
     table_oid: pgrx::pg_sys::Oid,
     age: koldstore_common::MoveAfter,
@@ -160,16 +180,7 @@ fn older_than_cutoff(
     max_rows_per_flush: u64,
 ) -> Result<Option<(i64, i64)>, String> {
     use pgrx::datum::DatumWithOid;
-    let cutoff_ms = pgrx::Spi::get_one_with_args::<f64>(
-        "SELECT extract(epoch FROM (statement_timestamp() - make_interval(months => $1::int, days => $2::int, secs => $3::double precision))) * 1000",
-        &[
-            DatumWithOid::from(age.months),
-            DatumWithOid::from(age.days),
-            DatumWithOid::from(age.microseconds as f64 / 1_000_000.0),
-        ],
-    ).map_err(|error| error.to_string())?.ok_or_else(|| "failed to compute move_after cutoff".to_string())?;
-    let Some(cutoff_seq) = koldstore_common::minimum_id_at_unix_millis(cutoff_ms.floor() as i64)
-    else {
+    let Some(cutoff_seq) = age_cutoff_seq(age)? else {
         return Ok(None);
     };
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
@@ -201,6 +212,17 @@ fn older_than_cutoff(
     Ok(max_seq.map(|seq| (count, seq)))
 }
 
+/// Exclusive `seq` bound for live rows of a predicate policy: `i64::MAX` without an age
+/// condition, the age cutoff with one, `None` when no row can be old enough yet.
+pub(crate) fn filter_age_bound(
+    older_than: Option<koldstore_common::MoveAfter>,
+) -> Result<Option<i64>, String> {
+    match older_than {
+        None => Ok(Some(i64::MAX)),
+        Some(age) => age_cutoff_seq(age),
+    }
+}
+
 /// Counts the oldest rows eligible under a predicate move policy.
 ///
 /// Returns `(count, max_seq)` when at least `min_flush_rows` are eligible and the pass meets the
@@ -208,6 +230,7 @@ fn older_than_cutoff(
 pub(crate) fn filter_cutoff(
     table_oid: pgrx::pg_sys::Oid,
     row_filter: &str,
+    max_live_seq: i64,
     min_flush_rows: u64,
     max_rows_per_file: u64,
     max_rows_per_flush: u64,
@@ -235,7 +258,10 @@ pub(crate) fn filter_cutoff(
             .select(
                 &statement.sql,
                 None,
-                &[DatumWithOid::from(max_rows_per_flush as i64)],
+                &[
+                    DatumWithOid::from(max_rows_per_flush as i64),
+                    DatumWithOid::from(max_live_seq),
+                ],
             )?
             .first();
         Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?.unwrap_or(0), row.get::<i64>(2)?))
@@ -988,7 +1014,7 @@ pub(super) fn flush_progress_total_estimate(
     }
     match active_flush_policy(table_oid)? {
         // The eligible count is only known after selection; the backlog bounds it.
-        Some(FlushPolicy::Filter { .. }) => Ok(pending),
+        Some(FlushPolicy::Filter { .. } | FlushPolicy::OlderThan { .. }) => Ok(pending),
         Some(policy) => Ok(policy_flush_row_count(pending, &policy)),
         None => Ok(pending),
     }

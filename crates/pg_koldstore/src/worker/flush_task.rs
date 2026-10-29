@@ -344,6 +344,7 @@ SELECT (SELECT row_count FROM eligible)::bigint,
 fn filter_policy_due(table_oid: pgrx::pg_sys::Oid, policy: &FlushPolicy) -> Result<bool, String> {
     let FlushPolicy::Filter {
         predicate,
+        older_than,
         min_flush_rows,
         max_rows_per_file,
         ..
@@ -351,9 +352,13 @@ fn filter_policy_due(table_oid: pgrx::pg_sys::Oid, policy: &FlushPolicy) -> Resu
     else {
         return Ok(false);
     };
+    let Some(max_live_seq) = crate::sql::flush::spi::filter_age_bound(*older_than)? else {
+        return Ok(false);
+    };
     Ok(crate::sql::flush::spi::filter_cutoff(
         table_oid,
         &predicate.to_sql("hot"),
+        max_live_seq,
         *min_flush_rows,
         *max_rows_per_file,
         // Only whether enough rows are eligible matters here.

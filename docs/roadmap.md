@@ -163,8 +163,7 @@ Age-based flushing is available as `koldstore_move_after` (`OlderThan` policy; s
 - `koldstore.alter_table` (flush limits and `auto_flush`) is implemented; compression, target file size and
   Parquet layout options change via `ALTER TABLE ... SET (koldstore_...)`; storage and scope after
   registration are not alterable.
-- Combining age and predicate (`koldstore_move_after` + `koldstore_move_when`), a richer predicate grammar, a
-  `policy_status` view; `koldstore.alter_table` does not accept an age or predicate policy.
+- A richer predicate grammar, a `policy_status` view (age + predicate combination via `koldstore_move_after` + `koldstore_move_when` is done); `koldstore.alter_table` does not accept an age or predicate policy.
 - Background scheduling, richer retry controls, and operational policy tuning.
 
 ## Query execution

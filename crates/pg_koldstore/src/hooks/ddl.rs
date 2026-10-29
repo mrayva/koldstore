@@ -737,10 +737,9 @@ fn validate_management_option_conflicts(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     if option_value(values, "koldstore_move_when").is_some()
-        && (option_value(values, "koldstore_hot_row_limit").is_some()
-            || option_value(values, "koldstore_move_after").is_some())
+        && option_value(values, "koldstore_hot_row_limit").is_some()
     {
-        return Err("move_when cannot be combined with hot_row_limit or move_after".into());
+        return Err("move_when cannot be combined with hot_row_limit".into());
     }
     if option_value(values, "koldstore_hot_row_limit").is_some()
         && option_value(values, "koldstore_move_after").is_some()
@@ -891,6 +890,8 @@ fn apply_flush_policy_updates(
             max_rows_per_flush: max,
         });
     }
+    let move_when = option_value(values, "koldstore_move_when");
+    let mut older_than = None;
     if let Some(value) = option_value(values, "koldstore_move_after") {
         let interval = pgrx::Spi::get_one_with_args::<pgrx::datetime::Interval>(
             "SELECT $1::text::interval",
@@ -903,17 +904,23 @@ fn apply_flush_policy_updates(
             interval.days(),
             interval.micros(),
         )?;
-        options.flush_policy = Some(koldstore_common::FlushPolicy::OlderThan {
-            age,
-            min_flush_rows: min,
-            max_rows_per_file: file,
-            max_rows_per_flush: max,
-        });
+        // `move_after` alone is a pure age policy; with `move_when` it becomes the age
+        // condition of a predicate policy (both must hold).
+        if move_when.is_none() {
+            options.flush_policy = Some(koldstore_common::FlushPolicy::OlderThan {
+                age,
+                min_flush_rows: min,
+                max_rows_per_file: file,
+                max_rows_per_flush: max,
+            });
+        }
+        older_than = Some(age);
     }
-    if let Some(value) = option_value(values, "koldstore_move_when") {
+    if let Some(value) = move_when {
         let predicate = resolve_move_predicate(table_oid, value)?;
         options.flush_policy = Some(koldstore_common::FlushPolicy::Filter {
             predicate,
+            older_than,
             min_flush_rows: min,
             max_rows_per_file: file,
             max_rows_per_flush: max,

@@ -102,8 +102,11 @@ pub fn resolve_policy_flush_selection(
     let Some(policy) = policy else {
         return ResolvedFlushSelection::new(full_mirror);
     };
-    let flush_count = policy_flush_row_count(pending_rows, policy);
-    if flush_count == 0 {
+    // Only the row-limit policy sizes its selection from the pending count; an age policy's
+    // eligible rows are already counted in `cutoff`.
+    if matches!(policy, FlushPolicy::RowLimit { .. })
+        && policy_flush_row_count(pending_rows, policy) == 0
+    {
         return ResolvedFlushSelection::new(FlushStats::empty());
     }
     let Some((selected_count, max_seq)) = cutoff else {

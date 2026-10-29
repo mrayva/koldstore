@@ -168,9 +168,13 @@ pub enum FlushPolicy {
         max_rows_per_file: u64,
         max_rows_per_flush: u64,
     },
-    /// Flush rows matching a restricted column predicate (`koldstore_move_when`).
+    /// Flush rows matching a restricted column predicate (`koldstore_move_when`), optionally
+    /// only once their latest mirror mutation also predates `older_than` (`koldstore_move_after`
+    /// set together with `koldstore_move_when`).
     Filter {
         predicate: super::move_predicate::MovePredicate,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        older_than: Option<MoveAfter>,
         min_flush_rows: u64,
         max_rows_per_file: u64,
         max_rows_per_flush: u64,
@@ -263,8 +267,13 @@ impl FlushPolicy {
                 max_rows_per_file,
                 max_rows_per_flush,
             },
-            Self::Filter { predicate, .. } => Self::Filter {
+            Self::Filter {
                 predicate,
+                older_than,
+                ..
+            } => Self::Filter {
+                predicate,
+                older_than,
                 min_flush_rows,
                 max_rows_per_file,
                 max_rows_per_flush,
@@ -663,6 +672,7 @@ mod tests {
         let filter = FlushPolicy::Filter {
             predicate: super::super::move_predicate::MovePredicate::parse("status = 'closed'")
                 .unwrap(),
+            older_than: None,
             min_flush_rows: 1,
             max_rows_per_file: 1_000,
             max_rows_per_flush: 10_000,
@@ -672,6 +682,32 @@ mod tests {
             9
         );
         assert!(filter.enabled());
+
+        let aged = FlushPolicy::Filter {
+            predicate: super::super::move_predicate::MovePredicate::parse("status = 'closed'")
+                .unwrap(),
+            older_than: Some(age),
+            min_flush_rows: 1,
+            max_rows_per_file: 1_000,
+            max_rows_per_flush: 10_000,
+        };
+        let rewritten = aged.with_batching(5, 6, 7);
+        assert!(matches!(
+            rewritten,
+            FlushPolicy::Filter { older_than: Some(a), min_flush_rows: 5, .. } if a == age
+        ));
+        // Policies persisted before the age field existed still load, without an age.
+        let legacy: FlushPolicy = serde_json::from_value(serde_json::json!({
+            "type": "filter",
+            "predicate": serde_json::to_value(
+                super::super::move_predicate::MovePredicate::parse("status = 'closed'").unwrap()
+            ).unwrap(),
+            "min_flush_rows": 1,
+            "max_rows_per_file": 1000,
+            "max_rows_per_flush": 10000
+        }))
+        .expect("legacy filter policy");
+        assert!(matches!(legacy, FlushPolicy::Filter { older_than: None, .. }));
     }
 
     #[test]
