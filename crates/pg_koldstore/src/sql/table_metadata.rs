@@ -546,3 +546,67 @@ pub fn sync_from_leader_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("sync from leader failed: {error}"))
 }
+
+/// Whether `table_oid` is marked as a follower of a leader's cold tier.
+pub(crate) fn is_follower(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT (SELECT coalesce((options->>'follower')::boolean, false) \
+         FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map(|found| found.unwrap_or(false))
+    .map_err(|error| error.to_string())
+}
+
+/// Errors when `table_oid` is a follower; `action` names the refused operation.
+pub(crate) fn refuse_on_follower(table_oid: pgrx::pg_sys::Oid, action: &str) -> Result<(), String> {
+    if is_follower(table_oid)? {
+        return Err(format!(
+            "cannot {action}: the table is a follower of a leader's cold tier \
+             (koldstore.set_table_follower(table, false) turns follower mode off)"
+        ));
+    }
+    Ok(())
+}
+
+fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let _lock = super::job_lock::TableJobLockGuard::lock(table_oid)?;
+    let updated = pgrx::Spi::get_one_with_args::<bool>(
+        "WITH updated AS ( \
+             UPDATE koldstore.schemas \
+             SET options = CASE WHEN $2::boolean \
+                     THEN jsonb_set(jsonb_set(coalesce(options, '{}'::jsonb), '{follower}', 'true'::jsonb, true), \
+                                    '{auto_flush}', 'false'::jsonb, true) \
+                     ELSE options - 'follower' END, \
+                 updated_at = now() \
+             WHERE table_oid = $1::oid AND active RETURNING 1) \
+         SELECT EXISTS (SELECT 1 FROM updated)",
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(enabled)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !updated {
+        return Err("table is not an active managed table".to_string());
+    }
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+    Ok(true)
+}
+
+/// Marks (or unmarks) a table as a follower of a leader's cold tier.
+///
+/// SQL contract: `koldstore.set_table_follower(table_name regclass, enabled boolean) → boolean`.
+///
+/// A follower refuses `flush_table`, `enqueue_flush_job`, `compact_table` and
+/// `reap_compacted_segments`, and the maintenance worker skips it; enabling also turns
+/// `auto_flush` off. Disabling leaves `auto_flush` off for the operator to re-enable.
+#[pgrx::pg_extern(name = "set_table_follower", schema = "koldstore", security_definer)]
+pub fn set_table_follower_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    let oid = table_name.oid();
+    authorize(Some(oid), "change follower mode");
+    set_follower_value(oid, enabled)
+        .unwrap_or_else(|error| pgrx::error!("set_table_follower failed: {error}"))
+}

@@ -9,6 +9,8 @@ mod control;
 #[cfg(feature = "pg")]
 mod flush_executor;
 #[cfg(feature = "pg")]
+pub(crate) mod follower_sync;
+#[cfg(feature = "pg")]
 mod flush_task;
 #[cfg(feature = "pg")]
 mod maintenance;

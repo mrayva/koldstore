@@ -1,12 +1,12 @@
 # Spock mesh with a single tiering leader (design spike)
 
-Status: spike done; stages 0 to 2 are implemented except the follower worker (see "Progress"). Date: 2026-10-29.
+Status: spike done; stages 0 to 2 are implemented (see "Progress"). Date: 2026-10-29.
 
 ## Progress
 
 - Stage 0 done: `migration_order_by` import fix, clear unregistered-storage error naming the `"check" => false` follower recipe.
 - Stage 1 done: `koldstore.sync_table_metadata()`, verified on two clusters over shared storage through new, compacted-away and unchanged segments; schema-version mismatch refused.
-- Stage 2 partly done: `koldstore.publish_leader_catalog()` (atomic write, generation fencing floor) and `koldstore.sync_from_leader()` work. Still open: a follower mode (no flush or compaction on followers, a way to mark them) and the polling worker. A follower's own hot copies are not touched by sync, so after leader-side updates or deletes its heap is stale until stage 3 prune or Spock replication catches it up.
+- Stage 2 done: `koldstore.publish_leader_catalog()` (atomic write, generation fencing floor) and `koldstore.sync_from_leader()` work. `koldstore.set_table_follower()` marks a follower (manual, job and background flush, compaction and reaping are refused or skipped), and a background worker (`koldstore.follower_sync_interval_seconds` / `follower_sync_databases`) syncs every follower from the leader's published catalog. The leader still has to call `publish_leader_catalog()` after each flush or compaction (cron or a wrapper); publishing from the flush path is not wired. A follower's own hot copies are not touched by sync, so after leader-side updates or deletes its heap is stale until stage 3 prune or Spock replication catches it up.
 
 ## Goal
 

@@ -70,6 +70,7 @@ pub(crate) fn compact_table_value(
     if max_rows < 1 {
         return Err("max_rows must be at least 1".to_string());
     }
+    crate::sql::table_metadata::refuse_on_follower(table_oid, "compact")?;
     // A flush that has just finished may still be releasing the lock; wait a few seconds for it
     // rather than failing a flush-then-compact sequence.
     let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(
@@ -1043,6 +1044,7 @@ pub(crate) fn reap_table(
     table_oid: pgrx::pg_sys::Oid,
     grace_seconds: i32,
 ) -> Result<i64, String> {
+    crate::sql::table_metadata::refuse_on_follower(table_oid, "reap compacted segments")?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let client = crate::object_store::open_managed_object_store_client(
         &storage.storage_type,
@@ -1064,11 +1066,13 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
     let tables: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
         client
             .select(
-                "SELECT DISTINCT table_oid FROM koldstore.cold_segments \
-                 WHERE (status = 'compacted' \
+                "SELECT DISTINCT table_oid FROM koldstore.cold_segments cs \
+                 WHERE NOT EXISTS (SELECT 1 FROM koldstore.schemas s WHERE s.table_oid = cs.table_oid \
+                       AND s.active AND coalesce((s.options->>'follower')::boolean, false)) \
+                   AND ((status = 'compacted' \
                    AND created_at <= now() - make_interval(secs => $1::double precision) \
                    AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < created_at)) \
-                    OR (status = 'history' AND max_seq < $2::bigint) \
+                    OR (status = 'history' AND max_seq < $2::bigint)) \
                  LIMIT 5",
                 None,
                 &[DatumWithOid::from(f64::from(grace)), DatumWithOid::from(history_horizon())],
@@ -1103,8 +1107,10 @@ pub(crate) fn auto_compaction_tick() -> Result<Option<Value>, String> {
     let tables: Vec<pgrx::pg_sys::Oid> = pgrx::Spi::connect(|client| {
         client
             .select(
-                "SELECT table_oid FROM koldstore.cold_segments \
+                "SELECT table_oid FROM koldstore.cold_segments cs \
                  WHERE status = 'active' AND scope_key = '' \
+                   AND NOT EXISTS (SELECT 1 FROM koldstore.schemas s WHERE s.table_oid = cs.table_oid \
+                       AND s.active AND coalesce((s.options->>'follower')::boolean, false)) \
                  GROUP BY table_oid HAVING count(*) >= 2 ORDER BY table_oid",
                 None,
                 &[],

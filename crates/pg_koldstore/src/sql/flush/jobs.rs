@@ -97,6 +97,9 @@ pub(crate) fn enqueue_flush_job_if_due(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
+    if crate::sql::table_metadata::is_follower(table_oid).unwrap_or(false) {
+        return Ok(None);
+    }
     let job_id = if let Some(existing) = lookup_active_flush_job(table_oid)? {
         if force && !existing.force {
             // Upgrade pending force intent while preserving the same active UUID.

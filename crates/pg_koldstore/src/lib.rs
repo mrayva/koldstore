@@ -143,4 +143,5 @@ pub extern "C" fn _PG_init() {
     pending_cold_delete::register_xact_callback();
     worker::register_supervisor_if_shared_preload();
     worker::spock_reconciler::register_if_shared_preload();
+    worker::follower_sync::register_if_shared_preload();
 }

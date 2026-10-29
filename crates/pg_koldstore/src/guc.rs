@@ -53,6 +53,10 @@ static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 #[cfg(feature = "pg")]
 static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
+static FOLLOWER_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
+#[cfg(feature = "pg")]
+static FOLLOWER_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+#[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
 static MAX_PURGE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
@@ -253,6 +257,24 @@ pub fn define_gucs() {
         c"Comma-separated databases that get a Spock-conflict reconciler worker.",
         c"One background worker is started per listed database (typically the Spock database). Changing it requires a restart.",
         &SPOCK_RECONCILE_DATABASES,
+        GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.follower_sync_interval_seconds",
+        c"Seconds between background runs of koldstore.sync_from_leader() for follower tables; 0 disables.",
+        c"When positive, a background worker per database named in koldstore.follower_sync_databases syncs every table marked with koldstore.set_table_follower() from its leader's published catalog on this interval. Changing it requires a restart.",
+        &FOLLOWER_SYNC_INTERVAL,
+        0,
+        86_400,
+        GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_string_guc(
+        c"koldstore.follower_sync_databases",
+        c"Comma-separated databases that get a follower sync worker.",
+        c"One background worker is started per listed database. Changing it requires a restart.",
+        &FOLLOWER_SYNC_DATABASES,
         GucContext::Postmaster,
         flags,
     );
@@ -595,6 +617,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "",
         },
         GucDefinition {
+            name: FOLLOWER_SYNC_INTERVAL_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
+            name: FOLLOWER_SYNC_DATABASES_GUC,
+            internal: false,
+            default_value: "",
+        },
+        GucDefinition {
             name: HYDRATE_SLOT_LOCK_POLL_MS_GUC,
             internal: false,
             default_value: "0",
@@ -775,6 +807,8 @@ pub const INSERT_GUARD_FENCE_GUC: &str = "koldstore.insert_guard_fence";
 pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_poll_ms";
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
+pub const FOLLOWER_SYNC_INTERVAL_GUC: &str = "koldstore.follower_sync_interval_seconds";
+pub const FOLLOWER_SYNC_DATABASES_GUC: &str = "koldstore.follower_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
 pub const HYDRATE_TAKE_JOB_LOCK_GUC: &str = "koldstore.hydrate_take_job_lock";
@@ -871,6 +905,42 @@ pub fn spock_reconcile_databases() -> Vec<String> {
     #[cfg(feature = "pg")]
     {
         SPOCK_RECONCILE_DATABASES
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Seconds between background follower syncs (0 = off).
+#[must_use]
+pub fn follower_sync_interval_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        FOLLOWER_SYNC_INTERVAL.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        0
+    }
+}
+
+/// Databases that get a follower sync worker.
+#[must_use]
+pub fn follower_sync_databases() -> Vec<String> {
+    #[cfg(feature = "pg")]
+    {
+        FOLLOWER_SYNC_DATABASES
             .get()
             .and_then(|value| value.to_str().ok().map(str::to_string))
             .unwrap_or_default()

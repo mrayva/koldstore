@@ -323,6 +323,10 @@ pub struct ManageTableOptions {
     /// Missing or `true` means enabled; `false` reserves the table for manual/cron flush.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_flush: Option<bool>,
+    /// Marks a multi-master follower: the table reads a leader's cold tier and never flushes,
+    /// compacts or reaps on its own. Missing means `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follower: Option<bool>,
     /// Operator override for columns that participate in cold min/max stats.
     ///
     /// When omitted, registration derives stats candidates from indexes/PK.
@@ -520,6 +524,12 @@ impl ManageTableOptions {
     #[must_use]
     pub fn auto_flush_enabled(&self) -> bool {
         self.auto_flush.unwrap_or(true)
+    }
+
+    /// Returns whether this table follows a leader's cold tier.
+    #[must_use]
+    pub fn is_follower(&self) -> bool {
+        self.follower.unwrap_or(false)
     }
 
     /// Sets whether the built-in scheduler may auto-flush this table.

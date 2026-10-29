@@ -1256,6 +1256,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.publish_leader_catalog(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$publish_leader_catalog_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function set_table_follower(table_name regclass, enabled boolean) returns boolean security definer [set_table_follower_pg_wrapper]": {
+            "add": "koldstore.set_table_follower(table_name regclass, enabled boolean)",
+            "name": "set_table_follower",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.set_table_follower(table_name regclass, enabled boolean)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$set_table_follower_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function sync_from_leader(table_name regclass) returns jsonb security definer [sync_from_leader_pg_wrapper]": {
             "add": "koldstore.sync_from_leader(table_name regclass)",
             "name": "sync_from_leader",

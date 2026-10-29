@@ -543,6 +543,15 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'sync_from_leader_pg_wrapper';
 
+-- Marks a table as a follower of a leader's cold tier (no own flush, compaction or reaping).
+CREATE FUNCTION koldstore."set_table_follower"(
+	"table_name" regclass,
+	"enabled" bool
+) RETURNS bool
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'set_table_follower_pg_wrapper';
+
 -- Applies a change KoldStore cannot apply in place (primary key, narrowing type) to a table with
 -- cold data: rehydrate, run the caller's DDL, manage again.
 CREATE FUNCTION koldstore."rebuild_table"(
