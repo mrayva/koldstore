@@ -837,7 +837,7 @@ the window into separate `history` segments, which queries never read and `chang
 a cursor within the window keeps working across compaction. History segments are purged (and
 `history_floor_seq` raised first) by the next `compact_table` / `reap_compacted_segments` call or the maintenance
 worker once their newest row is older than the window; setting the window back to `0` purges all of it. History
-segments are not part of backups, and user-scoped tables are not compacted.
+segments are not part of backups.
 
 Replaced segments are marked `compacted` and keep their objects for `grace_seconds` (default 600) so queries
 planned on the previous layout finish; the next `compact_table` call, `koldstore.reap_compacted_segments`, or
@@ -846,7 +846,7 @@ the maintenance worker deletes them afterwards. The grace is never shorter than
 registered with `koldstore.register_backup`. A backup that is neither covered by the window nor registered can
 no longer restore the cold tier of a compacted table once the grace has passed.
 
-With `koldstore.auto_compaction = on` the maintenance worker runs the same pass on its own (bounded per tick, off by default). Not handled yet: user-scoped tables (refused with an error). Compaction collapses
+With `koldstore.auto_compaction = on` the maintenance worker runs the same pass on its own (bounded per tick, off by default). User-scoped tables are compacted per scope (a unit never crosses scopes; see ADR-010). Compaction collapses
 the cold history of a key to its newest version, so the overwritten versions (and dropped delete markers) can no longer be replayed. The highest `seq` it dropped is recorded per table (`koldstore.manifest.history_floor_seq`), and `changes_since` with `0 < since_seq < history_floor_seq` fails with an error instead of silently skipping them; resync with `since_seq => 0` and resume from the last returned `seq`. Cursors at or past the floor, and `since_seq => 0`, are unaffected.
 Segments without primary-key bounds (written by a very old release) make the call decline until
 `koldstore.rebuild_segment_summaries` has run, since delete markers can only be dropped when every segment's
