@@ -519,6 +519,30 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'import_table_metadata_pg_wrapper';
 
+-- Brings a table that adopted a leader's cold tier up to date with a newer export.
+CREATE FUNCTION koldstore."sync_table_metadata"(
+	"table_name" regclass,
+	"metadata" jsonb
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sync_table_metadata_pg_wrapper';
+
+-- Leader side: publish the cold-tier catalog next to the table prefix; follower side: pull it.
+CREATE FUNCTION koldstore."publish_leader_catalog"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'publish_leader_catalog_pg_wrapper';
+
+CREATE FUNCTION koldstore."sync_from_leader"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sync_from_leader_pg_wrapper';
+
 -- Applies a change KoldStore cannot apply in place (primary key, narrowing type) to a table with
 -- cold data: rehydrate, run the caller's DDL, manage again.
 CREATE FUNCTION koldstore."rebuild_table"(

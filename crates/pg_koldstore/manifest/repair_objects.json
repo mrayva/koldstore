@@ -1244,6 +1244,24 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.sync_sql_objects(dry_run boolean DEFAULT true, drop_unexpected boolean DEFAULT false)\n RETURNS jsonb\n LANGUAGE c\n STRICT\nAS '$libdir/koldstore', $function$sync_sql_objects_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function sync_table_metadata(table_name regclass, metadata jsonb) returns jsonb security definer [sync_table_metadata_pg_wrapper]": {
+            "add": "koldstore.sync_table_metadata(table_name regclass, metadata jsonb)",
+            "name": "sync_table_metadata",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.sync_table_metadata(table_name regclass, metadata jsonb)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$sync_table_metadata_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function publish_leader_catalog(table_name regclass) returns jsonb security definer [publish_leader_catalog_pg_wrapper]": {
+            "add": "koldstore.publish_leader_catalog(table_name regclass)",
+            "name": "publish_leader_catalog",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.publish_leader_catalog(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$publish_leader_catalog_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function sync_from_leader(table_name regclass) returns jsonb security definer [sync_from_leader_pg_wrapper]": {
+            "add": "koldstore.sync_from_leader(table_name regclass)",
+            "name": "sync_from_leader",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.sync_from_leader(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$sync_from_leader_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function delete_row(table_name regclass, pk jsonb, lookup_cold boolean DEFAULT true) returns jsonb security definer [delete_row_pg_wrapper]": {
             "add": "koldstore.delete_row(table_name regclass, pk jsonb, lookup_cold boolean)",
             "name": "delete_row",

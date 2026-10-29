@@ -295,7 +295,7 @@ fn live_prefixes() -> Result<Vec<(String, String)>, String> {
 }
 
 /// Opens a client for `koldstore.storage.id = storage_id`, or why it cannot be opened.
-fn storage_client(storage_id: &str) -> Result<koldstore_storage::ObjectStoreClient, String> {
+pub(super) fn storage_client(storage_id: &str) -> Result<koldstore_storage::ObjectStoreClient, String> {
     let ctx = json_query(
         "SELECT jsonb_build_object('storage_type', storage_type, 'base_path', base_path,
                                    'credentials', credentials, 'config', config)::text

@@ -10,6 +10,9 @@
 //!   the exported segments under its new OID. The objects themselves are never copied; the named
 //!   storage must still serve them.
 //!
+//! - [`sync_table_metadata_pg`] re-applies a newer export to a table that already adopted one, so a
+//!   follower sharing the leader's cold storage tracks the leader's segments incrementally.
+//!
 //! Export refuses while the hot heap alone would not reproduce the table: unflushed delete markers
 //! shadowing cold rows, in-flight segments, or a manifest that is not in sync.
 
@@ -26,7 +29,9 @@ fn count(sql: &str, args: &[DatumWithOid<'_>]) -> Result<i64, String> {
         .unwrap_or(0))
 }
 
-fn export_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
+/// `for_dump` additionally refuses unflushed delete markers (a hot-only dump would resurrect the
+/// deleted cold rows); a leader catalog for followers has no such restriction.
+fn export_value(table_oid: pgrx::pg_sys::Oid, for_dump: bool) -> Result<Value, String> {
     super::backup::managed_table_oids(Some(table_oid))?;
     crate::mirror::apply::fence_for_read()?;
     let oid = || DatumWithOid::from(table_oid);
@@ -46,7 +51,7 @@ fn export_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
     )
     .map_err(|error| error.to_string())?
     .ok_or("table has no change-log mirror")?;
-    let tombstones = count(&format!("SELECT count(*) FROM {mirror} WHERE op = 3"), &[])?;
+    let tombstones = if for_dump { count(&format!("SELECT count(*) FROM {mirror} WHERE op = 3"), &[])? } else { 0 };
     if tombstones > 0 {
         return Err(format!(
             "{tombstones} delete marker(s) have not been flushed yet; a hot-only dump would resurrect \
@@ -124,7 +129,7 @@ fn export_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
 pub fn export_table_metadata_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
     let oid = table_name.oid();
     authorize(Some(oid), "export table metadata");
-    export_value(oid)
+    export_value(oid, true)
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("export table metadata failed: {error}"))
 }
@@ -159,11 +164,11 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
         .ok_or("metadata has no active schema version")?;
     let storage_name = metadata["storage"]["name"].as_str().ok_or("metadata names no storage")?;
     let storage = pgrx::Spi::get_one_with_args::<String>(
-        "SELECT storage_type || '|' || base_path FROM koldstore.storage WHERE name = $1",
+        "SELECT (SELECT storage_type || '|' || base_path FROM koldstore.storage WHERE name = $1)",
         &[DatumWithOid::from(storage_name)],
     )
     .map_err(|error| error.to_string())?
-    .ok_or_else(|| format!("storage \"{storage_name}\" is not registered; register_storage() it first"))?;
+    .ok_or_else(|| format!("storage \"{storage_name}\" is not registered; register_storage() it first (a follower sharing the leader's directory needs \"check\" => false)"))?;
     let expected = format!(
         "{}|{}",
         metadata["storage"]["storage_type"].as_str().unwrap_or_default(),
@@ -330,4 +335,214 @@ pub fn import_table_metadata_pg(table_name: pgrx::PgRelation, metadata: pgrx::Js
     authorize(Some(oid), "import table metadata");
     import_value(oid, &metadata.0)
         .unwrap_or_else(|error| pgrx::error!("import table metadata failed: {error}"))
+}
+
+fn sync_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<Value, String> {
+    if metadata["format"].as_i64() != Some(FORMAT) {
+        return Err("unsupported metadata format".into());
+    }
+    super::backup::managed_table_oids(Some(table_oid))
+        .map_err(|_| "table is not managed; adopt the leader's metadata with import_table_metadata() first".to_string())?;
+    let schemas = metadata["schemas"].as_array().ok_or("metadata has no schemas")?;
+    let exported_version = schemas
+        .iter()
+        .find(|schema| schema["active"].as_bool() == Some(true))
+        .and_then(|schema| schema["version"].as_i64())
+        .ok_or("metadata has no active schema version")?;
+    let local_version = pgrx::Spi::get_one_with_args::<i32>(
+        "SELECT (SELECT version FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("table has no active schema version")?;
+    if i64::from(local_version) != exported_version {
+        return Err(format!(
+            "schema version differs (local {local_version}, leader {exported_version}); apply the leader's DDL first"
+        ));
+    }
+
+    let oid = || DatumWithOid::from(table_oid);
+    let json = |key: &str| DatumWithOid::from(pgrx::JsonB(metadata[key].clone()));
+
+    // Segments the leader no longer lists (compacted away) leave this node's catalog. The objects
+    // belong to the leader and are never touched here; the index tables cascade.
+    let removed = count(
+        "WITH gone AS (
+           DELETE FROM koldstore.cold_segments c
+           WHERE c.table_oid = $1 AND c.status IN ('active', 'history')
+             AND c.segment_id NOT IN (SELECT (e->>'segment_id')::uuid FROM jsonb_array_elements($2) e)
+           RETURNING 1)
+         SELECT count(*) FROM gone",
+        &[oid(), json("segments")],
+    )?;
+    let added = count(
+        "WITH new AS (
+           INSERT INTO koldstore.cold_segments
+           SELECT (jsonb_populate_record(NULL::koldstore.cold_segments, e || jsonb_build_object('table_oid', $1))).*
+           FROM jsonb_array_elements($2) e
+           WHERE NOT EXISTS (SELECT 1 FROM koldstore.cold_segments c WHERE c.segment_id = (e->>'segment_id')::uuid)
+           RETURNING segment_id)
+         SELECT count(*) FROM new",
+        &[oid(), json("segments")],
+    )?;
+    // Index rows exist for exactly the segments that now have none.
+    pgrx::Spi::run_with_args(
+        "INSERT INTO koldstore.cold_segment_index
+         SELECT (jsonb_populate_record(NULL::koldstore.cold_segment_index, e || jsonb_build_object('table_oid', $1))).*
+         FROM jsonb_array_elements($2) e
+         WHERE NOT EXISTS (SELECT 1 FROM koldstore.cold_segment_index i
+                           WHERE i.segment_id = (e->>'segment_id')::uuid AND i.column_id = (e->>'column_id')::int)",
+        &[oid(), json("segment_index")],
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run_with_args(
+        "INSERT INTO koldstore.cold_segment_order_index
+         SELECT (jsonb_populate_record(NULL::koldstore.cold_segment_order_index,
+                                       e || jsonb_build_object('table_oid', $1))).*
+         FROM jsonb_array_elements($2) e
+         WHERE NOT EXISTS (SELECT 1 FROM koldstore.cold_segment_order_index i
+                           WHERE i.segment_id = (e->>'segment_id')::uuid
+                             AND i.sort_order_id = (e->>'sort_order_id')::int)",
+        &[oid(), json("segment_order_index")],
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run_with_args(
+        "INSERT INTO koldstore.manifest
+         SELECT (jsonb_populate_record(NULL::koldstore.manifest,
+                   e || jsonb_build_object('table_oid', $1, 'hot_row_count', 0, 'mirror_row_count', 0))).*
+         FROM jsonb_array_elements($2) e
+         ON CONFLICT (table_oid, scope_key) DO UPDATE SET
+           etag = EXCLUDED.etag, generation = EXCLUDED.generation, sync_state = EXCLUDED.sync_state,
+           segment_count = EXCLUDED.segment_count, max_seq = EXCLUDED.max_seq,
+           cold_row_count = EXCLUDED.cold_row_count, history_floor_seq = EXCLUDED.history_floor_seq,
+           last_error = NULL, updated_at = now()",
+        &[oid(), json("manifests")],
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run_with_args(
+        "UPDATE koldstore.schemas SET last_flush_seq = $2, updated_at = now() WHERE table_oid = $1 AND active",
+        &[
+            oid(),
+            DatumWithOid::from(
+                schemas
+                    .iter()
+                    .find(|schema| schema["active"].as_bool() == Some(true))
+                    .and_then(|schema| schema["last_flush_seq"].as_i64())
+                    .unwrap_or(0),
+            ),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+
+    let segments = count(
+        "SELECT count(*) FROM koldstore.cold_segments WHERE table_oid = $1 AND status = 'active'",
+        &[oid()],
+    )?;
+    let generation = count(
+        "SELECT COALESCE(max(generation), 0) FROM koldstore.manifest WHERE table_oid = $1",
+        &[oid()],
+    )?;
+    Ok(json!({ "added": added, "removed": removed, "segments": segments, "generation": generation }))
+}
+
+/// Brings a table that already adopted a leader's cold tier up to date with a newer export.
+///
+/// SQL contract: `koldstore.sync_table_metadata(table_name regclass, metadata jsonb) → jsonb`
+/// (`{added, removed, segments, generation}`).
+///
+/// For a follower node that shares the leader's cold storage: segments in the export that this node
+/// lacks are adopted, segments the export no longer lists are dropped from this node's catalog
+/// (never from storage), and the manifest takes the leader's generation. The schema version must
+/// match. It is safe to call repeatedly; an unchanged export changes nothing.
+#[pgrx::pg_extern(name = "sync_table_metadata", schema = "koldstore", security_definer)]
+pub fn sync_table_metadata_pg(table_name: pgrx::PgRelation, metadata: pgrx::JsonB) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "sync table metadata");
+    sync_value(oid, &metadata.0)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("sync table metadata failed: {error}"))
+}
+
+/// Where a table's leader catalog lives on its storage, outside every table prefix.
+fn leader_catalog_key(namespace: &str, name: &str) -> String {
+    format!("_leader_catalog/{namespace}/{name}.json")
+}
+
+fn max_generation(metadata: &Value) -> i64 {
+    metadata["manifests"]
+        .as_array()
+        .map(|manifests| manifests.iter().filter_map(|m| m["generation"].as_i64()).max().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
+    use koldstore_storage::StorageClient;
+
+    let metadata = export_value(table_oid, false)?;
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    let key = leader_catalog_key(&target.namespace, &target.name);
+    let generation = max_generation(&metadata);
+    // Fencing floor: a node whose catalog is behind what is already published is not the leader
+    // any more (or has not caught up) and must not move the shared catalog backwards.
+    if let Ok(existing) = client.get(&key) {
+        if let Ok(existing) = serde_json::from_slice::<Value>(&existing) {
+            let published = max_generation(&existing);
+            if published > generation {
+                return Err(format!(
+                    "a newer leader catalog is already published (generation {published}, this node {generation})"
+                ));
+            }
+        }
+    }
+    let bytes = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    koldstore_storage::publish_mutable_object(&client, &key, &bytes).map_err(|error| error.to_string())?;
+    Ok(json!({ "key": key, "bytes": bytes.len(), "generation": generation }))
+}
+
+/// Publishes this node's cold-tier catalog where followers can pull it.
+///
+/// SQL contract: `koldstore.publish_leader_catalog(table_name regclass) → jsonb`
+/// (`{key, bytes, generation}`).
+///
+/// Run on the tiering leader after a flush or compaction. The object is written atomically beside
+/// (not inside) the table prefix, and publishing is refused when a catalog with a higher manifest
+/// generation is already there, so a stale former leader cannot roll the shared catalog back.
+#[pgrx::pg_extern(name = "publish_leader_catalog", schema = "koldstore", security_definer)]
+pub fn publish_leader_catalog_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "publish leader catalog");
+    publish_leader_catalog_value(oid)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("publish leader catalog failed: {error}"))
+}
+
+fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
+    use koldstore_storage::StorageClient;
+
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    let key = leader_catalog_key(&target.namespace, &target.name);
+    let bytes = client
+        .get(&key)
+        .map_err(|error| format!("no leader catalog at {key} ({error}); has the leader run publish_leader_catalog()?"))?;
+    let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
+    sync_value(table_oid, &metadata)
+}
+
+/// Pulls the leader's published catalog and applies it to this follower table.
+///
+/// SQL contract: `koldstore.sync_from_leader(table_name regclass) → jsonb`
+/// (`{added, removed, segments, generation}`, as `sync_table_metadata`).
+///
+/// The table must already have adopted a leader export with `import_table_metadata()` and share
+/// the leader's cold storage.
+#[pgrx::pg_extern(name = "sync_from_leader", schema = "koldstore", security_definer)]
+pub fn sync_from_leader_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "sync from leader");
+    sync_from_leader_value(oid)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("sync from leader failed: {error}"))
 }
