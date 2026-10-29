@@ -82,9 +82,21 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
         published.retain(|oid, _| tables.iter().any(|(table, role)| table == oid && *role == Role::Leader));
         for (table_oid, role) in tables {
             let result = match role {
-                Role::Follower => super::txn::run_recoverable("follower sync", || sync_one(table_oid)),
+                Role::Follower => {
+                    let synced = super::txn::run_recoverable("follower sync", || sync_one(table_oid));
+                    if crate::guc::auto_elect() {
+                        elect(&database, table_oid);
+                    }
+                    synced
+                }
                 Role::Leader => super::txn::run_recoverable("leader publish", || {
-                    renew_lease(table_oid)?;
+                    if crate::guc::auto_elect() {
+                        if !maintain(&database, table_oid)? {
+                            return Ok(None);
+                        }
+                    } else {
+                        renew_lease(table_oid)?;
+                    }
                     publish_one(table_oid, published.get(&table_oid).map(String::as_str))
                 })
                 .map(|outcome| {
@@ -190,6 +202,57 @@ fn renew_lease(table_oid: u32) -> Result<(), String> {
                      THEN koldstore.renew_leader_lease({table_oid}::oid::regclass)::text END"
     ))
     .map_err(|error| error.to_string())
+}
+
+/// Claims leadership of a follower table whose leader's lease ran out. Any failure (lease still
+/// alive, node behind, lost race) leaves the table a follower and is retried on the next tick.
+fn elect(database: &str, table_oid: u32) {
+    let result = super::txn::run_recoverable("election", || {
+        if pgrx::Spi::get_one::<bool>(&format!("SELECT to_regclass({table_oid}::oid::regclass::text) IS NULL"))
+            .map_err(|error| error.to_string())?
+            == Some(true)
+        {
+            return Ok(None);
+        }
+        crate::sql::leader_lease::try_elect(pgrx::pg_sys::Oid::from(table_oid))
+    });
+    match result {
+        Ok(Some(lease)) => pgrx::log!(
+            "koldstore catalog sync: database={database} table oid {table_oid} elected leader, lease {lease}"
+        ),
+        Ok(None) => {}
+        Err(error) => pgrx::log!("koldstore catalog sync: database={database} table oid {table_oid} not elected: {error}"),
+    }
+}
+
+/// Renews a leader's lease, reclaiming an expired one or demoting the table when another node
+/// holds it. Returns whether the table is still a leader (a demotion commits, so it is not an error).
+fn maintain(database: &str, table_oid: u32) -> Result<bool, String> {
+    use crate::sql::leader_lease::Maintained;
+
+    let oid = pgrx::pg_sys::Oid::from(table_oid);
+    if pgrx::Spi::get_one::<bool>(&format!(
+        "SELECT to_regclass({table_oid}::oid::regclass::text) IS NULL \
+             OR NOT coalesce((SELECT options ? 'lease_epoch' FROM koldstore.schemas WHERE table_oid = {table_oid} AND active), false)"
+    ))
+    .map_err(|error| error.to_string())?
+        == Some(true)
+    {
+        return Ok(true);
+    }
+    match crate::sql::leader_lease::maintain_leader(oid)? {
+        Maintained::Renewed => Ok(true),
+        Maintained::Reclaimed(epoch) => {
+            pgrx::log!("koldstore catalog sync: database={database} table oid {table_oid} reclaimed expired lease as epoch {epoch}");
+            Ok(true)
+        }
+        Maintained::Demoted(reason) => {
+            pgrx::warning!(
+                "koldstore catalog sync: database={database} table oid {table_oid} demoted to follower: {reason}"
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn summary_has_activity(summary: &str) -> bool {

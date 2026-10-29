@@ -28,6 +28,11 @@ pub(crate) fn node_id() -> Result<String, String> {
         .ok_or_else(|| "cannot read the cluster identifier".to_string())
 }
 
+/// Start of the renewal error that says another node holds the lease now.
+const LOST: &str = "leader lease lost";
+/// Start of the renewal error for a lease that ran out before it was renewed.
+const EXPIRED: &str = "leader lease epoch";
+
 fn lease_prefix(namespace: &str, name: &str) -> String {
     format!("_leader_lease/{namespace}/{name}/")
 }
@@ -196,13 +201,13 @@ fn renew_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
     let lease = current(&target)?.ok_or("the leader lease object is gone")?;
     if lease.epoch != epoch || lease.holder != me {
         return Err(format!(
-            "leader lease lost: shared lease is epoch {} held by {} (this node held epoch {epoch})",
+            "{LOST}: shared lease is epoch {} held by {} (this node held epoch {epoch})",
             lease.epoch, lease.holder
         ));
     }
     if lease.expired(now) {
         return Err(format!(
-            "leader lease epoch {epoch} expired before it was renewed; acquire_leader_lease() to claim a new epoch"
+            "{EXPIRED} {epoch} expired before it was renewed; acquire_leader_lease() to claim a new epoch"
         ));
     }
     let renewed = Lease { heartbeat_ms: now, ..lease };
@@ -213,6 +218,85 @@ fn renew_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
         Some(after) => Err(format!("leader lease lost during renewal to epoch {}", after.epoch)),
         None => Err("the leader lease object is gone".into()),
     }
+}
+
+/// What the worker did for a leader table with `koldstore.auto_elect` on.
+pub(crate) enum Maintained {
+    Renewed,
+    /// The lease had expired unclaimed, so this node took the next epoch.
+    Reclaimed(i64),
+    /// Another node holds the lease; this table is a follower again.
+    Demoted(String),
+}
+
+/// Renews this leader's lease. A lease that expired unclaimed is claimed again (the catalog is
+/// this node's own), and a lease another node holds demotes the table to follower. Errors that
+/// do not say who holds the lease (storage down) are returned and change nothing.
+pub(crate) fn maintain_leader(table_oid: pgrx::pg_sys::Oid) -> Result<Maintained, String> {
+    let error = match renew_value(table_oid) {
+        Ok(_) => return Ok(Maintained::Renewed),
+        Err(error) => error,
+    };
+    let lost = if error.starts_with(LOST) {
+        error.clone()
+    } else if error.starts_with(EXPIRED) {
+        match acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds()) {
+            Ok(lease) => return Ok(Maintained::Reclaimed(lease["epoch"].as_i64().unwrap_or(0))),
+            Err(error) if error.contains("is held by") || error.starts_with("lost the race") => error,
+            Err(error) => return Err(error),
+        }
+    } else {
+        return Err(error);
+    };
+    super::table_metadata::set_leader_value(table_oid, false)?;
+    super::table_metadata::set_follower_value(table_oid, true)?;
+    set_local_epoch(table_oid, None)?;
+    Ok(Maintained::Demoted(lost))
+}
+
+/// Claims leadership of a follower table when the shared lease has expired and this node has
+/// followed everything the last leader published. `Ok(None)` means "not now" (lease alive, no
+/// lease ever existed); being behind or losing the race is an error.
+pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, String> {
+    use koldstore_storage::StorageClient;
+
+    let t = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&t.storage.storage_id)?;
+    let tgt = Target { client, prefix: lease_prefix(&t.namespace, &t.name) };
+    // Without a lease object the leader never enforced one, so nobody may be taken over.
+    let Some(lease) = current(&tgt)? else {
+        return Ok(None);
+    };
+    if !lease.expired(now_ms()) {
+        return Ok(None);
+    }
+    let bytes = tgt
+        .client
+        .get(&super::table_metadata::leader_catalog_key(&t.namespace, &t.name))
+        .map_err(|error| format!("cannot elect: no leader catalog ({error})"))?;
+    let published: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
+    let (held, seen) = pgrx::Spi::get_two_with_args::<i64, i64>(
+        "SELECT (SELECT coalesce(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = $1), \
+                (SELECT coalesce((options->>'seen_leader_epoch')::bigint, 0) FROM koldstore.schemas \
+                 WHERE table_oid = $1 AND active)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?;
+    let (held, seen) = (held.unwrap_or(0), seen.unwrap_or(0));
+    let behind = held < super::table_metadata::max_generation(&published)
+        || seen < published["lease_epoch"].as_i64().unwrap_or(0);
+    if behind {
+        return Err(format!(
+            "cannot elect: this node holds generation {held} (leader epoch {seen}) but the leader published \
+             generation {} (epoch {}); it must catch up first",
+            super::table_metadata::max_generation(&published),
+            published["lease_epoch"].as_i64().unwrap_or(0)
+        ));
+    }
+    super::table_metadata::set_follower_value(table_oid, false)?;
+    super::table_metadata::set_leader_value(table_oid, true)?;
+    // A lost create-if-absent race errors here, so the caller's transaction rolls the flags back.
+    acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds()).map(Some)
 }
 
 /// Claims the table's leader lease, or renews it when this node already holds it.

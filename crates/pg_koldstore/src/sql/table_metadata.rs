@@ -492,11 +492,11 @@ pub fn sync_table_metadata_pg(table_name: pgrx::PgRelation, metadata: pgrx::Json
 }
 
 /// Where a table's leader catalog lives on its storage, outside every table prefix.
-fn leader_catalog_key(namespace: &str, name: &str) -> String {
+pub(crate) fn leader_catalog_key(namespace: &str, name: &str) -> String {
     format!("_leader_catalog/{namespace}/{name}.json")
 }
 
-fn max_generation(metadata: &Value) -> i64 {
+pub(crate) fn max_generation(metadata: &Value) -> i64 {
     metadata["manifests"]
         .as_array()
         .map(|manifests| manifests.iter().filter_map(|m| m["generation"].as_i64()).max().unwrap_or(0))
@@ -690,7 +690,7 @@ pub(crate) fn refuse_on_follower(table_oid: pgrx::pg_sys::Oid, action: &str) -> 
     Ok(())
 }
 
-fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
+pub(crate) fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
     let _lock = super::job_lock::TableJobLockGuard::lock(table_oid)?;
@@ -728,7 +728,7 @@ fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<boo
     Ok(true)
 }
 
-fn set_leader_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
+pub(crate) fn set_leader_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
     let _lock = super::job_lock::TableJobLockGuard::lock(table_oid)?;

@@ -57,6 +57,10 @@ static CATALOG_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 static FOLLOWER_ACK_MAX_AGE: GucSetting<i32> = GucSetting::<i32>::new(3600);
 static PUBLISHED_TOMBSTONE_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
+static AUTO_ELECT: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
+static LEADER_LEASE_TTL: GucSetting<i32> = GucSetting::<i32>::new(30);
+#[cfg(feature = "pg")]
 static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -279,6 +283,24 @@ pub fn define_gucs() {
         &FOLLOWER_ACK_MAX_AGE,
         0,
         31_536_000,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.auto_elect",
+        c"Lets the catalog sync worker elect a new tiering leader and demote a deposed one.",
+        c"When on, the worker of a follower table claims the leader lease once the shared lease has expired (provided this node holds the leader's latest published generation) and switches the table to leader; the worker of a leader table that loses its lease switches back to follower. Needs koldstore.catalog_sync_interval_seconds, and a leader that already acquired a lease. Superuser-only.",
+        &AUTO_ELECT,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.leader_lease_ttl_seconds",
+        c"Lease time-to-live used when the catalog sync worker elects this node leader.",
+        c"Keep it several times koldstore.catalog_sync_interval_seconds (the worker renews on that interval) and well above the clock skew between nodes. A dead leader is replaced after about this long. Superuser-only.",
+        &LEADER_LEASE_TTL,
+        3,
+        86_400,
         GucContext::Suset,
         flags,
     );
@@ -649,6 +671,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "3600",
         },
         GucDefinition {
+            name: AUTO_ELECT_GUC,
+            internal: false,
+            default_value: "off",
+        },
+        GucDefinition {
+            name: LEADER_LEASE_TTL_GUC,
+            internal: false,
+            default_value: "30",
+        },
+        GucDefinition {
             name: PUBLISHED_TOMBSTONE_LIMIT_GUC,
             internal: false,
             default_value: "10000",
@@ -842,6 +874,8 @@ pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_datab
 pub const CATALOG_SYNC_INTERVAL_GUC: &str = "koldstore.catalog_sync_interval_seconds";
 pub const FOLLOWER_ACK_MAX_AGE_GUC: &str = "koldstore.follower_ack_max_age_seconds";
 pub const PUBLISHED_TOMBSTONE_LIMIT_GUC: &str = "koldstore.published_tombstone_limit";
+pub const AUTO_ELECT_GUC: &str = "koldstore.auto_elect";
+pub const LEADER_LEASE_TTL_GUC: &str = "koldstore.leader_lease_ttl_seconds";
 pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
@@ -966,6 +1000,34 @@ pub fn published_tombstone_limit() -> usize {
     #[cfg(not(feature = "pg"))]
     {
         10_000
+    }
+}
+
+/// Whether the catalog sync worker elects and demotes leaders on its own.
+#[must_use]
+pub fn auto_elect() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        AUTO_ELECT.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        false
+    }
+}
+
+/// Lease ttl (seconds) the worker claims with when it elects this node.
+#[must_use]
+pub fn leader_lease_ttl_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        LEADER_LEASE_TTL.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        30
     }
 }
 
