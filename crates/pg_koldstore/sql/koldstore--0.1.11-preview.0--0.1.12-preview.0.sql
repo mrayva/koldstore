@@ -543,6 +543,14 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'sync_from_leader_pg_wrapper';
 
+-- Deletes a follower's hot rows that exactly match the leader's cold segments.
+CREATE FUNCTION koldstore."prune_follower_hot"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'prune_follower_hot_pg_wrapper';
+
 -- Marks a table as a follower of a leader's cold tier (no own flush, compaction or reaping).
 CREATE FUNCTION koldstore."set_table_follower"(
 	"table_name" regclass,

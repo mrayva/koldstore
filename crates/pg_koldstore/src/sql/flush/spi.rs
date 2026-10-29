@@ -653,6 +653,24 @@ fn prepare_seq_range_cleanup(
         .map_err(|error| error.to_string())
 }
 
+/// Runs `f` with the same session setup as flush's own hot prune: write guard suspended, custom
+/// scan off, triggers off, and the WAL stamped so neither Spock nor the mirror sees the deletes.
+pub(crate) fn with_prune_session<T>(
+    f: impl FnOnce(&mut pgrx::spi::SpiClient<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    crate::sql::cold_dml::guard::with_guard_suspended(|| {
+        crate::merge_scan::pg::with_custom_scan_disabled(|| {
+            pgrx::Spi::connect_mut(|client| -> Result<T, String> {
+                client
+                    .update("SET LOCAL session_replication_role = replica", None, &[])
+                    .map_err(|error| error.to_string())?;
+                arm_flush_replication_origin()?;
+                f(client)
+            })
+        })
+    })
+}
+
 fn execute_seq_range_cleanup(
     plan: &koldstore_flush::CleanSchemaCleanupPlan,
     max_seq: i64,

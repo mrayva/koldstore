@@ -375,16 +375,20 @@ fn sync_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<Value, S
          SELECT count(*) FROM gone",
         &[oid(), json("segments")],
     )?;
-    let added = count(
+    let added_ranges = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
         "WITH new AS (
            INSERT INTO koldstore.cold_segments
            SELECT (jsonb_populate_record(NULL::koldstore.cold_segments, e || jsonb_build_object('table_oid', $1))).*
            FROM jsonb_array_elements($2) e
            WHERE NOT EXISTS (SELECT 1 FROM koldstore.cold_segments c WHERE c.segment_id = (e->>'segment_id')::uuid)
-           RETURNING segment_id)
-         SELECT count(*) FROM new",
+           RETURNING min_seq, max_seq)
+         SELECT coalesce(jsonb_agg(jsonb_build_array(min_seq, max_seq)), '[]'::jsonb) FROM new",
         &[oid(), json("segments")],
-    )?;
+    )
+    .map_err(|error| error.to_string())?
+    .map(|value| value.0)
+    .unwrap_or_else(|| json!([]));
+    let added = added_ranges.as_array().map_or(0, Vec::len);
     // Index rows exist for exactly the segments that now have none.
     pgrx::Spi::run_with_args(
         "INSERT INTO koldstore.cold_segment_index
@@ -443,7 +447,26 @@ fn sync_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<Value, S
         "SELECT COALESCE(max(generation), 0) FROM koldstore.manifest WHERE table_oid = $1",
         &[oid()],
     )?;
-    Ok(json!({ "added": added, "removed": removed, "segments": segments, "generation": generation }))
+    Ok(json!({
+        "added": added, "removed": removed, "segments": segments, "generation": generation,
+        "added_ranges": added_ranges,
+    }))
+}
+
+/// Splits the `(min_seq, max_seq)` pairs of newly adopted segments out of a sync result.
+fn take_added_ranges(result: &mut Value) -> Vec<(i64, i64)> {
+    result
+        .as_object_mut()
+        .and_then(|map| map.remove("added_ranges"))
+        .and_then(|ranges| {
+            ranges.as_array().map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|pair| Some((pair[0].as_i64()?, pair[1].as_i64()?)))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Brings a table that already adopted a leader's cold tier up to date with a newer export.
@@ -460,7 +483,10 @@ pub fn sync_table_metadata_pg(table_name: pgrx::PgRelation, metadata: pgrx::Json
     let oid = table_name.oid();
     authorize(Some(oid), "sync table metadata");
     sync_value(oid, &metadata.0)
-        .map(pgrx::JsonB)
+        .map(|mut result| {
+            take_added_ranges(&mut result);
+            pgrx::JsonB(result)
+        })
         .unwrap_or_else(|error| pgrx::error!("sync table metadata failed: {error}"))
 }
 
@@ -528,7 +554,41 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         .get(&key)
         .map_err(|error| format!("no leader catalog at {key} ({error}); has the leader run publish_leader_catalog()?"))?;
     let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
-    sync_value(table_oid, &metadata)
+    let mut result = sync_value(table_oid, &metadata)?;
+    let added = take_added_ranges(&mut result);
+    // Same transaction as the adoption: a failed prune rolls the sync back and the next tick
+    // retries, so a follower never holds segments whose hot copies were not considered.
+    if is_follower(table_oid)? && !added.is_empty() {
+        let pruned = super::flush::peer_prune::prune_covered(table_oid, Some(&added))?;
+        result["hot_pruned"] = pruned["hot_pruned"].clone();
+    }
+    Ok(result)
+}
+
+/// Deletes a follower's hot rows that exactly match rows in the leader's cold segments.
+///
+/// SQL contract: `koldstore.prune_follower_hot(table_name regclass) → jsonb`
+/// (`{segments, rows_read, hot_pruned}`).
+///
+/// `sync_from_leader()` already prunes the segments it adopts; this covers every active segment,
+/// for example those adopted by `import_table_metadata()` before follower mode was set. A hot row
+/// that differs from the cold copy in any column is left alone. Deletes are neither replicated
+/// nor mirrored. Rows the leader deleted after flushing are not propagated here (tombstones are
+/// not synced). Not supported on user-scoped tables.
+#[pgrx::pg_extern(name = "prune_follower_hot", schema = "koldstore", security_definer)]
+pub fn prune_follower_hot_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "prune follower hot rows");
+    let result = is_follower(oid)
+        .and_then(|follower| {
+            if follower {
+                super::flush::peer_prune::prune_covered(oid, None)
+            } else {
+                Err("the table is not a follower (koldstore.set_table_follower)".to_string())
+            }
+        })
+        .unwrap_or_else(|error| pgrx::error!("prune follower hot failed: {error}"));
+    pgrx::JsonB(result)
 }
 
 /// Pulls the leader's published catalog and applies it to this follower table.

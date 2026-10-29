@@ -675,7 +675,7 @@ pub(super) fn write_streamed_chunk(
     Ok(())
 }
 
-pub(super) fn apply_flush_row_count_deltas(
+pub(crate) fn apply_flush_row_count_deltas(
     table_oid: pgrx::pg_sys::Oid,
     mirror_pruned: i64,
     hot_pruned: i64,

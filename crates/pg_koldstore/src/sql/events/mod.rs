@@ -550,7 +550,7 @@ fn decode_hot_mirror_tuples(
 }
 
 #[cfg(feature = "pg")]
-fn read_cold_segment_page(
+pub(crate) fn read_cold_segment_page(
     table_oid: pgrx::pg_sys::Oid,
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     segment: &SegmentStatsHint,

@@ -15,6 +15,8 @@ pub(crate) mod export;
 #[cfg(feature = "pg")]
 pub(crate) mod import;
 #[cfg(feature = "pg")]
+pub(crate) mod peer_prune;
+#[cfg(feature = "pg")]
 pub(crate) mod spi;
 
 /// Enqueues a flush job through the SQL API and returns its UUID.
