@@ -1,0 +1,94 @@
+# Spock mesh with a single tiering leader (design spike)
+
+Status: spike only, nothing implemented beyond two small import fixes. Date: 2026-10-29.
+
+## Goal
+
+Today every node in a multi-master mesh tiers independently (`docs/multi-master.md`): each node
+flushes its own hot rows to its own cold tier, and a row that is hot on one node and cold on a
+peer diverges on plain UPDATE/DELETE (Finding 3, mitigated eventually by
+`reconcile_spock_conflicts()`). The goal here is one **leader** that alone flushes and compacts,
+with every other node reading the leader's cold tier, so there is one cold history and the
+hot/cold split stops being per-node.
+
+## What the spike measured
+
+Two scratch PG18 clusters (A leader, B follower) over one shared filesystem storage
+(`/tmp/ks-mm-share`), script `mm_adopt.sh` in the session scratchpad.
+
+| Question | Result |
+|---|---|
+| Can a peer adopt the leader's segments from an export? | **Yes.** `export_table_metadata` on A (about 8 KB for 3 segments) plus `import_table_metadata` on B adopted 3 segments. B's snapshot (count + md5 over all rows) equalled A's, point and range reads worked. |
+| Is the export deterministic and free of node-local ids? | Yes: no OIDs, no credentials. `min_seq`/`max_seq` are still leader-local snowflake ids. |
+| Can a follower follow incrementally (A flushes again)? | **No.** `import_table_metadata` refuses an already managed table. A new incremental "sync from leader" function is required. |
+| Does adopt reclaim the follower's hot copies? | **No.** B keeps all of its heap rows. A prune step is missing. |
+
+Import problems found on the way (only the first is fixed in this branch):
+
+1. `import_table_metadata` ignored the exported `migration_order_by`, so tables without an identity
+   key could not be adopted ("requires an auto-increment primary key or explicit order column").
+2. An unregistered storage name surfaced as `SpiTupleTable positioned before the start or after the
+   end` instead of the intended message. The cause on the follower was that `register_storage`
+   refuses a non-empty directory (the leader's files), so a follower must register with
+   `"check" => false`. Worth a clearer error and a documented follower recipe.
+3. `max_rows_per_file` below the floor needs `koldstore.min_max_rows_per_file` on the follower too.
+
+## Architecture options
+
+**A. Pull-based adopt (recommended first step).** The leader publishes its catalog metadata next to
+the segments (a `_catalog/<table>.json` object written at each manifest generation, CAS on
+generation). Followers poll it and apply a diff: insert new `cold_segments` (+ index rows), mark
+removed ones superseded, bump the local manifest. No change to Spock, works with filesystem/S3
+storage, reuses the existing export format. Cost: the follower needs an incremental
+`sync_from_leader(table)` and a worker to call it.
+
+**B. Replicate the catalog through Spock.** Add `koldstore.cold_segments` and friends to a
+replication set. Appealing but wrong: rows carry node-local OIDs (`table_oid`), the manifest is a
+generation-CAS counter, and conflicting writers on the same catalog row are exactly what a single
+leader is meant to avoid. Rejected.
+
+**C. Leader-only flush without pull.** Followers never tier and keep everything hot. Simplest, but
+defeats the purpose on followers (their storage grows unbounded).
+
+## Remaining hard parts
+
+1. **Peer prune.** After adopting a segment a follower must delete the hot rows it covers, but only
+   those whose version is no newer than the cold copy. Seqs are node-local (snowflake, time-ordered,
+   roughly comparable across nodes), so a plain `seq <= segment.max_seq` is unsafe: a row edited on
+   the follower after the leader's flush has a newer local seq and must stay. Proposal: prune by
+   `(pk, row hash)` match against the segment, falling back to leaving the row hot when the hash
+   differs. This needs a per-row hash in the segment or a read-back compare.
+2. **Finding 3 does not disappear.** UPDATE of a row the leader just flushed and a follower has not
+   yet pruned still races. The window shrinks (only between a leader flush and a follower sync) but
+   the reconciler stays.
+3. **Leader election and fencing.** Two leaders flushing the same rows corrupt the cold history.
+   Needs a lease with fencing (generation CAS on the shared catalog object already gives a floor),
+   ideally backed by the quorum layer in Spock PR #604 (etcd/pgraft) or the ColdFront bakery
+   protocol. The write-router prototype (`lease_guard.py`) solves the same problem and can be reused.
+4. **Compaction and reaping.** Only the leader compacts; followers must not read a reaped segment.
+   Reuse the standby rule: reap grace must exceed the slowest follower's sync lag.
+5. **Hydrate-on-write.** A follower hydrating a cold row into its heap writes a hot copy that Spock
+   replicates to everyone. Hydrated rows must carry the leader's seq so the leader's next compaction
+   treats them as already-cold. Not yet analysed in detail.
+
+## Staged plan and cost
+
+| Stage | Work | Estimate |
+|---|---|---|
+| 0 | `migration_order_by` import fix (done), clearer unregistered-storage error, follower registration recipe | 0.5 day |
+| 1 | `koldstore.sync_from_leader(table)`: incremental adopt (diff by `segment_id`, superseded handling, generation CAS) plus a unit/e2e test on two clusters | 3 days |
+| 2 | Leader publishes `_catalog` object per generation; follower worker polls | 2 days |
+| 3 | Peer prune with row-hash match and tests for the "edited after flush" case | 4 to 5 days |
+| 4 | Lease and fencing (start with a table-local lease row on shared storage, then plug in pgraft/etcd) | 3 to 5 days |
+| 5 | Multi-master e2e on the 3-node Spock mesh: concurrent writes, leader kill, follower lag, reap races | 4 days |
+
+Roughly 3 to 4 weeks of focused work end to end. Stages 0 to 2 are a safe, independently useful
+milestone (read-only followers over shared cold storage) and could ship before the prune and
+election work.
+
+## Recommendation
+
+Do stages 0 to 2 only if the goal is "followers read the leader's cold tier". Do not start stage 3
+before deciding the per-row version comparison, since it determines whether segments need a row
+hash column. Until then the existing per-node tiering plus the reconciler remains the supported
+multi-master mode.

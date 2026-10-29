@@ -205,7 +205,7 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
         active["table_type"].as_str().unwrap_or("shared"),
         storage_name,
         scope_column,
-        None,
+        active["options"]["migration_order_by"].as_str(),
         options.compression.as_ref().map(|c| c.as_str()),
         options.target_file_size_mb.map(|v| v as i64),
         hot_row_limit,
