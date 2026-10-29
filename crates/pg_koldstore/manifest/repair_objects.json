@@ -1358,6 +1358,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.alter_table(table_name regclass, hot_row_limit bigint DEFAULT NULL::bigint, min_flush_rows bigint DEFAULT NULL::bigint, max_rows_per_file bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT NULL::boolean)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$alter_table_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function metrics() returns text security definer [metrics_pg_wrapper]": {
+            "add": "koldstore.metrics()",
+            "name": "metrics",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.metrics()\n RETURNS text\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$metrics_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function rebuild_table(table_name regclass, ddl text) returns uuid security definer [rebuild_table_pg_wrapper]": {
             "add": "koldstore.rebuild_table(table_name regclass, ddl text)",
             "name": "rebuild_table",

@@ -146,3 +146,20 @@ async fn alter_table_set_changes_compression_and_target_file_size() -> Result<()
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn metrics_exports_prometheus_gauges_for_managed_tables() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "metrics_export").await?;
+        let table = db.create_indexed_items_table("metrics_items", 20).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        db.flush_table(&table.relation).await?;
+        let text: String = db.client.query_one("SELECT koldstore.metrics()", &[]).await?.get(0);
+        let series = format!("koldstore_cold_segments{{table=\"{}\"}}", table.relation);
+        assert!(text.contains(&series), "missing {series} in:\n{text}");
+        assert!(text.contains("# TYPE koldstore_cold_rows gauge"), "{text}");
+        assert!(text.contains("\nkoldstore_async_mirror_healthy "), "{text}");
+        assert!(text.lines().all(|l| l.starts_with('#') || l.rsplit(' ').next().is_some_and(|v| v.parse::<f64>().is_ok())), "{text}");
+    }
+    Ok(())
+}

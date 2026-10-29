@@ -540,6 +540,11 @@ SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'alter_table_pg_wrapper';
 
+CREATE FUNCTION koldstore."metrics"() RETURNS text
+SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'metrics_pg_wrapper';
+
 -- SQL-object maintenance functions the fresh-install snapshot carries.
 CREATE FUNCTION koldstore."rebuild_segment_summaries"(
 	"table_name" regclass DEFAULT NULL,
