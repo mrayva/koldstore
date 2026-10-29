@@ -54,6 +54,7 @@ static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
 static CATALOG_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
+static FOLLOWER_ACK_MAX_AGE: GucSetting<i32> = GucSetting::<i32>::new(3600);
 #[cfg(feature = "pg")]
 static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
@@ -268,6 +269,16 @@ pub fn define_gucs() {
         0,
         86_400,
         GucContext::Postmaster,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.follower_ack_max_age_seconds",
+        c"Seconds a follower's acknowledgement keeps holding back the leader's reaping; 0 disables the check.",
+        c"Each follower records the leader manifest generation it holds in the shared storage after every sync. Reaping compacted segments is deferred while a follower whose acknowledgement is younger than this still holds an older generation, so the follower never loses a segment it still reads. A follower silent for longer is treated as gone and its reads fail closed until it syncs. Superuser-only.",
+        &FOLLOWER_ACK_MAX_AGE,
+        0,
+        31_536_000,
+        GucContext::Suset,
         flags,
     );
     GucRegistry::define_string_guc(
@@ -622,6 +633,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "0",
         },
         GucDefinition {
+            name: FOLLOWER_ACK_MAX_AGE_GUC,
+            internal: false,
+            default_value: "3600",
+        },
+        GucDefinition {
             name: CATALOG_SYNC_DATABASES_GUC,
             internal: false,
             default_value: "",
@@ -808,6 +824,7 @@ pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_pol
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
 pub const CATALOG_SYNC_INTERVAL_GUC: &str = "koldstore.catalog_sync_interval_seconds";
+pub const FOLLOWER_ACK_MAX_AGE_GUC: &str = "koldstore.follower_ack_max_age_seconds";
 pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
@@ -918,6 +935,20 @@ pub fn spock_reconcile_databases() -> Vec<String> {
     #[cfg(not(feature = "pg"))]
     {
         Vec::new()
+    }
+}
+
+/// Seconds a follower acknowledgement holds back reaping (0 = the check is off).
+#[must_use]
+pub fn follower_ack_max_age_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        FOLLOWER_ACK_MAX_AGE.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        3600
     }
 }
 

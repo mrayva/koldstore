@@ -1047,6 +1047,7 @@ pub(crate) fn reap_table(
 ) -> Result<i64, String> {
     crate::sql::table_metadata::refuse_on_follower(table_oid, "reap compacted segments")?;
     crate::sql::leader_lease::require_lease(table_oid, "reap compacted segments")?;
+    crate::sql::follower_ack::require_followers_caught_up(table_oid, "reap compacted segments")?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let client = crate::object_store::open_managed_object_store_client(
         &storage.storage_type,
@@ -1092,6 +1093,10 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
     }
     let mut reaped = 0_i64;
     for table_oid in tables {
+        // A follower still reading older segments defers the pass; the next tick retries.
+        if crate::sql::follower_ack::require_followers_caught_up(table_oid, "reap compacted segments").is_err() {
+            continue;
+        }
         reaped += reap_table(table_oid, grace)?;
     }
     Ok(Some(json!({ "reaped_segments": reaped })))

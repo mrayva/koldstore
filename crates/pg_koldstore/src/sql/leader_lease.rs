@@ -16,13 +16,13 @@ use serde_json::{Value, json};
 use super::backup::authorize;
 use koldstore_storage::{PutPrecondition, StorageClient};
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
 }
 
-fn node_id() -> Result<String, String> {
+pub(crate) fn node_id() -> Result<String, String> {
     pgrx::Spi::get_one::<String>("SELECT (SELECT system_identifier::text FROM pg_control_system())")
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cannot read the cluster identifier".to_string())

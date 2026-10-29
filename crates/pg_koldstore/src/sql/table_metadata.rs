@@ -603,6 +603,14 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         result["tombstones_added"] = applied["tombstones_added"].clone();
         result["tombstones_removed"] = applied["tombstones_removed"].clone();
     }
+    if is_follower(table_oid)? {
+        if let Some(generation) = result["generation"].as_i64() {
+            // Lets the leader hold back reaping until this node has moved past the old segments.
+            if let Err(error) = super::follower_ack::record(table_oid, generation) {
+                pgrx::warning!("koldstore: could not record the follower acknowledgement: {error}");
+            }
+        }
+    }
     Ok(result)
 }
 

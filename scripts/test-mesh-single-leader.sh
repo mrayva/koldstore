@@ -3,7 +3,7 @@
 # with ONE koldstore tiering leader (n1) and two followers (n2, n3) over shared filesystem
 # cold storage. Exercises: concurrent writes, leader flush + follower sync/prune, writes to
 # rows that are cold on a peer (reconciler heals), leader kill + lease takeover, stale-leader
-# fencing, demotion + catch-up, compaction + reap, and a reap-vs-stale-follower race.
+# fencing, demotion + catch-up, compaction + reap, and reap waiting for an offline follower.
 #
 # Needs a PostgreSQL built with Spock's core patches plus the spock extension, and a built
 # koldstore package. Uses its own data dirs and ports; never touches another cluster.
@@ -180,13 +180,16 @@ echo "n1 snap after catch-up: $(snap $P1)"; allsnap
 converge "demoted old leader catches up with the new one" "1 2 3" 20
 say "reap with all followers caught up"
 echo "n2 compact: $(q $P2 spike -c "SELECT koldstore.compact_table('t'::regclass)::text" | tail -1 | cut -c1-120)"
-echo "n2 reap g=0: $(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1 | cut -c1-120)"
+# The reap waits until both followers acknowledge the compacted generation (publish + sync ticks).
+for k in $(seq 1 20); do R=$(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1); echo "$R" | grep -q "has not caught up" || break; sleep 1; done
+echo "n2 reap g=0 (after ${k}s): $(echo "$R" | cut -c1-120)"
+check "reap proceeds once the followers caught up" test "$(echo "$R" | grep -c ERROR)" = 0
 for k in $(seq 1 8); do [ "$(segs $P3)" = "$(segs $P2)" ] && break; sleep 1; done
 echo "n3 read after reap: $(snap $P3)   n2: $(snap $P2)"
 converge "followers read correctly after compaction and reap" "2 3"
 for i in 2 3; do V=$(q ${ports[$((i-1))]} spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" 2>&1 | tail -1)
   echo "validate n$i: $V"; check "cold storage validates on n$i after reap" test "$V" = true; done
-say "adversarial reap: n3 offline, leader rewrites + reaps with grace 0, n3 reads before its next sync"
+say "reap waits for an offline follower: n3 offline, leader rewrites, compacts and tries to reap with grace 0"
 $PG_BIN/pg_ctl -D $W/n3 -m immediate stop >/dev/null
 for r in 1 2 3; do
   q $P2 spike -c "INSERT INTO t SELECT g,'late-'||g FROM generate_series(9000+300*$r,9299+300*$r) g" >/dev/null
@@ -198,15 +201,21 @@ q $P2 spike -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
 flush1 $P2 >/dev/null
 echo "n2 segments: $(segs $P2)"
 echo "n2 compact: $(q $P2 spike -c "SELECT koldstore.compact_table('t'::regclass)::text" | tail -1 | cut -c1-80)"
-echo "n2 reap g=0: $(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1 | cut -c1-80)"
+sleep 6
+R=$(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1)
+echo "n2 reap g=0: $(echo "$R" | cut -c1-200)"
+check "reap refused while n3 (offline) is behind" has "$R" "has not caught up"
 start 3 $P3
-echo "n3 read right after restart (stale catalog, segments gone): $(snap $P3 | head -1 | cut -c1-160)"
+echo "n3 read right after restart (old catalog, objects still present): $(snap $P3 | head -1 | cut -c1-160)"
 for k in $(seq 1 15); do [ "$(segs $P3)" = "$(segs $P2)" ] && break; sleep 1; done
 sleep 3
 echo "n3 after sync (waited ~${k}s): $(snap $P3)   n2: $(snap $P2)"
+for k in $(seq 1 15); do R=$(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1); echo "$R" | grep -q "has not caught up" || break; sleep 1; done
+echo "n2 reap after n3 caught up (after ${k}s): $(echo "$R" | cut -c1-120)"
+check "reap proceeds after n3 caught up" test "$(echo "$R" | grep -c ERROR)" = 0
 V=$(q $P3 spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" | tail -1)
 echo "validate n3: $V"
-check "stale follower self-heals after the reap and validates" test "$V" = true
+check "n3 validates after the reap" test "$V" = true
 say "final"
 allsnap
 converge "all three nodes agree at the end" "1 2 3" 20
