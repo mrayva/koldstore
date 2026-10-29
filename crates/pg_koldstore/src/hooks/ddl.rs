@@ -930,6 +930,20 @@ fn apply_parquet_layout_updates(
             .clone()
             .with_parquet_data_page_row_count_limit(row_count);
     }
+    if let Some(value) = option_value(values, "koldstore_compression") {
+        let codec = koldstore_common::ParquetCompression::parse(value)
+            .ok_or_else(|| format!("unsupported compression {value:?}; use snappy, zstd or uncompressed"))?;
+        *options = options.clone().with_compression(codec);
+    }
+    if let Some(value) = option_value(values, "koldstore_target_file_size_mb") {
+        let megabytes = value
+            .parse::<u64>()
+            .map_err(|_| "target_file_size_mb must be a positive integer")?;
+        if megabytes == 0 {
+            return Err("target_file_size_mb must be greater than zero".into());
+        }
+        *options = options.clone().with_target_file_size_mb(megabytes);
+    }
     if let Some(value) = option_value(values, "koldstore_parquet_bloom_filter_fpp") {
         let fpp = value
             .parse::<f64>()

@@ -307,7 +307,8 @@ also available.
 Existing tables can change the same settings for future segments with
 `ALTER TABLE ... SET (koldstore_parquet_row_group_size = 256,
 koldstore_parquet_data_page_row_count_limit = 64,
-koldstore_parquet_bloom_filter_fpp = 0.01)`. Existing segments are unchanged.
+koldstore_parquet_bloom_filter_fpp = 0.01)`. `koldstore_compression = 'snappy'|'zstd'|'uncompressed'`
+and `koldstore_target_file_size_mb = 128` work the same way. Existing segments are unchanged.
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization
@@ -929,7 +930,8 @@ like `manage_table`'s (positive, `max_rows_per_file` at or above `koldstore.min_
 A table managed without a flush policy can opt in by passing `hot_row_limit` (the other two limits
 then default to 1000). Existing segments are untouched; the new limits apply from the next flush.
 On a partitioned parent it changes every managed leaf and the template for partitions created later.
-Owner or superuser only. Storage, compression, scope and Parquet options are not alterable.
+Owner or superuser only. Storage and scope are not alterable. Compression, target file size and the Parquet layout options
+change with `ALTER TABLE ... SET (koldstore_...)` (see `manage_table`).
 
 To delete many rows at once, cold ones included, use
 `koldstore.purge_where(table, predicate) → {purged_cold, deleted_hot}`. The predicate is a boolean

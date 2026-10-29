@@ -104,3 +104,35 @@ async fn alter_table_refuses_unmanaged_tables() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn alter_table_set_changes_compression_and_target_file_size() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "alter_compression").await?;
+        let table = db.create_indexed_items_table("alter_comp", 20).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        let relation = &table.relation;
+        let before = policy(&db, relation).await?;
+
+        for bad in ["koldstore_compression = 'lz77'", "koldstore_target_file_size_mb = 0", "koldstore_target_file_size_mb = 'x'"] {
+            let refused = db.client.batch_execute(&format!("ALTER TABLE {relation} SET ({bad})")).await;
+            assert!(refused.is_err(), "{bad} must be refused");
+        }
+        assert_eq!(policy(&db, relation).await?, before, "refused ALTER must not change options");
+
+        db.client
+            .batch_execute(&format!(
+                "ALTER TABLE {relation} SET (koldstore_compression = 'snappy', koldstore_target_file_size_mb = 8)"
+            ))
+            .await?;
+        let after = policy(&db, relation).await?;
+        assert_eq!(after["compression"], "snappy", "{after}");
+        assert_eq!(after["target_file_size_mb"], 8, "{after}");
+
+        let expected: i64 = db.client.query_one(&format!("SELECT count(*) FROM {relation}"), &[]).await?.get(0);
+        db.flush_table(relation).await?;
+        let got: i64 = db.client.query_one(&format!("SELECT count(*) FROM {relation}"), &[]).await?.get(0);
+        assert_eq!(got, expected, "reads must survive the codec change");
+    }
+    Ok(())
+}
