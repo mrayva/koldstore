@@ -707,6 +707,7 @@ name = "e2e"
 version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "bytes",
  "chrono",
  "koldstore-common",

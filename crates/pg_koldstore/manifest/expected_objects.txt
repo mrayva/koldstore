@@ -179,6 +179,7 @@ function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, d
 function rebuild_table(table_name regclass, ddl text) returns uuid security definer [rebuild_table_pg_wrapper]
 function alter_table(table_name regclass, hot_row_limit bigint DEFAULT NULL::bigint, min_flush_rows bigint DEFAULT NULL::bigint, max_rows_per_file bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT NULL::boolean) returns jsonb security definer [alter_table_pg_wrapper]
 function metrics() returns text security definer [metrics_pg_wrapper]
+function export_table(table_name regclass, storage text, prefix text DEFAULT NULL::text, max_rows_per_file bigint DEFAULT NULL::bigint) returns jsonb security definer [export_table_pg_wrapper]
 function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]
 function recover_segments(table_name regclass, dry_run boolean DEFAULT false) returns bigint security definer [recover_segments_pg_wrapper]
 function register_backup(name text, taken_at timestamp with time zone DEFAULT now()) returns timestamp with time zone security definer [register_backup_pg_wrapper]

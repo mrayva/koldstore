@@ -144,6 +144,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.metrics()` | `text` | Prometheus text exposition: per-table hot / mirror / cold rows, cold segments, pending and error jobs, last flush time, plus async-mirror health, lag and retained WAL. Counters come from the manifest (no heap scan). Lists only tables the calling role (the outer user, so `SET ROLE` counts) can `SELECT` |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
+| `koldstore.export_table(table, storage, prefix => NULL, max_rows_per_file => NULL)` | `jsonb` | Superuser only. Writes the table's merged hot+cold snapshot (one query snapshot, primary-key order) as plain Parquet files with only the table's own columns, plus `export-manifest.json` (format `koldstore-export-v1`, columns, row counts, file list), to a registered storage under `prefix` (default `exports/<schema>.<table>/<UTC stamp>`). Refuses an existing export prefix, `..`/empty prefix parts and user-scoped tables; fails if a flush or compaction holds the table job lock. Returns `{storage, prefix, rows, files, manifest}` |
 | `koldstore.export_table_metadata(table)` | `jsonb` | One table's cold-tier catalog (schemas, manifest, segments, indexes) for a logical dump; no OIDs or credentials |
 | `koldstore.import_table_metadata(table, metadata)` | `bigint` | Manages a restored, unmanaged table and adopts exported segments; returns active segments adopted |
 | `koldstore.validate_cold_storage(...)` | `jsonb` | Catalog vs object store: `{ok, problems[]}` |
@@ -1011,8 +1012,8 @@ The following operator surface is planned but not yet exposed by the extension
 (tracked: https://github.com/kalamdb/koldstore/issues/56); `backup_manifest` and
 `validate_cold_storage` are shipped (see above):
 
-- `koldstore_exec('EXPORT TABLE ...')` — `IMPORT TABLE` remains rejected until
-  ownership and conflict rules are complete
+- `IMPORT TABLE` remains rejected until ownership and conflict rules are complete
+  (`koldstore.export_table` is shipped, see above)
 
 ## Security
 

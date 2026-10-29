@@ -446,7 +446,7 @@ fn text_array_literal(items: &[Option<String>], lower_bound: i32) -> String {
     out
 }
 
-fn read_column(
+pub(super) fn read_column(
     tuple: &pgrx::spi::SpiHeapTupleData<'_>,
     column: &CatalogColumn,
     ordinal: usize,

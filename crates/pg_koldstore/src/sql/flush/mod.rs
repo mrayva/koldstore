@@ -11,6 +11,8 @@ pub(crate) mod jobs;
 #[cfg(feature = "pg")]
 mod mirror_fetch;
 #[cfg(feature = "pg")]
+pub(crate) mod export;
+#[cfg(feature = "pg")]
 pub(crate) mod spi;
 
 /// Enqueues a flush job through the SQL API and returns its UUID.
