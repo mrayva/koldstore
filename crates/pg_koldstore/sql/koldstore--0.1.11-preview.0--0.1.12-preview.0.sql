@@ -541,7 +541,7 @@ LANGUAGE c
 AS 'MODULE_PATHNAME', 'alter_table_pg_wrapper';
 
 CREATE FUNCTION koldstore."metrics"() RETURNS text
-SECURITY DEFINER
+STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'metrics_pg_wrapper';
 

@@ -25,7 +25,7 @@ use pgrx::pg_sys;
 
 /// Returns the role that actually issued the current SQL call, independent
 /// of any `SECURITY DEFINER` switch already in effect inside this function.
-fn calling_role() -> pg_sys::Oid {
+pub(crate) fn calling_role() -> pg_sys::Oid {
     unsafe { pg_sys::GetOuterUserId() }
 }
 

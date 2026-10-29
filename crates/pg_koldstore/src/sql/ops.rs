@@ -56,7 +56,7 @@ pub(crate) fn table_status_fields(table_oid: pgrx::pg_sys::Oid) -> Result<serde_
 
 /// Prometheus text exposition of per-table and async-mirror gauges.
 ///
-/// SQL contract: `koldstore.metrics() → text`. Only tables the session user can `SELECT` appear.
+/// SQL contract: `koldstore.metrics() → text`. Only tables the calling role can `SELECT` appear.
 /// Row counts come from the manifest counters (no heap scan), so scraping stays cheap.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "metrics", schema = "koldstore", security_definer)]
@@ -66,6 +66,7 @@ pub fn metrics_pg() -> String {
 
 #[cfg(feature = "pg")]
 fn metrics_text() -> Result<String, String> {
+    use pgrx::datum::DatumWithOid;
     use std::fmt::Write as _;
 
     // (table, [value per TABLE_METRICS entry]); a NULL value is omitted from the output.
@@ -85,10 +86,10 @@ fn metrics_text() -> Result<String, String> {
                             AND j.status = 'completed')::float8
                  FROM koldstore.schemas s
                  LEFT JOIN koldstore.manifest m ON m.table_oid = s.table_oid AND m.scope_key = ''
-                 WHERE s.active AND has_table_privilege(session_user, s.table_oid, 'SELECT')
+                 WHERE s.active AND has_table_privilege($1, s.table_oid, 'SELECT')
                  ORDER BY 1",
                 None,
-                &[],
+                &[DatumWithOid::from(crate::security::calling_role())],
             )?
             .map(|row| {
                 let mut values = [None; 7];

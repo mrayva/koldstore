@@ -141,7 +141,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.enqueue_flush_job(...)` | `uuid` | Flush job id, or `NULL` when nothing is due |
 | `koldstore.flush_table(...)` | `jsonb` | Flush result object (`job_id`, `status`, `error`, …); see below |
 | `koldstore.table_status(...)` | `jsonb` | Operator view: table hot/mirror/cold/jobs, effective `settings` (flush policy, `auto_flush`, compression, target file size, Parquet layout) + `async_mirror` |
-| `koldstore.metrics()` | `text` | Prometheus text exposition: per-table hot / mirror / cold rows, cold segments, pending and error jobs, last flush time, plus async-mirror health, lag and retained WAL. Counters come from the manifest (no heap scan). Lists only tables the session user can `SELECT` |
+| `koldstore.metrics()` | `text` | Prometheus text exposition: per-table hot / mirror / cold rows, cold segments, pending and error jobs, last flush time, plus async-mirror health, lag and retained WAL. Counters come from the manifest (no heap scan). Lists only tables the calling role (the outer user, so `SET ROLE` counts) can `SELECT` |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
 | `koldstore.export_table_metadata(table)` | `jsonb` | One table's cold-tier catalog (schemas, manifest, segments, indexes) for a logical dump; no OIDs or credentials |
