@@ -145,6 +145,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
 | `koldstore.export_table(table, storage, prefix => NULL, max_rows_per_file => NULL)` | `jsonb` | Superuser only. Writes the table's merged hot+cold snapshot (one query snapshot, primary-key order) as plain Parquet files with only the table's own columns, plus `export-manifest.json` (format `koldstore-export-v1`, columns, row counts, file list), to a registered storage under `prefix` (default `exports/<schema>.<table>/<UTC stamp>`). Refuses an existing export prefix, `..`/empty prefix parts and user-scoped tables; fails if a flush or compaction holds the table job lock. Returns `{storage, prefix, rows, files, manifest}` |
+| `koldstore.import_table(table, storage, prefix)` | `jsonb` | Superuser only. Loads a `export_table` archive into a new, empty, unmanaged ordinary table (create it first, e.g. from `pg_dump --schema-only`). Every archive column must exist in the target; rows are inserted in one transaction and checked against the manifest's per-file and total counts. Refuses managed, partitioned or non-empty targets. Call `manage_table` afterwards to tier it. Returns `{storage, prefix, rows, files}` |
 | `koldstore.export_table_metadata(table)` | `jsonb` | One table's cold-tier catalog (schemas, manifest, segments, indexes) for a logical dump; no OIDs or credentials |
 | `koldstore.import_table_metadata(table, metadata)` | `bigint` | Manages a restored, unmanaged table and adopts exported segments; returns active segments adopted |
 | `koldstore.validate_cold_storage(...)` | `jsonb` | Catalog vs object store: `{ok, problems[]}` |
@@ -1012,8 +1013,8 @@ The following operator surface is planned but not yet exposed by the extension
 (tracked: https://github.com/kalamdb/koldstore/issues/56); `backup_manifest` and
 `validate_cold_storage` are shipped (see above):
 
-- `IMPORT TABLE` remains rejected until ownership and conflict rules are complete
-  (`koldstore.export_table` is shipped, see above)
+- Merging an archive into a non-empty or managed table remains unsupported
+  (`koldstore.export_table` and `koldstore.import_table` into a new empty table are shipped, see above)
 
 ## Security
 

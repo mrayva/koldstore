@@ -1364,6 +1364,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.export_table(table_name regclass, storage text, prefix text DEFAULT NULL::text, max_rows_per_file bigint DEFAULT NULL::bigint)\n RETURNS jsonb\n LANGUAGE c\n SECURITY DEFINER\nAS '$libdir/koldstore', $function$export_table_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function import_table(table_name regclass, storage text, prefix text) returns jsonb security definer [import_table_pg_wrapper]": {
+            "add": "koldstore.import_table(table_name regclass, storage text, prefix text)",
+            "name": "import_table",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.import_table(table_name regclass, storage text, prefix text)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$import_table_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function metrics() returns text security definer [metrics_pg_wrapper]": {
             "add": "koldstore.metrics()",
             "name": "metrics",

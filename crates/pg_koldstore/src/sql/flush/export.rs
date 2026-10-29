@@ -27,7 +27,7 @@ const FORMAT: &str = "koldstore-export-v1";
 const FETCH_ROWS: i64 = 4096;
 
 /// A custom prefix must stay inside the storage: relative, no `..`, no empty parts.
-fn validate_prefix(prefix: &str) -> Result<String, String> {
+pub(super) fn validate_prefix(prefix: &str) -> Result<String, String> {
     let trimmed = prefix.trim_matches('/');
     if trimmed.is_empty() {
         return Err("export prefix must not be empty".to_string());
@@ -43,7 +43,7 @@ fn validate_prefix(prefix: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-fn load_storage_client(name: &str) -> Result<koldstore_storage::ObjectStoreClient, String> {
+pub(super) fn load_storage_client(name: &str) -> Result<koldstore_storage::ObjectStoreClient, String> {
     let text = pgrx::Spi::get_one_with_args::<String>(
         "SELECT jsonb_build_object('storage_type', storage_type, 'base_path', base_path,
                                    'credentials', COALESCE(credentials, '{}'::jsonb),

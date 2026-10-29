@@ -1,6 +1,7 @@
 //! Arrow/Parquet schema, reader, writer, footer, and pruning helpers.
 
 pub mod batch_builder;
+pub mod export_read;
 pub mod footer;
 pub mod footer_cache;
 pub mod object_reader;
@@ -19,6 +20,7 @@ pub mod writer;
 pub use batch_builder::{
     pk_column_indices, CleanColdRecordBatchBuilder, ColdRecordBatch, FlushMirrorRow,
 };
+pub use export_read::read_export_file_rows;
 pub use footer::{
     extract_packed_segment_metadata, ColumnStats, FooterSummary, PackedColumnIndex,
     PackedSegmentMetadata, RowGroupStats, SegmentFooterMetadata,

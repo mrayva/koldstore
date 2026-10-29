@@ -178,6 +178,7 @@ function reap_compacted_segments(table_name regclass, grace_seconds integer DEFA
 function rebuild_segment_summaries(table_name regclass DEFAULT NULL::regclass, dry_run boolean DEFAULT false, max_segments integer DEFAULT 100) returns jsonb security definer [rebuild_segment_summaries_pg_wrapper]
 function rebuild_table(table_name regclass, ddl text) returns uuid security definer [rebuild_table_pg_wrapper]
 function alter_table(table_name regclass, hot_row_limit bigint DEFAULT NULL::bigint, min_flush_rows bigint DEFAULT NULL::bigint, max_rows_per_file bigint DEFAULT NULL::bigint, auto_flush boolean DEFAULT NULL::boolean) returns jsonb security definer [alter_table_pg_wrapper]
+function import_table(table_name regclass, storage text, prefix text) returns jsonb security definer [import_table_pg_wrapper]
 function metrics() returns text security definer [metrics_pg_wrapper]
 function export_table(table_name regclass, storage text, prefix text DEFAULT NULL::text, max_rows_per_file bigint DEFAULT NULL::bigint) returns jsonb security definer [export_table_pg_wrapper]
 function reconcile_spock_conflicts(max_items integer DEFAULT 200) returns jsonb security definer [plpgsql:8ec024afd2c8]

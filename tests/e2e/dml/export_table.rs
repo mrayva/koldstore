@@ -158,6 +158,57 @@ async fn export_table_writes_merged_snapshot() -> Result<()> {
             .await?
             .get(0);
         assert!(default.starts_with("exports/"), "{default}");
+
+        // Import the archive into a new plain table: identical rows, one transaction.
+        let imp = format!("{rel}_imp");
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {imp} (LIKE {rel} INCLUDING DEFAULTS INCLUDING CONSTRAINTS)"
+            ))
+            .await?;
+        let done: String = db
+            .client
+            .query_one(
+                &format!("SELECT koldstore.import_table('{imp}'::regclass, '{storage}', 'exp/run1')::text"),
+                &[],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("import_table: {:?}", e.as_db_error()))?
+            .get(0);
+        let done: serde_json::Value = serde_json::from_str(&done)?;
+        assert_eq!(done["rows"], expected, "{done}");
+        let diff: i64 = db
+            .client
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM ((SELECT * FROM {rel} EXCEPT SELECT * FROM {imp}) \
+                     UNION ALL (SELECT * FROM {imp} EXCEPT SELECT * FROM {rel})) d"
+                ),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(diff, 0, "imported rows must equal the exported table");
+        // Refusals: non-empty target, managed target, unknown prefix.
+        for target in [imp.as_str(), rel.as_str()] {
+            let again = db
+                .client
+                .simple_query(&format!(
+                    "SELECT koldstore.import_table('{target}'::regclass, '{storage}', 'exp/run1')"
+                ))
+                .await;
+            assert!(again.is_err(), "import into {target} must be refused");
+        }
+        db.client
+            .batch_execute(&format!("CREATE TABLE {imp}2 (id bigint PRIMARY KEY)"))
+            .await?;
+        let narrow = db
+            .client
+            .simple_query(&format!(
+                "SELECT koldstore.import_table('{imp}2'::regclass, '{storage}', 'exp/run1')"
+            ))
+            .await;
+        assert!(narrow.is_err(), "a target missing archive columns must be refused");
     }
     Ok(())
 }

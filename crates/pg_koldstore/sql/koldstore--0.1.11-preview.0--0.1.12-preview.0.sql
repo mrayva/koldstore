@@ -555,6 +555,15 @@ SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'export_table_pg_wrapper';
 
+CREATE FUNCTION koldstore."import_table"(
+	"table_name" regclass,
+	"storage" TEXT,
+	"prefix" TEXT
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'import_table_pg_wrapper';
+
 -- SQL-object maintenance functions the fresh-install snapshot carries.
 CREATE FUNCTION koldstore."rebuild_segment_summaries"(
 	"table_name" regclass DEFAULT NULL,

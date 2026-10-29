@@ -168,7 +168,7 @@ rows never brought back into the heap.
 async-mirror information. It is operational telemetry, not a backup manifest.
 
 `koldstore.backup_manifest` and `koldstore.validate_cold_storage` are the backup tools described
-above; `koldstore.validate_sql_objects` checks the database's SQL objects against the library (below). `koldstore.export_table` ships a portable Parquet snapshot of one table; `IMPORT TABLE` is not shipped.
+above; `koldstore.validate_sql_objects` checks the database's SQL objects against the library (below). `koldstore.export_table` ships a portable Parquet snapshot of one table; `koldstore.import_table` loads it into a new empty table.
 
 `koldstore.recover_segments` is a maintenance surface for orphan/pending
 objects; it does not create a coordinated backup or reconstruct arbitrary
