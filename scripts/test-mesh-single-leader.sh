@@ -10,8 +10,9 @@
 #
 #   SPOCK_PREFIX=~/pg-spock/install KOLDSTORE_PKG=/tmp/kl-stage/pkg-fol scripts/test-mesh-single-leader.sh
 #
-# Output is a transcript to read, not a pass/fail gate: compare the per-node "count:md5"
-# lines, which must match after every "heal" step.
+# Prints a transcript with PASS/FAIL lines for each invariant (convergence of the per-node
+# "count:md5" snapshots, segment counts, lease fencing, cold-storage validation) and exits
+# non-zero if any FAIL line was printed.
 set -uo pipefail
 SP=${SPOCK_PREFIX:?set SPOCK_PREFIX to the Spock-patched PostgreSQL install prefix}
 PKG=${KOLDSTORE_PKG:?set KOLDSTORE_PKG to a cargo pgrx package output dir}
@@ -65,9 +66,28 @@ snap() { q $1 spike -c "SELECT count(*) || ':' || md5(string_agg(id||'='||v, ','
 heapn() { q $1 spike -c "CREATE EXTENSION IF NOT EXISTS pageinspect; SELECT count(*) FROM generate_series(0, GREATEST(pg_relation_size('t')/8192-1,0)) p, heap_page_items(get_raw_page('t',p::int)) i WHERE i.lp_flags=1 AND (i.t_xmax=0 OR (i.t_infomask & 128)<>0 OR (i.t_infomask & 2048)<>0)"; }
 allsnap() { for i in 1 2 3; do echo "  n$i: $(snap ${ports[$((i-1))]})"; done; }
 settle() { sleep 4; }
+FAILS=0
+pass() { echo "PASS: $1"; }
+fail() { echo "FAIL: $1 ${2:-}"; FAILS=$((FAILS+1)); }
+# check <description> <command...>: passes when the command succeeds
+check() { local d=$1; shift; if "$@"; then pass "$d"; else fail "$d"; fi; }
+# converge <description> "<node numbers>" [seconds]: all listed nodes report the same real snapshot
+converge() {
+  local d=$1 nodes=$2 n=${3:-15} k out
+  for k in $(seq 1 $n); do
+    out=$(for i in $nodes; do snap ${ports[$((i-1))]}; done)
+    if [ "$(echo "$out" | sort -u | wc -l)" = 1 ] && [[ "$out" =~ ^[0-9]+:[0-9a-f]{32} ]]; then pass "$d"; return; fi
+    sleep 1
+  done
+  fail "$d" "($(echo "$out" | tr '\n' ' ' | cut -c1-200))"
+}
+has() { [[ "$1" == *"$2"* ]]; }
+same_segs() { local k; for k in $(seq 1 12); do [ "$(segs $1)" = "$(segs $2)" ] && [ -n "$(segs $1)" ] && return 0; sleep 1; done; return 1; }
+each() { local p; for p in $P1 $P2 $P3; do q $p spike -c "$1"; done; }
 say "seed 300 rows on n1 (Spock replicates)"
 q $P1 spike -c "INSERT INTO t SELECT g,'v'||g FROM generate_series(1,300) g" >/dev/null; settle
 allsnap
+converge "seed replicated to all nodes" "1 2 3"
 say "n1 becomes leader: manage, flush, lease, publish"
 q $P1 spike <<EOC
 $REG
@@ -92,6 +112,7 @@ EOC
 done
 settle
 echo "heap live: n1=$(heapn $P1) n2=$(heapn $P2) n3=$(heapn $P3)"; allsnap
+converge "followers adopted the leader catalog, results equal" "1 2 3"
 say "concurrent writes on all three nodes (new ids per node + updates of hot rows)"
 for i in 1 2 3; do P=${ports[$((i-1))]}
   ( q $P spike -c "INSERT INTO t SELECT g,'n$i-'||g FROM generate_series(1000*$i,1000*$i+199) g"; q $P spike -c "UPDATE t SET v='upd-n$i' WHERE id = $((280+i))" ) &
@@ -102,12 +123,16 @@ heal() { echo "-- waiting for the reconcile worker"; sleep 11; allsnap; rec; }
 exc() { for i in 1 2 3; do echo "  n$i spock exceptions: $(q ${ports[$((i-1))]} spike -c "SELECT count(*) FROM spock.exception_log")"; done; }
 exc
 heal
+converge "concurrent writes converge after the reconciler" "1 2 3" 20
 say "leader flush #2, followers sync + prune"
 q $P1 spike -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
 echo "flush: $(flush1 $P1)"
 segs() { q $1 spike -c "SELECT count(*) FROM koldstore.cold_segments WHERE status='active'"; }
 for k in $(seq 1 10); do [ "$(segs $P2)" = "$(segs $P1)" ] && [ "$(segs $P3)" = "$(segs $P1)" ] && break; sleep 1; done
 echo "segments n1=$(segs $P1) n2=$(segs $P2) n3=$(segs $P3)"
+check "n2 holds the leader's segments" same_segs $P2 $P1
+check "n3 holds the leader's segments" same_segs $P3 $P1
+converge "results equal after flush, follower sync and prune" "1 2 3"
 echo "heap live: n1=$(heapn $P1) n2=$(heapn $P2) n3=$(heapn $P3)"; allsnap
 say "writes after prune, then DELETE/UPDATE of a row cold on followers (Finding 3 territory)"
 q $P2 spike -c "UPDATE t SET v='post-prune-n2' WHERE id=10; DELETE FROM t WHERE id=11" >/dev/null; settle
@@ -115,12 +140,19 @@ echo "id10: n1=$(q $P1 spike -c 'SELECT v FROM t WHERE id=10') n2=$(q $P2 spike 
 echo "id11 present: n1=$(q $P1 spike -c 'SELECT count(*) FROM t WHERE id=11') n2=$(q $P2 spike -c 'SELECT count(*) FROM t WHERE id=11') n3=$(q $P3 spike -c 'SELECT count(*) FROM t WHERE id=11')"
 allsnap
 heal
+converge "update and delete of a cold row converge" "1 2 3" 25
+check "deleted cold row is gone everywhere" test "$(each 'SELECT count(*) FROM t WHERE id=11' | tr -d '\n')" = 000
+check "updated cold row has one value everywhere" test "$(each 'SELECT v FROM t WHERE id=10' | sort -u | wc -l)" = 1
 say "kill leader n1 (immediate)"
 $PG_BIN/pg_ctl -D $W/n1 -m immediate stop >/dev/null
 q $P2 spike -c "SELECT koldstore.set_table_follower('t'::regclass, false)" >/dev/null
-echo "n2 takeover before ttl: $(q $P2 spike -c "SELECT koldstore.acquire_leader_lease('t'::regclass, 8)::text" | head -1 | cut -c1-140)"
+T1=$(q $P2 spike -c "SELECT koldstore.acquire_leader_lease('t'::regclass, 8)::text" | head -1)
+echo "n2 takeover before ttl: $(echo "$T1" | cut -c1-140)"
+check "takeover is refused before the ttl" has "$T1" ERROR
 sleep 10
-echo "n2 takeover after ttl: $(q $P2 spike -c "SELECT koldstore.acquire_leader_lease('t'::regclass, 8)::text" | tail -1 | cut -c1-140)"
+T2=$(q $P2 spike -c "SELECT koldstore.acquire_leader_lease('t'::regclass, 8)::text" | tail -1)
+echo "n2 takeover after ttl: $(echo "$T2" | cut -c1-140)"
+check "takeover succeeds after the ttl" has "$T2" epoch
 echo "n2 -> leader: $(q $P2 spike -c "SELECT koldstore.set_table_leader('t'::regclass, true)" | tr '\n' ' ')"
 echo "n2 lease: $(q $P2 spike -c "SELECT koldstore.leader_lease_status('t'::regclass)::text" | tail -1 | cut -c1-200)"
 say "writes with n1 down, n2 flushes as new leader, n3 follows"
@@ -132,19 +164,28 @@ for k in $(seq 1 10); do [ "$(segs $P3)" = "$(segs $P2)" ] && break; sleep 1; do
 echo "segments n2=$(segs $P2) n3=$(segs $P3)"
 echo "heap live: n2=$(heapn $P2) n3=$(heapn $P3)"
 echo "n3 snap=$(snap $P3) n2 snap=$(snap $P2)"
+check "n3 follows the new leader's segments" same_segs $P3 $P2
+converge "n2 (new leader) and n3 agree" "2 3"
 say "n1 restarts: stale leader must be fenced"
 start 1 $P1; sleep 3
-echo "n1 flush: $(q $P1 spike -c "SET koldstore.flush_execution='inline'; SELECT koldstore.flush_table('t'::regclass, true)" | head -1 | cut -c1-160)"
-echo "n1 renew: $(q $P1 spike -c "SELECT koldstore.renew_leader_lease('t'::regclass)::text" | head -1 | cut -c1-160)"
+F1=$(q $P1 spike -c "SET koldstore.flush_execution='inline'; SELECT koldstore.flush_table('t'::regclass, true)" | head -1)
+echo "n1 flush: $(echo "$F1" | cut -c1-160)"
+check "stale leader cannot flush" has "$F1" "no longer holds the leader lease"
+R1=$(q $P1 spike -c "SELECT koldstore.renew_leader_lease('t'::regclass)::text" | head -1)
+echo "n1 renew: $(echo "$R1" | cut -c1-160)"
+check "stale leader cannot renew" has "$R1" "lease lost"
 echo "n1 demoted: $(q $P1 spike -c "SELECT koldstore.set_table_leader('t'::regclass, false); SELECT koldstore.set_table_follower('t'::regclass, true)" | tr '\n' ' ')"
 sleep 8
 echo "n1 snap after catch-up: $(snap $P1)"; allsnap
+converge "demoted old leader catches up with the new one" "1 2 3" 20
 say "reap with all followers caught up"
 echo "n2 compact: $(q $P2 spike -c "SELECT koldstore.compact_table('t'::regclass)::text" | tail -1 | cut -c1-120)"
 echo "n2 reap g=0: $(q $P2 spike -c "SELECT koldstore.reap_compacted_segments('t'::regclass, 0)::text" | tail -1 | cut -c1-120)"
 for k in $(seq 1 8); do [ "$(segs $P3)" = "$(segs $P2)" ] && break; sleep 1; done
 echo "n3 read after reap: $(snap $P3)   n2: $(snap $P2)"
-for i in 2 3; do echo "validate n$i: $(q ${ports[$((i-1))]} spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" 2>&1 | tail -1 | cut -c1-120)"; done
+converge "followers read correctly after compaction and reap" "2 3"
+for i in 2 3; do V=$(q ${ports[$((i-1))]} spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" 2>&1 | tail -1)
+  echo "validate n$i: $V"; check "cold storage validates on n$i after reap" test "$V" = true; done
 say "adversarial reap: n3 offline, leader rewrites + reaps with grace 0, n3 reads before its next sync"
 $PG_BIN/pg_ctl -D $W/n3 -m immediate stop >/dev/null
 for r in 1 2 3; do
@@ -163,8 +204,11 @@ echo "n3 read right after restart (stale catalog, segments gone): $(snap $P3 | h
 for k in $(seq 1 15); do [ "$(segs $P3)" = "$(segs $P2)" ] && break; sleep 1; done
 sleep 3
 echo "n3 after sync (waited ~${k}s): $(snap $P3)   n2: $(snap $P2)"
-echo "validate n3: $(q $P3 spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" | tail -1)"
+V=$(q $P3 spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" | tail -1)
+echo "validate n3: $V"
+check "stale follower self-heals after the reap and validates" test "$V" = true
 say "final"
 allsnap
+converge "all three nodes agree at the end" "1 2 3" 20
 for n in 1 2 3; do $PG_BIN/pg_ctl -D $W/n$n -m immediate stop >/dev/null 2>&1; done
-echo "== done"
+if [ "$FAILS" = 0 ]; then echo "== done: all checks passed"; else echo "== done: $FAILS check(s) FAILED"; exit 1; fi
