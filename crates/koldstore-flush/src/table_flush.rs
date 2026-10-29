@@ -17,6 +17,8 @@ pub struct TableFlushBatchOutcome {
     pub bytes_written: i64,
     /// Mirror operations used to select and later prune this flush.
     pub mirror_ops: Option<Vec<i16>>,
+    /// Predicate move policy filter used to select and later prune this flush.
+    pub row_filter: Option<String>,
     /// Sequence watermark used for conditional mirror/hot cleanup.
     pub prune_max_seq: i64,
     /// Manifest assembled from active+pending catalog segments.

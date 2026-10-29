@@ -196,7 +196,7 @@ fn ordered_flush_selection_requires_pk_param_types() {
 
 #[test]
 fn seq_range_cleanup_deletes_by_max_seq_without_json() {
-    let plan = plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None).unwrap();
+    let plan = plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None, None).unwrap();
 
     assert!(plan.statement.sql.contains("mirror.\"seq\" <= $1::bigint"));
     assert!(!plan.statement.sql.contains("jsonb_to_recordset"));
@@ -217,7 +217,7 @@ fn seq_range_cleanup_deletes_by_max_seq_without_json() {
 
 #[test]
 fn seq_range_cleanup_deletes_mirror_and_hot_rows_in_one_atomic_statement() {
-    let plan = plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None).unwrap();
+    let plan = plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None, None).unwrap();
     let sql = &plan.statement.sql;
 
     assert_eq!(
@@ -235,7 +235,7 @@ fn seq_range_cleanup_deletes_mirror_and_hot_rows_in_one_atomic_statement() {
 #[test]
 fn seq_range_cleanup_can_filter_mirror_ops() {
     let plan =
-        plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], Some(&[3])).unwrap();
+        plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], Some(&[3]), None).unwrap();
 
     assert!(plan.statement.sql.contains("mirror.\"op\" = 3"));
 }

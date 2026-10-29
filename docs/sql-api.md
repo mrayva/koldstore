@@ -261,9 +261,35 @@ another atomically; omitted batching settings are preserved. Native PostgreSQL
 interval input such as `'90 days'`, `'3 months'`, and `'P90D'` is accepted.
 Age is measured from the latest captured mirror mutation encoded in `seq`.
 
-`koldstore_move_when` is reserved and fails closed. Use
-`koldstore.unmanage_table(...)` rather than `koldstore_enabled = false`.
+Use `koldstore.unmanage_table(...)` rather than `koldstore_enabled = false`.
 Storage cannot be changed after management.
+
+#### Predicate move policy: `koldstore_move_when`
+
+```sql
+ALTER TABLE orders SET (koldstore_move_when = 'status = ''closed'' AND total >= 100');
+```
+
+Moves only the rows matching the predicate to cold storage; every other row stays
+hot, however old. The restricted grammar is a conjunction (`AND`) of
+`column {=, <>, !=, <, <=, >, >=} constant`, `column IN (constants)`,
+`column IS [NOT] NULL`. Constants are quoted strings, numbers, or `true`/`false`,
+and are checked against the column's type when the option is set.
+
+Rejected: `OR`, `NOT`, functions (including `now()`), casts, arithmetic,
+subqueries, comparing two columns. The predicate is stored parsed (column,
+operator, constants), not as SQL text, and re-checked on every `ALTER`.
+
+- A row changed after it was selected for a flush stays hot (its newer change
+  needs a new decision), and a row edited into the predicate becomes eligible
+  on its own; a cold row edited out of it hydrates and stays hot.
+- Delete markers (tombstones) are not subject to the predicate and always flush.
+- `NULL` follows SQL semantics: `col <> 'x'` does not match a NULL `col`.
+- Cannot be combined with `koldstore_hot_row_limit` or `koldstore_move_after`
+  in this version. `min_flush_rows`, `max_rows_per_file` and `max_rows_per_flush`
+  apply to the eligible rows.
+- `koldstore.flush_table(..., force => true)` ignores the predicate.
+- `koldstore.alter_table` does not take a predicate; use `ALTER TABLE ... SET`.
 
 ### Advanced and compatibility management: `koldstore.manage_table`
 

@@ -65,6 +65,9 @@ pub const fn retain_tombstone(cold_may_contain_pk: bool) -> bool {
 /// by mirror op codes) and join hot deletes from the removed set — no
 /// `jsonb_to_recordset` materialization of every flushed PK.
 ///
+/// `row_filter` (predicate move policy) restricts the removed set to tombstones plus live rows
+/// matching a boolean SQL expression over alias `hot`; other mirror rows stay.
+///
 /// Bind parameters:
 /// - `$1` inclusive mirror `seq` upper bound
 ///
@@ -77,6 +80,7 @@ pub fn plan_seq_range_cleanup(
     mirror_table: &QualifiedTableName,
     primary_key_columns: &[String],
     mirror_ops: Option<&[i16]>,
+    row_filter: Option<&str>,
 ) -> CleanupResult<CleanSchemaCleanupPlan> {
     if primary_key_columns.is_empty() {
         return Err(CleanupError::MissingPrimaryKey);
@@ -99,6 +103,20 @@ pub fn plan_seq_range_cleanup(
         if let Some(op_clause) = crate::jobs_sql::mirror_ops_where_clause(ops) {
             mirror_where.push(op_clause);
         }
+    }
+    if let Some(filter) = row_filter {
+        // Predicate move policy: only the rows the pass selected leave the mirror. A row at
+        // `seq <= max_seq` is unchanged since selection (any change gets a newer seq), so the
+        // filter evaluates here exactly as it did at selection time.
+        let exists_join = pk_columns
+            .iter()
+            .map(|column| format!("hot.{column} = mirror.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        mirror_where.push(format!(
+            "(mirror.\"op\" = 3 OR EXISTS (SELECT 1 FROM ONLY {table} AS hot WHERE {exists_join} AND {filter}))",
+            table = table.quoted(),
+        ));
     }
     let hot_join = pk_columns
         .iter()

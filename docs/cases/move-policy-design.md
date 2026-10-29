@@ -794,3 +794,22 @@ model. Treat age and row predicates as eligibility, row limit as a goal, and
 evaluation cadence as scheduler configuration. Keep one root policy, execute
 partition work per leaf, and use exact PK-and-sequence cleanup whenever
 eligibility produces a sparse selection.
+
+---
+
+## Implementation status
+
+Shipped: the restricted predicate form of `koldstore_move_when` (see
+[sql-api.md](../sql-api.md#predicate-move-policy-koldstore_move_when)) as
+`FlushPolicy::Filter { predicate, .. }`, stored typed (`MovePredicate`, in
+`koldstore-common`). Selection, the mirror fetch and the hot/mirror cleanup all
+carry the compiled predicate; tombstones bypass it.
+
+The cleanup proof needed no selected-set table: cleanup deletes mirror rows with
+`seq <= max_seq` that are tombstones or still satisfy the predicate. A row at or
+below `max_seq` is unchanged since selection (any change gets a newer `seq`), so
+the predicate evaluates identically at fetch and cleanup, and rows that did not
+match stay in the mirror untouched.
+
+Not done: age + predicate combination, `policy_status`, `policy_version`, force
+flush honoring the predicate, `koldstore.alter_table` support.

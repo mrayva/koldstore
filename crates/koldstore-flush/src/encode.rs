@@ -85,6 +85,8 @@ pub struct StreamEncodeInput {
     pub bloom_filter_false_positive_rate: Option<f64>,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
+    /// Predicate move policy: boolean SQL over alias `hot` live rows must satisfy.
+    pub row_filter: Option<String>,
     /// Ask PostgreSQL to return rows ordered by mirror `order_key`, then PK, then seq.
     pub sort_by_order_key: bool,
     /// Application column name for [`Self::sort_by_order_key`] (Parquet sort metadata).
@@ -751,6 +753,7 @@ where
         input.sort_by_order_key,
         &input.primary_key_param_types,
         input.mirror_scope,
+        input.row_filter.as_deref(),
     )
     .map_err(|error| error.to_string())?;
 
@@ -861,6 +864,7 @@ mod tests {
             data_page_row_count_limit: None,
             bloom_filter_false_positive_rate: None,
             mirror_ops: None,
+            row_filter: None,
             sort_by_order_key: false,
             order_key_column: None,
             scope_column_index: None,

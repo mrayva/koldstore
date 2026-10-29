@@ -416,6 +416,7 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
         sort_by_order_key,
         primary_key_param_types,
         false,
+        None,
     )
 }
 
@@ -435,6 +436,7 @@ pub fn plan_mirror_flush_selection_batch_with_scope(
     sort_by_order_key: bool,
     primary_key_param_types: &[SqlParamType],
     mirror_scope: bool,
+    row_filter: Option<&str>,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     plan_mirror_flush_selection_inner(
         table,
@@ -446,6 +448,7 @@ pub fn plan_mirror_flush_selection_batch_with_scope(
         sort_by_order_key,
         primary_key_param_types,
         mirror_scope,
+        row_filter,
     )
 }
 
@@ -484,6 +487,7 @@ fn plan_mirror_flush_selection_inner(
     sort_by_order_key: bool,
     primary_key_param_types: &[SqlParamType],
     mirror_scope: bool,
+    row_filter: Option<&str>,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
@@ -580,6 +584,10 @@ fn plan_mirror_flush_selection_inner(
             where_clauses
                 .push(crate::jobs_sql::mirror_ops_where_clause(ops).expect("non-empty ops"));
         }
+    }
+    if let Some(filter) = row_filter.filter(|_| !delete_only) {
+        // Predicate move policy: live rows must match; tombstones always flush.
+        where_clauses.push(format!("(mirror.\"op\" = 3 OR ({filter}))"));
     }
     if let Some(scope_column) = scope_column {
         let scope_param = param_types.len() + 1;

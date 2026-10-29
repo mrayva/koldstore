@@ -168,6 +168,39 @@ pub fn plan_older_than_eligible_mirror_rows(
     .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
 }
 
+/// Plans the predicate-policy selection: the oldest eligible mirror rows, tombstones included.
+///
+/// `row_filter` is a boolean SQL expression over alias `hot`. Bind parameters:
+/// - `$1` max rows to consider for this flush
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_filter_eligible_mirror_rows(
+    mirror_quoted: &str,
+    table_quoted: &str,
+    quoted_pk_columns: &[String],
+    row_filter: &str,
+) -> Result<SqlStatement, AutoFlushPlanError> {
+    let join = quoted_pk_columns
+        .iter()
+        .map(|column| format!("mirror.{column} = hot.{column}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    SqlStatement::read_with_params(
+        "filter-policy eligible mirror rows",
+        &format!(
+            "SELECT count(*)::bigint, max(seq)::bigint FROM (\
+             SELECT mirror.seq FROM {mirror_quoted} AS mirror \
+             LEFT JOIN ONLY {table_quoted} AS hot ON {join} \
+             WHERE mirror.\"op\" = 3 OR ({row_filter}) \
+             ORDER BY mirror.seq LIMIT $1) eligible"
+        ),
+        [SqlParamType::BigInt],
+    )
+    .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
+}
+
 /// Returns whether the scheduler should enqueue/run a flush for these options.
 #[must_use]
 pub fn scheduler_should_flush(options: &Value, pending_rows: i64) -> bool {

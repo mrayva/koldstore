@@ -736,8 +736,11 @@ fn option_value<'a>(
 fn validate_management_option_conflicts(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    if option_value(values, "koldstore_move_when").is_some() {
-        return Err("filter policy is not supported yet".into());
+    if option_value(values, "koldstore_move_when").is_some()
+        && (option_value(values, "koldstore_hot_row_limit").is_some()
+            || option_value(values, "koldstore_move_after").is_some())
+    {
+        return Err("move_when cannot be combined with hot_row_limit or move_after".into());
     }
     if option_value(values, "koldstore_hot_row_limit").is_some()
         && option_value(values, "koldstore_move_after").is_some()
@@ -769,8 +772,11 @@ fn ensure_initial_management(
         .map(str::parse::<i64>)
         .transpose()
         .map_err(|_| "hot_row_limit must be a positive integer")?;
-    if hot.is_none() && option_value(values, "koldstore_move_after").is_none() {
-        return Err("initial management requires hot_row_limit or move_after".into());
+    if hot.is_none()
+        && option_value(values, "koldstore_move_after").is_none()
+        && option_value(values, "koldstore_move_when").is_none()
+    {
+        return Err("initial management requires hot_row_limit, move_after or move_when".into());
     }
     let min = option_value(values, "koldstore_min_flush_rows")
         .unwrap_or("1000")
@@ -851,6 +857,7 @@ fn resolve_flush_batching(
 
 #[cfg(feature = "pg")]
 fn apply_flush_policy_updates(
+    table_oid: pgrx::pg_sys::Oid,
     options: &mut koldstore_common::ManageTableOptions,
     values: &std::collections::HashMap<String, String>,
     min: u64,
@@ -866,6 +873,7 @@ fn apply_flush_policy_updates(
     if changes_batching
         && option_value(values, "koldstore_hot_row_limit").is_none()
         && option_value(values, "koldstore_move_after").is_none()
+        && option_value(values, "koldstore_move_when").is_none()
     {
         options.flush_policy = old.map(|policy| policy.with_batching(min, file, max));
     }
@@ -902,7 +910,39 @@ fn apply_flush_policy_updates(
             max_rows_per_flush: max,
         });
     }
+    if let Some(value) = option_value(values, "koldstore_move_when") {
+        let predicate = resolve_move_predicate(table_oid, value)?;
+        options.flush_policy = Some(koldstore_common::FlushPolicy::Filter {
+            predicate,
+            min_flush_rows: min,
+            max_rows_per_file: file,
+            max_rows_per_flush: max,
+        });
+    }
     Ok(())
+}
+
+/// Parses `koldstore_move_when` and proves it binds to the table: every column must exist and
+/// every constant must be valid input for its column's type. The predicate is stored typed, so a
+/// later type change surfaces as a flush error rather than silently re-parsing different SQL.
+#[cfg(feature = "pg")]
+fn resolve_move_predicate(
+    table_oid: pgrx::pg_sys::Oid,
+    text: &str,
+) -> Result<koldstore_common::MovePredicate, String> {
+    let predicate = koldstore_common::MovePredicate::parse(text)?;
+    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let table = koldstore_common::QualifiedTableName::parse(&relation)
+        .map_err(|error| error.to_string())?;
+    let check = format!(
+        "SELECT 1 FROM ONLY {} AS hot WHERE {} AND false",
+        table.quoted(),
+        predicate.to_sql("hot")
+    );
+    crate::merge_scan::pg::with_custom_scan_disabled(|| {
+        pgrx::Spi::run(&check).map_err(|error| format!("invalid move_when: {error}"))
+    })?;
+    Ok(predicate)
 }
 
 #[cfg(feature = "pg")]
@@ -995,7 +1035,7 @@ fn apply_management_options(
     }
     let mut options = koldstore_common::ManageTableOptions::from_value(&current.0["options"]);
     let (min, file, max) = resolve_flush_batching(values, options.flush_policy().as_ref())?;
-    apply_flush_policy_updates(&mut options, values, min, file, max)?;
+    apply_flush_policy_updates(table_oid, &mut options, values, min, file, max)?;
     apply_parquet_layout_updates(&mut options, values)?;
     let json = pgrx::JsonB(options.to_value());
     let update = koldstore_migrate::register::plan_update_schema_options()

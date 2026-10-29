@@ -63,8 +63,32 @@ pub(crate) fn resolve_flush_stats(
                 *max_rows_per_file,
                 *max_rows_per_flush,
             )?,
-            FlushPolicy::Filter { .. } => {
-                return Err("filter flush policy is not supported yet".into())
+            FlushPolicy::Filter {
+                predicate,
+                min_flush_rows,
+                max_rows_per_file,
+                max_rows_per_flush,
+            } => {
+                let row_filter = predicate.to_sql("hot");
+                let cutoff = filter_cutoff(
+                    table_oid,
+                    &row_filter,
+                    *min_flush_rows,
+                    *max_rows_per_file,
+                    *max_rows_per_flush,
+                )?;
+                return Ok(match cutoff {
+                    Some((row_count, max_seq)) => ResolvedFlushSelection {
+                        stats: FlushStats {
+                            row_count,
+                            min_seq: 0,
+                            max_seq,
+                        },
+                        mirror_ops: None,
+                        row_filter: Some(row_filter),
+                    },
+                    None => ResolvedFlushSelection::new(FlushStats::empty()),
+                });
             }
         }
     } else {
@@ -163,6 +187,55 @@ fn older_than_cutoff(
                     DatumWithOid::from(cutoff_seq),
                     DatumWithOid::from(max_rows_per_flush as i64),
                 ],
+            )?
+            .first();
+        Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?.unwrap_or(0), row.get::<i64>(2)?))
+    })
+    .map_err(|error| error.to_string())?;
+    if count < min_flush_rows as i64 {
+        return Ok(None);
+    }
+    if !koldstore_flush::selected_rows_meet_file_minimum(count.max(0) as u64, max_rows_per_file) {
+        return Ok(None);
+    }
+    Ok(max_seq.map(|seq| (count, seq)))
+}
+
+/// Counts the oldest rows eligible under a predicate move policy.
+///
+/// Returns `(count, max_seq)` when at least `min_flush_rows` are eligible and the pass meets the
+/// segment-size minimum, else `None`.
+pub(crate) fn filter_cutoff(
+    table_oid: pgrx::pg_sys::Oid,
+    row_filter: &str,
+    min_flush_rows: u64,
+    max_rows_per_file: u64,
+    max_rows_per_flush: u64,
+) -> Result<Option<(i64, i64)>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone()).quoted();
+    let primary_key: Vec<&str> = snapshot.primary_key_names().collect();
+    let pk_columns = koldstore_wal_mirror::quoted_pk_columns(&primary_key)
+        .map_err(|error| error.to_string())?;
+    let statement = koldstore_flush::plan_filter_eligible_mirror_rows(
+        &mirror,
+        &table.quoted(),
+        &pk_columns,
+        row_filter,
+    )
+    .map_err(|error| error.to_string())?;
+    let (count, max_seq) = pgrx::Spi::connect(|client| {
+        let row = client
+            .select(
+                &statement.sql,
+                None,
+                &[DatumWithOid::from(max_rows_per_flush as i64)],
             )?
             .first();
         Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?.unwrap_or(0), row.get::<i64>(2)?))
@@ -525,6 +598,7 @@ pub(super) fn prune_flushed_hot_rows(
     primary_key_columns: &[String],
     max_seq: i64,
     mirror_ops: Option<&[i16]>,
+    row_filter: Option<&str>,
 ) -> Result<(i64, i64), String> {
     if max_seq <= 0 {
         return Ok((0, 0));
@@ -533,7 +607,7 @@ pub(super) fn prune_flushed_hot_rows(
     // PERFORMANCE: Contiguous oldest-by-seq flushes prune with one seq-range
     // DELETE instead of materializing every PK into JSON and chunking
     // jsonb_to_recordset deletes.
-    let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops)?;
+    let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops, row_filter)?;
     execute_seq_range_cleanup(&plan, max_seq)
 }
 
@@ -541,6 +615,7 @@ fn prepare_seq_range_cleanup(
     table_oid: pgrx::pg_sys::Oid,
     primary_key_columns: &[String],
     mirror_ops: Option<&[i16]>,
+    row_filter: Option<&str>,
 ) -> Result<koldstore_flush::CleanSchemaCleanupPlan, String> {
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
@@ -548,7 +623,7 @@ fn prepare_seq_range_cleanup(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = QualifiedTableName::from_table_name(&snapshot.mirror_relation);
-    plan_seq_range_cleanup(&table, &mirror, primary_key_columns, mirror_ops)
+    plan_seq_range_cleanup(&table, &mirror, primary_key_columns, mirror_ops, row_filter)
         .map_err(|error| error.to_string())
 }
 
@@ -912,6 +987,8 @@ pub(super) fn flush_progress_total_estimate(
         return Ok(pending);
     }
     match active_flush_policy(table_oid)? {
+        // The eligible count is only known after selection; the backlog bounds it.
+        Some(FlushPolicy::Filter { .. }) => Ok(pending),
         Some(policy) => Ok(policy_flush_row_count(pending, &policy)),
         None => Ok(pending),
     }

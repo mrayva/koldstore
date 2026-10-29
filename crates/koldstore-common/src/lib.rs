@@ -30,7 +30,8 @@ pub use cell::{CellValue, RowImage};
 pub use column::{ColumnId, ColumnRef};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
-    FlushPolicy, ManageTableOptions, MigrationStatus, MoveAfter, ParquetBloomFilterFpp,
+    FlushPolicy, ManageTableOptions, MigrationStatus, MoveAfter, MovePredicate, PredicateOp,
+    PredicateTerm, ParquetBloomFilterFpp,
     ParquetCompression, DEFAULT_MAX_ROWS_PER_FLUSH, DEFAULT_MIN_MAX_ROWS_PER_FILE,
 };
 pub use error::{Diagnostic, KoldstoreError, Result};

@@ -264,6 +264,7 @@ struct StreamedFlushPass {
     last_max_seq: i64,
     bytes_written: i64,
     mirror_ops: Option<Vec<i16>>,
+    row_filter: Option<String>,
     prune_max_seq: i64,
     pending_segment_ids: Vec<uuid::Uuid>,
     manifest_path: String,
@@ -346,6 +347,7 @@ pub(super) fn build_stream_encode_input(
         data_page_row_count_limit: ctx.parquet_data_page_row_count_limit,
         bloom_filter_false_positive_rate: ctx.parquet_bloom_filter_false_positive_rate,
         mirror_ops,
+        row_filter: None,
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
         order_key_column: ctx.snapshot.segment_order_column_id.and_then(|column_id| {
             ctx.catalog
@@ -388,6 +390,7 @@ fn stream_write_flush_batches(
 
     let (mut encode_input, primary_key_columns) =
         build_stream_encode_input(ctx, stats.max_seq, selection.mirror_ops.clone())?;
+    encode_input.row_filter = selection.row_filter.clone();
     let catalog_columns = &ctx.catalog.columns;
     let fetch_batch_size = encode_input.fetch_batch_size;
     // Failpoint after pending catalog inserts lives in write_streamed_chunk.
@@ -420,6 +423,7 @@ fn stream_write_flush_batches(
             encode_input.sort_by_order_key,
             &encode_input.primary_key_param_types,
             encode_input.mirror_scope,
+            encode_input.row_filter.as_deref(),
         )
         .map_err(|error| error.to_string())?;
         // The mirror query reads the hot table: keep the merge-scan hook off, as the streaming fetch does.
@@ -527,6 +531,7 @@ fn stream_write_flush_batches(
         last_max_seq,
         bytes_written,
         mirror_ops: selection.mirror_ops.clone(),
+        row_filter: selection.row_filter.clone(),
         prune_max_seq: stream_outcome.max_seq,
         pending_segment_ids,
         manifest_path,
@@ -549,6 +554,7 @@ fn build_manifest_and_finalize(
         last_max_seq,
         bytes_written,
         mirror_ops,
+        row_filter,
         prune_max_seq,
         pending_segment_ids,
         manifest_path,
@@ -576,6 +582,7 @@ fn build_manifest_and_finalize(
             last_max_seq,
             bytes_written,
             mirror_ops,
+            row_filter,
             prune_max_seq,
             manifest,
             manifest_path,
@@ -761,6 +768,7 @@ pub(super) fn finalize_flush(
             &primary_key_names,
             outcome.prune_max_seq,
             outcome.mirror_ops.as_deref(),
+            outcome.row_filter.as_deref(),
         )?;
         pgrx::log!(
             "koldstore flush: pruned mirror_rows={} hot_rows={}",

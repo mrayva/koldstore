@@ -168,9 +168,9 @@ pub enum FlushPolicy {
         max_rows_per_file: u64,
         max_rows_per_flush: u64,
     },
-    /// Reserved representation; execution deliberately fails closed.
+    /// Flush rows matching a restricted column predicate (`koldstore_move_when`).
     Filter {
-        expression: String,
+        predicate: super::move_predicate::MovePredicate,
         min_flush_rows: u64,
         max_rows_per_file: u64,
         max_rows_per_flush: u64,
@@ -195,7 +195,7 @@ impl FlushPolicy {
         match self {
             Self::RowLimit { hot_row_limit, .. } => *hot_row_limit > 0,
             Self::OlderThan { .. } => true,
-            Self::Filter { .. } => false,
+            Self::Filter { .. } => true,
         }
     }
 
@@ -243,7 +243,6 @@ impl FlushPolicy {
 
     /// Returns a copy with flush batching bounds replaced.
     ///
-    /// Filter policies are left unchanged because execution rejects them.
     #[must_use]
     pub fn with_batching(
         self,
@@ -264,7 +263,12 @@ impl FlushPolicy {
                 max_rows_per_file,
                 max_rows_per_flush,
             },
-            policy @ Self::Filter { .. } => policy,
+            Self::Filter { predicate, .. } => Self::Filter {
+                predicate,
+                min_flush_rows,
+                max_rows_per_file,
+                max_rows_per_flush,
+            },
         }
     }
 
@@ -357,9 +361,7 @@ impl ManageTableOptions {
                 FlushPolicy::OlderThan { age, .. } => {
                     MoveAfter::new(age.months, age.days, age.microseconds)?;
                 }
-                FlushPolicy::Filter { .. } => {
-                    return Err("filter flush policy is not supported yet".into())
-                }
+                FlushPolicy::Filter { predicate, .. } => predicate.validate()?,
                 FlushPolicy::RowLimit { .. } => {}
             }
         }
@@ -659,12 +661,17 @@ mod tests {
         );
 
         let filter = FlushPolicy::Filter {
-            expression: "status = 'closed'".into(),
+            predicate: super::super::move_predicate::MovePredicate::parse("status = 'closed'")
+                .unwrap(),
             min_flush_rows: 1,
             max_rows_per_file: 1_000,
             max_rows_per_flush: 10_000,
         };
-        assert_eq!(filter.clone().with_batching(9, 9, 9), filter);
+        assert_eq!(
+            filter.clone().with_batching(9, 9, 9).min_flush_rows(),
+            9
+        );
+        assert!(filter.enabled());
     }
 
     #[test]

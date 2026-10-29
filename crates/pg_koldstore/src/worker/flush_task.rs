@@ -64,8 +64,7 @@ pub(crate) fn schedule_policy_after_counter(
             }
             evaluation.due
         }
-        // Reserved policy; execution fails closed elsewhere — never auto-enqueue.
-        FlushPolicy::Filter { .. } => false,
+        FlushPolicy::Filter { .. } => filter_policy_due(table_oid, &policy)?,
     };
     if !due {
         return Ok(false);
@@ -139,6 +138,9 @@ fn select_due_auto_flush_tables() -> Result<(Option<u32>, bool, Option<i64>), St
                     }
                     Some(FlushPolicy::RowLimit { .. }) => {
                         scheduler_should_flush_parsed(&parsed, pending)
+                    }
+                    Some(policy @ FlushPolicy::Filter { .. }) => {
+                        filter_policy_due(oid, policy)?
                     }
                     _ => false,
                 };
@@ -336,6 +338,28 @@ SELECT (SELECT row_count FROM eligible)::bigint,
         *max_rows_per_file,
         threshold_due_at_ms,
     ))
+}
+
+/// Whether a predicate move policy has enough eligible rows (and a full-enough file) to flush.
+fn filter_policy_due(table_oid: pgrx::pg_sys::Oid, policy: &FlushPolicy) -> Result<bool, String> {
+    let FlushPolicy::Filter {
+        predicate,
+        min_flush_rows,
+        max_rows_per_file,
+        ..
+    } = policy
+    else {
+        return Ok(false);
+    };
+    Ok(crate::sql::flush::spi::filter_cutoff(
+        table_oid,
+        &predicate.to_sql("hot"),
+        *min_flush_rows,
+        *max_rows_per_file,
+        // Only whether enough rows are eligible matters here.
+        (*min_flush_rows).max(*max_rows_per_file),
+    )?
+    .is_some())
 }
 
 fn subtract_move_after_from_now_ms(age: MoveAfter) -> Result<i64, String> {

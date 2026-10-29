@@ -71,6 +71,9 @@ pub struct ResolvedFlushSelection {
     pub stats: FlushStats,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
+    /// When set, a SQL boolean over alias `hot` that live rows must satisfy
+    /// (predicate move policy); tombstones are always eligible.
+    pub row_filter: Option<String>,
 }
 
 impl ResolvedFlushSelection {
@@ -80,6 +83,7 @@ impl ResolvedFlushSelection {
         Self {
             stats,
             mirror_ops: None,
+            row_filter: None,
         }
     }
 }
@@ -129,6 +133,7 @@ pub fn resolve_force_flush_selection(
         return ResolvedFlushSelection {
             stats: delete_stats,
             mirror_ops: Some(vec![delete_code]),
+            row_filter: None,
         };
     }
     ResolvedFlushSelection::new(all)

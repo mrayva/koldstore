@@ -193,7 +193,8 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
         Some(FlushPolicy::RowLimit { hot_row_limit, min_flush_rows, max_rows_per_file, .. }) => {
             (i64::try_from(hot_row_limit).ok(), min_flush_rows as i64, max_rows_per_file as i64)
         }
-        Some(FlushPolicy::OlderThan { min_flush_rows, max_rows_per_file, .. }) => {
+        Some(FlushPolicy::OlderThan { min_flush_rows, max_rows_per_file, .. })
+        | Some(FlushPolicy::Filter { min_flush_rows, max_rows_per_file, .. }) => {
             (None, min_flush_rows as i64, max_rows_per_file as i64)
         }
         _ => (None, 1000, 1000),

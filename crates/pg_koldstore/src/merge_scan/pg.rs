@@ -413,13 +413,20 @@ pub fn with_custom_scan_disabled<T>(f: impl FnOnce() -> T) -> T {
 
 /// Disables the planner hook for nested catalog/SPI work.
 pub(crate) fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
-    DISABLE_HOOK.with(|disabled| {
+    // Restore on unwind too: a PostgreSQL ERROR raised inside `f` surfaces as a Rust panic, and
+    // leaving the flag set would silently turn the merge scan off for the rest of the backend.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DISABLE_HOOK.with(|disabled| *disabled.borrow_mut() = self.0);
+        }
+    }
+    let _restore = DISABLE_HOOK.with(|disabled| {
         let was_disabled = *disabled.borrow();
         *disabled.borrow_mut() = true;
-        let result = f();
-        *disabled.borrow_mut() = was_disabled;
-        result
-    })
+        Restore(was_disabled)
+    });
+    f()
 }
 
 #[pgrx::pg_guard]
