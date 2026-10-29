@@ -94,6 +94,8 @@ fn claim_flush_job(
 ) -> Result<(uuid::Uuid, uuid::Uuid, bool, i64, Option<SeqId>), String> {
     // Caller already holds the session table-job lock — do not re-lock (that
     // would bump the session lock count and require a matching extra unlock).
+    // A job queued while this node led can be claimed after the lease moved on.
+    crate::sql::leader_lease::require_lease(table_oid, "run a queued flush")?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     // Fixed watermark + progress estimate at claim (newer rows stay hot).
     let progress_total = super::spi::flush_progress_total_estimate(table_oid, force)?;
@@ -722,6 +724,8 @@ pub(super) fn finalize_flush(
         outcome.manifest.segments.len(),
         outcome.total_rows_flushed
     );
+    // The lease can expire during a long flush; check again before anything becomes visible.
+    crate::sql::leader_lease::require_lease(table_oid, "publish a flush")?;
     write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
     // Manifest object published; no lock is held, so concurrent writers still run here.
     crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterManifestPublish)?;

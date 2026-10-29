@@ -198,11 +198,41 @@ fn claim_one_flush_job() -> Result<(ClaimOutcome, Option<ClaimedWork>), String> 
                             candidate.table_oid.to_u32()
                         ),
                     }
+                    if crate::sql::leader_lease::require_lease(candidate.table_oid, "flush").is_err() {
+                        // Leadership moved on: queued work belongs to the new leader.
+                        match cancel_pending_flush_jobs(candidate.table_oid) {
+                            Ok(0) => {}
+                            Ok(cancelled) => pgrx::log!(
+                                "koldstore flush executor: cancelled {cancelled} pending flush job(s) for table_oid={} \
+                                 (this node lost the leader lease)",
+                                candidate.table_oid.to_u32()
+                            ),
+                            Err(cancel_error) => pgrx::log!(
+                                "koldstore flush executor: could not cancel flush jobs for table_oid={}: {cancel_error}",
+                                candidate.table_oid.to_u32()
+                            ),
+                        }
+                    }
                     drop(guard);
                 }
             }
         }
     }
+}
+
+/// Cancels the pending flush jobs of a table whose leader lease this node no longer holds.
+fn cancel_pending_flush_jobs(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    pgrx::Spi::get_one_with_args::<i64>(
+        "WITH cancelled AS ( \
+             UPDATE koldstore.jobs j \
+             SET status = 'cancelled', phase = 'cancelled', finished_at = clock_timestamp(), updated_at = now() \
+             WHERE j.table_oid = $1 AND j.job_type = 'flush' AND j.status = 'pending' \
+             RETURNING 1) \
+         SELECT count(*) FROM cancelled",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map(|count| count.unwrap_or(0))
+    .map_err(|error| error.to_string())
 }
 
 /// Cancels the pending flush jobs of a table that has no active managed schema (dropped, or
