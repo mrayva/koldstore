@@ -225,7 +225,30 @@ async fn export_table_writes_merged_snapshot() -> Result<()> {
             .await?
             .get(0);
         assert_eq!(typed_diff, 0, "json/jsonb/array/numeric/bytea cells must survive export + import");
-        // Refusals: non-empty target, managed target, unknown prefix.
+        // A damaged archive file is caught by its checksum before any row is inserted.
+        let part = db.storage_root.join("exp/typed/part-00000.parquet");
+        let mut damaged = std::fs::read(&part)?;
+        let last = damaged.len() / 2;
+        damaged[last] ^= 0xff;
+        std::fs::write(&part, damaged)?;
+        db.client
+            .batch_execute(&format!("CREATE TABLE {rel}_typed_bad (LIKE {rel}_typed INCLUDING DEFAULTS)"))
+            .await?;
+        let bad = db
+            .client
+            .simple_query(&format!(
+                "SELECT koldstore.import_table('{rel}_typed_bad'::regclass, '{storage}', 'exp/typed')"
+            ))
+            .await;
+        let message = format!("{:?}", bad.as_ref().err());
+        assert!(bad.is_err() && message.contains("corrupt"), "{message}");
+        let none: i64 = db
+            .client
+            .query_one(&format!("SELECT count(*) FROM {rel}_typed_bad"), &[])
+            .await?
+            .get(0);
+        assert_eq!(none, 0);
+
         for target in [imp.as_str(), rel.as_str()] {
             let again = db
                 .client

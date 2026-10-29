@@ -137,7 +137,12 @@ impl Exporter<'_> {
             .put(&key, &bytes, PutPrecondition::CreateIfAbsent)
             .map_err(|error| format!("writing `{key}` failed: {error}"))?;
         self.files
-            .push(json!({ "path": name, "rows": file.rows, "bytes": bytes.len() }));
+            .push(json!({
+            "path": name,
+            "rows": file.rows,
+            "bytes": bytes.len(),
+            "sha256": koldstore_storage::content_checksum_sha256_hex(&bytes),
+        }));
         Ok(())
     }
 }

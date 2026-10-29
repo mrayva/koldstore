@@ -132,6 +132,13 @@ pub(crate) fn import_table_value(
         let bytes = client
             .get(&key)
             .map_err(|error| format!("reading `{key}` failed: {error}"))?;
+        // Archives written before checksums existed carry none; everything else must match.
+        if let Some(want) = file["sha256"].as_str() {
+            let have = koldstore_storage::content_checksum_sha256_hex(&bytes);
+            if have != want {
+                return Err(format!("`{key}` is corrupt: sha256 {have}, the manifest says {want}"));
+            }
+        }
         let expected = file["rows"].as_u64();
         let mut file_rows = 0_u64;
         read_export_file_rows(bytes, &columns, |rows| {
