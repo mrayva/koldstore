@@ -140,7 +140,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |
 | `koldstore.enqueue_flush_job(...)` | `uuid` | Flush job id, or `NULL` when nothing is due |
 | `koldstore.flush_table(...)` | `jsonb` | Flush result object (`job_id`, `status`, `error`, …); see below |
-| `koldstore.table_status(...)` | `jsonb` | Operator view: table hot/mirror/cold/jobs + `async_mirror` |
+| `koldstore.table_status(...)` | `jsonb` | Operator view: table hot/mirror/cold/jobs, effective `settings` (flush policy, `auto_flush`, compression, target file size, Parquet layout) + `async_mirror` |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 | `koldstore.backup_manifest(...)` | `jsonb` | Catalog's cold-tier references at backup time (no credentials) |
 | `koldstore.export_table_metadata(table)` | `jsonb` | One table's cold-tier catalog (schemas, manifest, segments, indexes) for a logical dump; no OIDs or credentials |

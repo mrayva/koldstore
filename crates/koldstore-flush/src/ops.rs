@@ -688,6 +688,16 @@ SELECT jsonb_build_object(
     'pending_jobs', COALESCE(j.pending_jobs, 0),
     'jobs', COALESCE(jobs.jobs, '[]'::jsonb),
     'storage_binding', s.storage_id::text,
+    -- Effective per-table settings, so the result of alter_table / ALTER TABLE SET is visible.
+    'settings', jsonb_strip_nulls(jsonb_build_object(
+        'flush_policy', s.options->'flush_policy',
+        'auto_flush', COALESCE((s.options->>'auto_flush')::boolean, true),
+        'compression', COALESCE(s.options->>'compression', 'zstd'),
+        'target_file_size_mb', s.options->'target_file_size_mb',
+        'parquet_row_group_size', s.options->'parquet_row_group_size',
+        'parquet_data_page_row_count_limit', s.options->'parquet_data_page_row_count_limit',
+        'parquet_bloom_filter_fpp', s.options->'parquet_bloom_filter_fpp'
+    )),
     'last_error', m.last_error
 )::text
 FROM koldstore.schemas s

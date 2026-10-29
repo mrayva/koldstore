@@ -129,6 +129,16 @@ async fn alter_table_set_changes_compression_and_target_file_size() -> Result<()
         assert_eq!(after["compression"], "snappy", "{after}");
         assert_eq!(after["target_file_size_mb"], 8, "{after}");
 
+        let status: String = db
+            .client
+            .query_one(&format!("SELECT koldstore.table_status('{relation}'::regclass)::text"), &[])
+            .await?
+            .get(0);
+        let status: serde_json::Value = serde_json::from_str(&status)?;
+        assert_eq!(status["settings"]["compression"], "snappy", "{status}");
+        assert_eq!(status["settings"]["target_file_size_mb"], 8, "{status}");
+        assert_eq!(status["settings"]["auto_flush"], true, "{status}");
+
         let expected: i64 = db.client.query_one(&format!("SELECT count(*) FROM {relation}"), &[]).await?.get(0);
         db.flush_table(relation).await?;
         let got: i64 = db.client.query_one(&format!("SELECT count(*) FROM {relation}"), &[]).await?.get(0);
