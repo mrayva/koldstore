@@ -247,7 +247,7 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
     .map_err(|error| error.to_string())?;
     pgrx::Spi::run_with_args(
         "UPDATE koldstore.schemas SET version = (SELECT max((e->>'version')::int) FROM jsonb_array_elements($2) e),
-                options = ($3 - 'leader' - 'follower') || jsonb_build_object('migration_status', options->'migration_status'),
+                options = ($3 - 'leader' - 'follower' - 'lease_epoch' - 'seen_leader_epoch') || jsonb_build_object('migration_status', options->'migration_status'),
                 last_flush_seq = $4, updated_at = now()
          WHERE table_oid = $1 AND active",
         &[
@@ -505,7 +505,12 @@ fn max_generation(metadata: &Value) -> i64 {
 fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
     use koldstore_storage::StorageClient;
 
-    let metadata = export_value(table_oid, false)?;
+    super::leader_lease::require_lease(table_oid, "publish the leader catalog")?;
+    let mut metadata = export_value(table_oid, false)?;
+    let epoch = super::leader_lease::published_epoch(table_oid)?;
+    if let Some(epoch) = epoch {
+        metadata["lease_epoch"] = json!(epoch);
+    }
     let target = super::backup::table_target(table_oid)?;
     let client = super::backup::storage_client(&target.storage.storage_id)?;
     let key = leader_catalog_key(&target.namespace, &target.name);
@@ -514,6 +519,13 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     // any more (or has not caught up) and must not move the shared catalog backwards.
     if let Ok(existing) = client.get(&key) {
         if let Ok(existing) = serde_json::from_slice::<Value>(&existing) {
+            if let (Some(mine), Some(theirs)) = (epoch, existing["lease_epoch"].as_i64()) {
+                if theirs > mine {
+                    return Err(format!(
+                        "a catalog from a newer leader lease epoch is already published (epoch {theirs}, this node {mine})"
+                    ));
+                }
+            }
             let published = max_generation(&existing);
             if published > generation {
                 return Err(format!(
@@ -554,6 +566,22 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         .get(&key)
         .map_err(|error| format!("no leader catalog at {key} ({error}); has the leader run publish_leader_catalog()?"))?;
     let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
+    // Epoch fencing: never move back to a catalog from a deposed leader.
+    if let Some(epoch) = metadata["lease_epoch"].as_i64() {
+        let seen = count(
+            "SELECT (SELECT coalesce((options->>'seen_leader_epoch')::bigint, 0) FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+            &[DatumWithOid::from(table_oid)],
+        )?;
+        if epoch < seen {
+            return Err(format!("leader catalog is from lease epoch {epoch}, older than the epoch {seen} already followed"));
+        }
+        pgrx::Spi::run_with_args(
+            "UPDATE koldstore.schemas SET options = jsonb_set(coalesce(options, '{}'::jsonb), '{seen_leader_epoch}', to_jsonb($2::bigint), true) \
+             WHERE table_oid = $1 AND active",
+            &[DatumWithOid::from(table_oid), DatumWithOid::from(epoch)],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let mut result = sync_value(table_oid, &metadata)?;
     let added = take_added_ranges(&mut result);
     // Same transaction as the adoption: a failed prune rolls the sync back and the next tick

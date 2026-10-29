@@ -97,7 +97,9 @@ pub(crate) fn enqueue_flush_job_if_due(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    if crate::sql::table_metadata::is_follower(table_oid).unwrap_or(false) {
+    if crate::sql::table_metadata::is_follower(table_oid).unwrap_or(false)
+        || crate::sql::leader_lease::require_lease(table_oid, "flush").is_err()
+    {
         return Ok(None);
     }
     let job_id = if let Some(existing) = lookup_active_flush_job(table_oid)? {

@@ -71,6 +71,7 @@ pub(crate) fn compact_table_value(
         return Err("max_rows must be at least 1".to_string());
     }
     crate::sql::table_metadata::refuse_on_follower(table_oid, "compact")?;
+    crate::sql::leader_lease::require_lease(table_oid, "compact")?;
     // A flush that has just finished may still be releasing the lock; wait a few seconds for it
     // rather than failing a flush-then-compact sequence.
     let _lock = crate::sql::job_lock::TableJobLockGuard::lock_bounded(
@@ -1045,6 +1046,7 @@ pub(crate) fn reap_table(
     grace_seconds: i32,
 ) -> Result<i64, String> {
     crate::sql::table_metadata::refuse_on_follower(table_oid, "reap compacted segments")?;
+    crate::sql::leader_lease::require_lease(table_oid, "reap compacted segments")?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let client = crate::object_store::open_managed_object_store_client(
         &storage.storage_type,

@@ -53,6 +53,7 @@ fn enqueue_flush_job_pg_impl(
     force: bool,
 ) -> Result<Option<pgrx::Uuid>, String> {
     crate::sql::table_metadata::refuse_on_follower(table_oid, "enqueue a flush")?;
+    crate::sql::leader_lease::require_lease(table_oid, "enqueue a flush")?;
     jobs::enqueue_flush_job_if_due(table_oid, force).map_err(|error| error.to_string())
 }
 

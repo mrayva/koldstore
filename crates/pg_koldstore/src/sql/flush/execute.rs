@@ -1074,6 +1074,7 @@ pub(crate) fn flush_table_pg_impl(
     force: bool,
 ) -> Result<FlushTableResponse, String> {
     crate::sql::table_metadata::refuse_on_follower(table_oid, "flush")?;
+    crate::sql::leader_lease::require_lease(table_oid, "flush")?;
     let execution = match crate::guc::flush_execution_mode() {
         crate::settings::FlushExecutionMode::Inline => "inline",
         crate::settings::FlushExecutionMode::Queue => "queue",

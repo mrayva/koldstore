@@ -636,3 +636,32 @@ CREATE FUNCTION koldstore."validate_sql_objects"() RETURNS jsonb
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'validate_sql_objects_pg_wrapper';
+
+CREATE FUNCTION koldstore."acquire_leader_lease"(
+	"table_name" regclass,
+	"ttl_seconds" int DEFAULT 30
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'acquire_leader_lease_pg_wrapper';
+
+CREATE FUNCTION koldstore."leader_lease_status"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'leader_lease_status_pg_wrapper';
+
+CREATE FUNCTION koldstore."release_leader_lease"(
+	"table_name" regclass
+) RETURNS bool
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'release_leader_lease_pg_wrapper';
+
+CREATE FUNCTION koldstore."renew_leader_lease"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'renew_leader_lease_pg_wrapper';

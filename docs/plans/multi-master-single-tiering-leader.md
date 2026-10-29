@@ -1,6 +1,6 @@
 # Spock mesh with a single tiering leader (design spike)
 
-Status: spike done; stages 0 to 3 are implemented (see "Progress"). Date: 2026-10-29.
+Status: spike done; stages 0 to 4 are implemented (see "Progress"). Date: 2026-10-29.
 
 ## Progress
 
@@ -8,6 +8,7 @@ Status: spike done; stages 0 to 3 are implemented (see "Progress"). Date: 2026-1
 - Stage 1 done: `koldstore.sync_table_metadata()`, verified on two clusters over shared storage through new, compacted-away and unchanged segments; schema-version mismatch refused.
 - Stage 2 done: `koldstore.publish_leader_catalog()` (atomic write, generation fencing floor) and `koldstore.sync_from_leader()` work. `koldstore.set_table_follower()` marks a follower (manual, job and background flush, compaction and reaping are refused or skipped), and a background worker (`koldstore.catalog_sync_interval_seconds` / `catalog_sync_databases`) syncs every follower from the leader's published catalog. `koldstore.set_table_leader()` marks the leader: the same worker publishes its catalog whenever the manifest generation changes (from the worker, so followers only see committed state; latency is one interval). 
 - Stage 3 done: peer prune. `koldstore.sync_from_leader()` (so the sync worker) deletes, in the same transaction as the adoption, each follower hot row that exactly equals a row in a newly adopted segment; `koldstore.prune_follower_hot()` does the same for every active segment. The comparison is the primary key plus whole-row JSON equality read back from the segment, so no segment row hash is needed and a row edited after the leader's flush stays hot. Verified on two clusters: 300 hot rows became 1 (the edited one), and 201 became 2 after a worker sync. Limits: leader-side deletes of flushed rows are not propagated (tombstones are not synced), and user-scoped tables are refused.
+- Stage 4 done: leader lease with epoch fencing (`acquire_leader_lease`, `renew_leader_lease`, `release_leader_lease`, `leader_lease_status`). Storage has only create-if-absent and overwrite, so the lease is a series of epoch objects under `_leader_lease/<schema>/<table>/`; claiming epoch N+1 is a create-if-absent put, the holder renews by overwriting its own object, and the highest epoch wins. Once a node has acquired a lease, flush, enqueue, compaction, reaping and publishing require it valid, published catalogs carry the epoch, and followers refuse an older epoch. The sync worker renews for leader tables. Verified on two clusters: second claimer refused, takeover after ttl, the old leader fenced on all five operations and on renew, release then immediate re-acquire, worker keeps the lease alive, a stale-epoch catalog is refused. Not done: automatic election (who calls acquire is left to an external coordinator such as the write-router or etcd), an already-running queued flush job is not re-checked, and expiry relies on roughly synchronized clocks.
 
 ## Goal
 

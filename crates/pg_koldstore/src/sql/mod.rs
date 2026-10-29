@@ -24,6 +24,8 @@ pub mod session;
 pub mod summaries;
 pub mod sort_key;
 #[cfg(feature = "pg")]
+pub mod leader_lease;
+#[cfg(feature = "pg")]
 pub mod table_metadata;
 pub mod storage;
 #[cfg(feature = "pg")]

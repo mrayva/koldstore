@@ -1274,6 +1274,30 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.prune_follower_hot(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$prune_follower_hot_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function acquire_leader_lease(table_name regclass, ttl_seconds integer DEFAULT 30) returns jsonb security definer [acquire_leader_lease_pg_wrapper]": {
+            "add": "koldstore.acquire_leader_lease(table_name regclass, ttl_seconds integer)",
+            "name": "acquire_leader_lease",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.acquire_leader_lease(table_name regclass, ttl_seconds integer DEFAULT 30)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$acquire_leader_lease_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function leader_lease_status(table_name regclass) returns jsonb security definer [leader_lease_status_pg_wrapper]": {
+            "add": "koldstore.leader_lease_status(table_name regclass)",
+            "name": "leader_lease_status",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.leader_lease_status(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$leader_lease_status_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function release_leader_lease(table_name regclass) returns boolean security definer [release_leader_lease_pg_wrapper]": {
+            "add": "koldstore.release_leader_lease(table_name regclass)",
+            "name": "release_leader_lease",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.release_leader_lease(table_name regclass)\n RETURNS boolean\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$release_leader_lease_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
+        "function renew_leader_lease(table_name regclass) returns jsonb security definer [renew_leader_lease_pg_wrapper]": {
+            "add": "koldstore.renew_leader_lease(table_name regclass)",
+            "name": "renew_leader_lease",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.renew_leader_lease(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$renew_leader_lease_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function sync_from_leader(table_name regclass) returns jsonb security definer [sync_from_leader_pg_wrapper]": {
             "add": "koldstore.sync_from_leader(table_name regclass)",
             "name": "sync_from_leader",

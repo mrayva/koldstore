@@ -84,6 +84,7 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
             let result = match role {
                 Role::Follower => super::txn::run_recoverable("follower sync", || sync_one(table_oid)),
                 Role::Leader => super::txn::run_recoverable("leader publish", || {
+                    renew_lease(table_oid)?;
                     publish_one(table_oid, published.get(&table_oid).copied())
                 })
                 .map(|outcome| {
@@ -172,6 +173,18 @@ fn publish_one(table_oid: u32, last: Option<i64>) -> Result<Option<(i64, String)
     ))
     .map_err(|error| error.to_string())?;
     Ok(summary.map(|summary| (generation, summary)))
+}
+
+/// Renews the leader lease of a table that holds one; a lost lease surfaces as the error that
+/// skips this tick's publish (flush and compaction are already fenced by the same check).
+fn renew_lease(table_oid: u32) -> Result<(), String> {
+    pgrx::Spi::run(&format!(
+        "SELECT CASE WHEN to_regclass({table_oid}::oid::regclass::text) IS NOT NULL \
+                      AND coalesce((SELECT options ? 'lease_epoch' FROM koldstore.schemas \
+                                    WHERE table_oid = {table_oid} AND active), false) \
+                     THEN koldstore.renew_leader_lease({table_oid}::oid::regclass)::text END"
+    ))
+    .map_err(|error| error.to_string())
 }
 
 fn summary_has_activity(summary: &str) -> bool {
