@@ -159,9 +159,21 @@ pub(crate) fn export_table_value(
     )?;
     let ctx =
         load_flush_prepared_context(table_oid, false, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())?;
-    if ctx.snapshot.scope_column_id.is_some() {
-        return Err("export of user-scoped tables is not supported yet".to_string());
-    }
+    // A user-scoped table reads one scope at a time (`koldstore.user_id`); the export is that
+    // scope's rows, which is also what a per-tenant backup or data-subject export wants.
+    let scope = if ctx.snapshot.scope_column_id.is_some() {
+        let scope = pgrx::Spi::get_one::<String>("SELECT current_setting('koldstore.user_id', true)")
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        if scope.is_empty() {
+            return Err(
+                "this table is user-scoped: SET koldstore.user_id to the scope to export first".to_string(),
+            );
+        }
+        Some(scope)
+    } else {
+        None
+    };
     let client = load_storage_client(storage_name)?;
     let relation = format!(
         "{}.{}",
@@ -176,8 +188,15 @@ pub(crate) fn export_table_value(
             )
             .map_err(|error| error.to_string())?
             .unwrap_or_default();
+            let scope_part = scope.as_deref().map_or_else(String::new, |scope| {
+                let safe: String = scope
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+                    .collect();
+                format!("/scope-{safe}")
+            });
             format!(
-                "exports/{}.{}/{stamp}",
+                "exports/{}.{}{scope_part}/{stamp}",
                 ctx.relation.namespace, ctx.relation.name
             )
         }
@@ -214,7 +233,22 @@ pub(crate) fn export_table_value(
         .map(|name| koldstore_common::quote_ident(name))
         .collect::<Vec<_>>()
         .join(", ");
-    let query = format!("SELECT {select_list} FROM {relation} ORDER BY {order_by}");
+    // Scope isolation on a user-scoped table is row-level security, which a superuser bypasses, so
+    // the scope is filtered explicitly rather than trusted to the GUC alone.
+    let scope_filter = match (&scope, ctx.snapshot.scope_column_id) {
+        (Some(_), Some(scope_id)) => {
+            let column = ctx
+                .catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id == scope_id)
+                .ok_or("scope column is missing from the catalog")?;
+            format!(" WHERE {}::text = $1", koldstore_common::quote_ident(&column.name))
+        }
+        _ => String::new(),
+    };
+    let query = format!("SELECT {select_list} FROM {relation}{scope_filter} ORDER BY {order_by}");
+    let query_args: Vec<DatumWithOid> = scope.iter().map(|scope| DatumWithOid::from(scope.as_str())).collect();
 
     let row_group_size = ctx.parquet_row_group_size.max(1);
     let max_rows_per_file = max_rows_per_file
@@ -240,7 +274,7 @@ pub(crate) fn export_table_value(
     };
 
     pgrx::Spi::connect(|spi| -> Result<(), String> {
-        let mut cursor = spi.open_cursor(&query, &[]);
+        let mut cursor = spi.open_cursor(&query, &query_args);
         loop {
             let tuples = cursor
                 .fetch(FETCH_ROWS)
@@ -294,6 +328,7 @@ pub(crate) fn export_table_value(
         "primary_key": exporter.primary_key,
         "columns": column_info,
         "ordered_by": "primary_key",
+        "scope": scope,
         "compression": ctx.storage.compression,
         "files": exporter.files,
     });
@@ -311,6 +346,7 @@ pub(crate) fn export_table_value(
         "rows": exporter.total_rows,
         "files": exporter.files.len(),
         "manifest": manifest_key,
+        "scope": scope,
     }))
 }
 
@@ -321,7 +357,7 @@ pub(crate) fn export_table_value(
 /// max_rows_per_file bigint default null) → jsonb`.
 ///
 /// Superuser only, because it writes through a registered storage's credentials. Refuses
-/// user-scoped tables.
+/// user-scoped tables unless `koldstore.user_id` names the scope to export.
 #[pgrx::pg_extern(name = "export_table", schema = "koldstore", security_definer)]
 pub fn export_table_pg(
     table_name: pgrx::PgRelation,

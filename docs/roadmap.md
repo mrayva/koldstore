@@ -117,7 +117,7 @@ must be **KoldStore-aware** and keep both tiers consistent.
 
 Shipped: `koldstore.backup_manifest` and `koldstore.validate_cold_storage`, plus a documented and
 scripted (`scripts/backup-restore-drill.sh`) physical-backup / PITR procedure, and a retention guard (`koldstore.cold_object_retention_seconds` +
-`purge_deferred_cold_objects`) that defers cold-object deletion so older backups stay restorable. `koldstore.export_table` writes a merged hot+cold snapshot as plain Parquet plus a manifest. `koldstore.import_table` loads an archive into a new empty table. Still open: merging into existing data, scoped-table export, a logical-dump story (`pg_dump` is refused for tables with cold data, and the koldstore
+`purge_deferred_cold_objects`) that defers cold-object deletion so older backups stay restorable. `koldstore.export_table` writes a merged hot+cold snapshot as plain Parquet plus a manifest. `koldstore.import_table` loads an archive into a new empty table. Still open: merging into existing data, a logical-dump story (`pg_dump` is refused for tables with cold data, and the koldstore
 catalog tables are not registered with `pg_extension_config_dump`). The remaining operator
 surface is tracked in [#103](https://github.com/kalamdb/koldstore/issues/103). `export_table` is
 the archive boundary; merging an import into existing data remains rejected until ownership,
