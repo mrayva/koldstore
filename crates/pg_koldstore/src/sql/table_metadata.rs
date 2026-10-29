@@ -247,7 +247,7 @@ fn import_value(table_oid: pgrx::pg_sys::Oid, metadata: &Value) -> Result<i64, S
     .map_err(|error| error.to_string())?;
     pgrx::Spi::run_with_args(
         "UPDATE koldstore.schemas SET version = (SELECT max((e->>'version')::int) FROM jsonb_array_elements($2) e),
-                options = $3 || jsonb_build_object('migration_status', options->'migration_status'),
+                options = ($3 - 'leader' - 'follower') || jsonb_build_object('migration_status', options->'migration_status'),
                 last_flush_seq = $4, updated_at = now()
          WHERE table_oid = $1 AND active",
         &[
@@ -575,6 +575,16 @@ fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<boo
     use pgrx::datum::DatumWithOid;
 
     let _lock = super::job_lock::TableJobLockGuard::lock(table_oid)?;
+    if enabled && pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT (SELECT coalesce((options->>'leader')::boolean, false) \
+         FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false)
+    {
+        return Err("the table is the leader; turn leader mode off first".to_string());
+    }
     let updated = pgrx::Spi::get_one_with_args::<bool>(
         "WITH updated AS ( \
              UPDATE koldstore.schemas \
@@ -594,6 +604,48 @@ fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<boo
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     Ok(true)
+}
+
+fn set_leader_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let _lock = super::job_lock::TableJobLockGuard::lock(table_oid)?;
+    if enabled && is_follower(table_oid)? {
+        return Err("the table is a follower; turn follower mode off first".to_string());
+    }
+    let updated = pgrx::Spi::get_one_with_args::<bool>(
+        "WITH updated AS ( \
+             UPDATE koldstore.schemas \
+             SET options = CASE WHEN $2::boolean \
+                     THEN jsonb_set(coalesce(options, '{}'::jsonb), '{leader}', 'true'::jsonb, true) \
+                     ELSE options - 'leader' END, \
+                 updated_at = now() \
+             WHERE table_oid = $1::oid AND active RETURNING 1) \
+         SELECT EXISTS (SELECT 1 FROM updated)",
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(enabled)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !updated {
+        return Err("table is not an active managed table".to_string());
+    }
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+    Ok(true)
+}
+
+/// Marks (or unmarks) a table as the tiering leader whose catalog is published automatically.
+///
+/// SQL contract: `koldstore.set_table_leader(table_name regclass, enabled boolean) → boolean`.
+///
+/// With `koldstore.catalog_sync_interval_seconds` set, the catalog sync worker publishes the
+/// leader catalog whenever the manifest generation changes (after a flush, compaction or
+/// reap), so followers see committed state only. A table cannot be leader and follower.
+#[pgrx::pg_extern(name = "set_table_leader", schema = "koldstore", security_definer)]
+pub fn set_table_leader_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    let oid = table_name.oid();
+    authorize(Some(oid), "change leader mode");
+    set_leader_value(oid, enabled)
+        .unwrap_or_else(|error| pgrx::error!("set_table_leader failed: {error}"))
 }
 
 /// Marks (or unmarks) a table as a follower of a leader's cold tier.

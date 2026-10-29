@@ -327,6 +327,10 @@ pub struct ManageTableOptions {
     /// compacts or reaps on its own. Missing means `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follower: Option<bool>,
+    /// Marks the multi-master tiering leader: a background worker publishes its cold-tier
+    /// catalog for followers after every manifest generation change. Missing means `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leader: Option<bool>,
     /// Operator override for columns that participate in cold min/max stats.
     ///
     /// When omitted, registration derives stats candidates from indexes/PK.

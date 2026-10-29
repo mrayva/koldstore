@@ -190,6 +190,7 @@ function register_storage(name text, storage_type text, base_path text, credenti
 function set_partition_auto_manage(table_name regclass, enabled boolean) returns boolean security definer [set_partition_auto_manage_pg_wrapper]
 function set_table_auto_flush(table_name regclass, enabled boolean) returns boolean security definer [set_table_auto_flush_pg_wrapper]
 function set_table_follower(table_name regclass, enabled boolean) returns boolean security definer [set_table_follower_pg_wrapper]
+function set_table_leader(table_name regclass, enabled boolean) returns boolean security definer [set_table_leader_pg_wrapper]
 function snowflake_id() returns bigint [snowflake_id_wrapper]
 function spock_pk_object(rel regclass, obj jsonb) returns jsonb [sql:8f43ded2dfa8]
 function spock_replay_operation(rel regclass, op text, new_obj jsonb, old_obj jsonb) returns text [plpgsql:95bd3d1aadad]

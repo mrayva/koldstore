@@ -552,6 +552,15 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'set_table_follower_pg_wrapper';
 
+-- Marks a table as the tiering leader whose catalog the catalog sync worker publishes.
+CREATE FUNCTION koldstore."set_table_leader"(
+	"table_name" regclass,
+	"enabled" bool
+) RETURNS bool
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'set_table_leader_pg_wrapper';
+
 -- Applies a change KoldStore cannot apply in place (primary key, narrowing type) to a table with
 -- cold data: rehydrate, run the caller's DDL, manage again.
 CREATE FUNCTION koldstore."rebuild_table"(

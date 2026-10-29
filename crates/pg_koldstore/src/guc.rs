@@ -53,9 +53,9 @@ static SPOCK_RECONCILE_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 #[cfg(feature = "pg")]
 static SPOCK_RECONCILE_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
-static FOLLOWER_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
+static CATALOG_SYNC_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 #[cfg(feature = "pg")]
-static FOLLOWER_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 #[cfg(feature = "pg")]
@@ -261,20 +261,20 @@ pub fn define_gucs() {
         flags,
     );
     GucRegistry::define_int_guc(
-        c"koldstore.follower_sync_interval_seconds",
-        c"Seconds between background runs of koldstore.sync_from_leader() for follower tables; 0 disables.",
-        c"When positive, a background worker per database named in koldstore.follower_sync_databases syncs every table marked with koldstore.set_table_follower() from its leader's published catalog on this interval. Changing it requires a restart.",
-        &FOLLOWER_SYNC_INTERVAL,
+        c"koldstore.catalog_sync_interval_seconds",
+        c"Seconds between background publishes of leader catalogs and syncs of follower tables; 0 disables.",
+        c"When positive, a background worker per database named in koldstore.catalog_sync_databases publishes the catalog of every table marked with koldstore.set_table_leader() when its manifest generation changed, and syncs every table marked with koldstore.set_table_follower() from its leader's published catalog, on this interval. Changing it requires a restart.",
+        &CATALOG_SYNC_INTERVAL,
         0,
         86_400,
         GucContext::Postmaster,
         flags,
     );
     GucRegistry::define_string_guc(
-        c"koldstore.follower_sync_databases",
-        c"Comma-separated databases that get a follower sync worker.",
+        c"koldstore.catalog_sync_databases",
+        c"Comma-separated databases that get a catalog sync worker.",
         c"One background worker is started per listed database. Changing it requires a restart.",
-        &FOLLOWER_SYNC_DATABASES,
+        &CATALOG_SYNC_DATABASES,
         GucContext::Postmaster,
         flags,
     );
@@ -617,12 +617,12 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "",
         },
         GucDefinition {
-            name: FOLLOWER_SYNC_INTERVAL_GUC,
+            name: CATALOG_SYNC_INTERVAL_GUC,
             internal: false,
             default_value: "0",
         },
         GucDefinition {
-            name: FOLLOWER_SYNC_DATABASES_GUC,
+            name: CATALOG_SYNC_DATABASES_GUC,
             internal: false,
             default_value: "",
         },
@@ -807,8 +807,8 @@ pub const INSERT_GUARD_FENCE_GUC: &str = "koldstore.insert_guard_fence";
 pub const HYDRATE_SLOT_LOCK_POLL_MS_GUC: &str = "koldstore.hydrate_slot_lock_poll_ms";
 pub const SPOCK_RECONCILE_INTERVAL_GUC: &str = "koldstore.spock_reconcile_interval_seconds";
 pub const SPOCK_RECONCILE_DATABASES_GUC: &str = "koldstore.spock_reconcile_databases";
-pub const FOLLOWER_SYNC_INTERVAL_GUC: &str = "koldstore.follower_sync_interval_seconds";
-pub const FOLLOWER_SYNC_DATABASES_GUC: &str = "koldstore.follower_sync_databases";
+pub const CATALOG_SYNC_INTERVAL_GUC: &str = "koldstore.catalog_sync_interval_seconds";
+pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
 pub const HYDRATE_TAKE_JOB_LOCK_GUC: &str = "koldstore.hydrate_take_job_lock";
@@ -921,12 +921,12 @@ pub fn spock_reconcile_databases() -> Vec<String> {
     }
 }
 
-/// Seconds between background follower syncs (0 = off).
+/// Seconds between background leader-publish and follower syncs (0 = off).
 #[must_use]
-pub fn follower_sync_interval_seconds() -> i32 {
+pub fn catalog_sync_interval_seconds() -> i32 {
     #[cfg(feature = "pg")]
     {
-        FOLLOWER_SYNC_INTERVAL.get()
+        CATALOG_SYNC_INTERVAL.get()
     }
 
     #[cfg(not(feature = "pg"))]
@@ -935,12 +935,12 @@ pub fn follower_sync_interval_seconds() -> i32 {
     }
 }
 
-/// Databases that get a follower sync worker.
+/// Databases that get a catalog sync worker.
 #[must_use]
-pub fn follower_sync_databases() -> Vec<String> {
+pub fn catalog_sync_databases() -> Vec<String> {
     #[cfg(feature = "pg")]
     {
-        FOLLOWER_SYNC_DATABASES
+        CATALOG_SYNC_DATABASES
             .get()
             .and_then(|value| value.to_str().ok().map(str::to_string))
             .unwrap_or_default()
