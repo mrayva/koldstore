@@ -144,6 +144,20 @@ pub(crate) fn publish_candidacy(table_oid: pgrx::pg_sys::Oid) -> Result<(), Stri
         .map_err(|error| error.to_string())
 }
 
+/// A leader is not a candidate: drops this node's candidacy record so the followers do not rank a
+/// node that no longer follows (its record keeps looking live for three ttls after it stops
+/// being refreshed, and the leader's state in it is out of date).
+pub(crate) fn withdraw_candidacy(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    use koldstore_storage::StorageClient;
+
+    let t = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&t.storage.storage_id)?;
+    match client.delete(&format!("{}{}.json", candidate_prefix(&t.namespace, &t.name), node_id()?)) {
+        Ok(()) | Err(koldstore_storage::StorageClientError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// This node's place in the election order (0 is the preferred candidate) among the live
 /// followers that hold at least `(generation, epoch)`. A candidate is live while its heartbeat
 /// keeps changing as seen on this node's own clock. `None` when this node opted out.
@@ -509,8 +523,12 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
         return Ok(None);
     };
     let stagger_ms = (ttl * 200).max(2000);
+    // Every candidate, the preferred one too, first lets one sync interval pass: a peer that has
+    // not yet published its record (just started, or its last write failed) is invisible to the
+    // ranking above, and would otherwise lose its place to a lower-priority node.
+    let settle_ms = i64::from(crate::guc::catalog_sync_interval_seconds()).max(0) * 1000;
     let waited = i64::try_from(first.elapsed().as_millis()).unwrap_or(i64::MAX);
-    if waited < stagger_ms.saturating_mul(i64::try_from(rank).unwrap_or(i64::MAX)) {
+    if waited < settle_ms + stagger_ms.saturating_mul(i64::try_from(rank).unwrap_or(i64::MAX)) {
         return Ok(None);
     }
     clear();

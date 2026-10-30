@@ -592,7 +592,27 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
         "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len)
             + metadata["tombstone_chunks"].as_array().map_or(0, |c| c.iter().filter_map(|c| c["count"].as_u64()).sum::<u64>() as usize),
         "tombstones_truncated": metadata["tombstones_truncated"].as_bool().unwrap_or(false),
+        "sidecars": chunk_keys.len(),
     }))
+}
+
+/// Whether a delete-marker sidecar the published catalog lists is gone from storage (cleaned up by
+/// a concurrent or just-deposed publisher, or removed by hand). Followers refuse such a catalog
+/// until it is republished, and an unchanged leader would not, so the worker checks.
+pub(crate) fn sidecars_missing(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
+    use koldstore_storage::StorageClient;
+
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    let bytes = client.get(&leader_catalog_key(&target.namespace, &target.name)).map_err(|error| error.to_string())?;
+    let catalog: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let Some(chunks) = catalog["tombstone_chunks"].as_array().filter(|chunks| !chunks.is_empty()) else {
+        return Ok(false);
+    };
+    let present = client
+        .list(&format!("_leader_tombstones/{}/{}/", target.namespace, target.name))
+        .map_err(|error| error.to_string())?;
+    Ok(chunks.iter().filter_map(|chunk| chunk["key"].as_str()).any(|key| !present.iter().any(|object| object.key == key)))
 }
 
 /// Publishes this node's cold-tier catalog where followers can pull it.

@@ -73,6 +73,10 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
     // Etag of the catalog object right after our own publish: a different one later means a
     // deposed leader overwrote it (followers ignore that content), so it is published again.
     let mut etags: HashMap<u32, Option<String>> = HashMap::new();
+    // Leader tables whose last publish wrote delete-marker sidecars, which are checked each tick.
+    let mut sidecars: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Leader tables whose candidacy record this process already removed.
+    let mut withdrawn: std::collections::HashSet<u32> = std::collections::HashSet::new();
     while super::wait_latch_interruptible(Some(delay)) {
         delay = interval;
         let tables = match super::txn::run_recoverable("catalog sync list", list_tables) {
@@ -84,6 +88,8 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
         };
         published.retain(|oid, _| tables.iter().any(|(table, role)| table == oid && *role == Role::Leader));
         etags.retain(|oid, _| published.contains_key(oid));
+        sidecars.retain(|oid| published.contains_key(oid));
+        withdrawn.retain(|oid| tables.iter().any(|(table, role)| table == oid && *role == Role::Leader));
         for (table_oid, role) in tables {
             let result = match role {
                 Role::Follower => {
@@ -100,6 +106,10 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
                     synced
                 }
                 Role::Leader => super::txn::run_recoverable("leader publish", || {
+                    if crate::guc::auto_elect() && !withdrawn.contains(&table_oid) {
+                        crate::sql::leader_lease::withdraw_candidacy(pgrx::pg_sys::Oid::from(table_oid))?;
+                        withdrawn.insert(table_oid);
+                    }
                     if crate::guc::auto_elect() {
                         if !maintain(&database, table_oid)? {
                             return Ok(None);
@@ -116,11 +126,24 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
                             "koldstore catalog sync: database={database} table oid {table_oid} the published catalog changed behind this leader; publishing again"
                         );
                     }
-                    publish_one(table_oid, if clobbered { None } else { published.get(&table_oid).map(String::as_str) })
+                    let lost = !clobbered
+                        && sidecars.contains(&table_oid)
+                        && crate::sql::table_metadata::sidecars_missing(pgrx::pg_sys::Oid::from(table_oid)).unwrap_or(false);
+                    if lost {
+                        pgrx::warning!(
+                            "koldstore catalog sync: database={database} table oid {table_oid} a delete-marker sidecar the catalog lists is gone; publishing again"
+                        );
+                    }
+                    publish_one(table_oid, if clobbered || lost { None } else { published.get(&table_oid).map(String::as_str) })
                 })
                 .map(|outcome| {
                     outcome.map(|(fingerprint, summary)| {
                         published.insert(table_oid, fingerprint);
+                        if serde_json::from_str::<serde_json::Value>(&summary).is_ok_and(|value| value["sidecars"].as_u64().unwrap_or(0) > 0) {
+                            sidecars.insert(table_oid);
+                        } else {
+                            sidecars.remove(&table_oid);
+                        }
                         let etag = super::txn::run_recoverable("catalog etag", || {
                             crate::sql::table_metadata::catalog_etag(pgrx::pg_sys::Oid::from(table_oid))
                         });

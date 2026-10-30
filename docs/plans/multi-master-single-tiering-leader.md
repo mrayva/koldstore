@@ -175,3 +175,9 @@ cannot settle errors and the election retries after the lease lapses. Test hook:
 `koldstore.election_claim_delay_ms` pauses an election between check and claim so a test can place
 the late write exactly there; `scripts/test-claim-window.sh` fails without the settle step (B stays
 on the old generation, loses the late rows and cannot publish) and passes with it.
+
+## Candidacy records and sidecar loss
+
+- A leader withdraws its own `_leader_candidates/<schema>/<table>/<node>.json` (once per process per leader table), so a node that no longer follows is not ranked, and its out-of-date generation and epoch are not mistaken for a live candidate for three ttls. A demoted node publishes again on its next follower tick. Every candidate, the preferred one too, now waits one `catalog_sync_interval_seconds` after first seeing the lease electable before claiming, so a peer that has not yet published a record (just started, failed write) is not skipped. `scripts/test-auto-election.sh` checks the withdrawal and re-advertising.
+- Delete-marker sidecars (`scripts/test-sidecar-race.sh`): a sidecar that disappears between a follower's catalog read and its fetch already fails the whole sync closed and recovers on the next tick. A sidecar the *current* catalog lists that is gone (a deposed publisher's cleanup in the lease-check window, or removed by hand) was not repaired: the unchanged leader never republished, so followers failed until some other change. The leader's worker now checks, each tick, that the sidecars its last publish listed still exist (`sidecars_missing`, one LIST) and republishes if not. `publish_leader_catalog` reports `sidecars`.
+

@@ -113,6 +113,13 @@ for i in $(seq 1 15); do [ "$(snap $NEW)" = "$(snap $OTHER)" ] && break; sleep 1
 check "follower converges" "$(snap $OTHER)" "$(snap $NEW)"
 check "follower validates" "$(q ${PORT[$OTHER]} spike -c "SELECT koldstore.validate_cold_storage('t'::regclass, true)->>'ok'" | tail -1)" "true"
 
+say "candidacy records: a leader withdraws its own, a follower keeps its own fresh"
+CAND=$SHARE/_leader_candidates/public/t
+nodeid() { q ${PORT[$1]} spike -c "SELECT system_identifier FROM pg_control_system()" | tail -1; }
+cand() { [ -f "$CAND/$(nodeid $1).json" ] && echo present || echo absent; }
+check "the new leader's candidacy record is withdrawn" "$(cand $NEW)" "absent"
+check "the other follower's record is still published" "$(cand $OTHER)" "present"
+
 say "restart the old leader A: it must demote itself and catch up"
 start a
 for i in $(seq 1 30); do [ "$(role a | cut -d: -f1)" = follower ] && break; sleep 1; done
@@ -120,6 +127,8 @@ check "A demoted to follower" "$(role a | cut -d: -f1)" "follower"
 check "still exactly one leader" "$(leaders a b c)" "$NEW"
 for i in $(seq 1 15); do [ "$(snap a)" = "$(snap $NEW)" ] && break; sleep 1; done
 check "A converges with the new leader" "$(snap a)" "$(snap $NEW)"
+for i in $(seq 1 10); do [ "$(cand a)" = present ] && break; sleep 1; done
+check "the demoted A advertises itself again" "$(cand a)" "present"
 
 say "kill the new leader $NEW: the election repeats (epoch 3)"
 stop $NEW
