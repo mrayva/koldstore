@@ -662,6 +662,13 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'wait_for_publication_pg_wrapper';
 
+CREATE FUNCTION koldstore."publish_for_followers"(
+	"table_name" regclass
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'publish_for_followers_pg_wrapper';
+
 CREATE FUNCTION koldstore."leader_lease_status"(
 	"table_name" regclass
 ) RETURNS jsonb

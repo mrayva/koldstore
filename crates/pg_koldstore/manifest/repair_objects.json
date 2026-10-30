@@ -1272,6 +1272,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.sync_table_metadata(table_name regclass, metadata jsonb)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$sync_table_metadata_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function publish_for_followers(table_name regclass) returns jsonb security definer [publish_for_followers_pg_wrapper]": {
+            "add": "koldstore.publish_for_followers(table_name regclass)",
+            "name": "publish_for_followers",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.publish_for_followers(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$publish_for_followers_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function publish_leader_catalog(table_name regclass) returns jsonb security definer [publish_leader_catalog_pg_wrapper]": {
             "add": "koldstore.publish_leader_catalog(table_name regclass)",
             "name": "publish_leader_catalog",

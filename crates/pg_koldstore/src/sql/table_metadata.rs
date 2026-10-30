@@ -616,6 +616,27 @@ pub(crate) fn sidecars_missing(table_oid: pgrx::pg_sys::Oid) -> Result<bool, Str
     Ok(chunks.iter().filter_map(|chunk| chunk["key"].as_str()).any(|key| !present.iter().any(|object| object.key == key)))
 }
 
+/// Leader side of read-your-writes for a client that has just written: applies the async mirror up to
+/// the current WAL position, then publishes, and returns the publication number to hand to
+/// `wait_for_publication`.
+///
+/// SQL contract: `koldstore.publish_for_followers(table_name regclass) → jsonb` (the
+/// `publish_leader_catalog` result).
+///
+/// `publish_leader_catalog` alone can miss a write: deletes reach the catalog through the async
+/// mirror, which lags the commit. Inserts and updates still in the leader's hot tier are not covered:
+/// a follower without Spock never receives them, and its own stale heap row shadows a flushed cold copy.
+#[pgrx::pg_extern(name = "publish_for_followers", schema = "koldstore", security_definer)]
+pub fn publish_for_followers_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "publish for followers");
+    pgrx::Spi::run("SELECT koldstore.wait_for_async_mirror()")
+        .map_err(|error| error.to_string())
+        .and_then(|()| publish_leader_catalog_value(oid))
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("publish for followers failed: {error}"))
+}
+
 /// Publishes this node's cold-tier catalog where followers can pull it.
 ///
 /// SQL contract: `koldstore.publish_leader_catalog(table_name regclass) → jsonb`

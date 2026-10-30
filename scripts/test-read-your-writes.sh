@@ -105,5 +105,13 @@ wait
 check "follower reads the late write" "$(q $PB spike -c "SELECT v FROM t WHERE id = 5" | tail -1)" "late5"
 check "follower matches the leader" "$(snap $PB)" "$(snap $PA)"
 
+say "5: publish_for_followers includes a delete the mirror had not applied"
+q $PA spike -c "SET koldstore.hydrate_on_write=on; DELETE FROM t WHERE id = 62" >/dev/null
+OUT=$(q $PA spike -c "SELECT koldstore.publish_for_followers('t'::regclass)::text" | tail -1)
+P5=$(echo "$OUT" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["publication"])')
+check "wait applies it" "$(wait_b $P5)" "$P5"
+check "follower hides the delete" "$(q $PB spike -c "SELECT count(*) FROM t WHERE id = 62" | tail -1)" "0"
+check "follower matches the leader" "$(snap $PB)" "$(snap $PA)"
+
 cleanup
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi

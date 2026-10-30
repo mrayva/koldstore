@@ -135,7 +135,16 @@ polls the shared catalog, syncs as soon as it reaches `n`, and records `seen_pub
 `koldstore.schemas.options`. A follower that has already applied `n` returns without a sync; a
 publication that never arrives is an error after `timeout_ms`. This covers cold-tier visibility
 (flushed rows, delete markers, compaction); a write still in the leader's hot tier is not on the
-follower until it flushes. Test: `scripts/test-read-your-writes.sh` (12 checks).
+follower until it flushes.
+
+A bare `publish_leader_catalog` right after a write can still miss it: deletes reach the catalog through
+the async mirror, which lags the commit. `koldstore.publish_for_followers(table)` runs
+`wait_for_async_mirror()` first, then publishes, and returns the same result, so the token includes the
+caller's own delete. Hot-tier inserts and updates are not covered, and a forced flush does not fix that:
+the leader keeps the flushed rows in its heap, and a follower without Spock reads its own stale heap row
+ahead of the cold copy (measured: an updated row still read the old value after a forced flush and a
+published, applied catalog). Under Spock the hot rows replicate on their own, and Spock's lag is not
+covered by the token. Test: `scripts/test-read-your-writes.sh`.
 
 ## Reap no longer starves under fast flushing (implemented)
 
