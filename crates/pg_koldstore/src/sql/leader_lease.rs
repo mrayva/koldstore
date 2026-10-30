@@ -323,6 +323,12 @@ pub(crate) fn verify_catalog_sealed(
 }
 
 fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool) -> Result<Value, String> {
+    acquire_sealed(table_oid, ttl_s, wait, None)
+}
+
+/// `verified_sha`: the catalog this node has caught up with (an election), sealed as-is instead of
+/// whatever the catalog happens to be when the claim is written.
+fn acquire_sealed(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool, verified_sha: Option<String>) -> Result<Value, String> {
     if ttl_s < 3 {
         return Err("ttl_seconds must be at least 3".into());
     }
@@ -374,7 +380,10 @@ fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool) -> Result
         holder: me.clone(),
         heartbeat_ms: now,
         ttl_s: i64::from(ttl_s),
-        sealed_sha: published_catalog_sha(table_oid)?,
+        sealed_sha: match verified_sha {
+            Some(sha) => Some(sha),
+            None => published_catalog_sha(table_oid)?,
+        },
     };
     write(&target, &claimed, PutPrecondition::CreateIfAbsent)
         .map_err(|error| format!("lost the race for lease epoch {next}: {error}"))?;
@@ -505,10 +514,52 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
         return Ok(None);
     }
     clear();
+    // Test hook: lets a deposed leader's late write land between the catch-up check and the claim.
+    let pause = crate::guc::election_claim_delay_ms();
+    if pause > 0 {
+        pgrx::log!("koldstore: election pausing {pause} ms before the claim");
+        std::thread::sleep(std::time::Duration::from_millis(u64::try_from(pause).unwrap_or(0)));
+    }
     super::table_metadata::set_follower_value(table_oid, false)?;
     super::table_metadata::set_leader_value(table_oid, true)?;
+    // Seal exactly the catalog this node verified it had caught up with, not a fresh read: a write
+    // that landed since is then ignored by followers rather than sealed in unseen.
     // A lost create-if-absent race errors here, so the caller's transaction rolls the flags back.
-    acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds(), false).map(Some)
+    let claimed = acquire_sealed(
+        table_oid,
+        crate::guc::leader_lease_ttl_seconds(),
+        false,
+        Some(koldstore_storage::content_checksum_sha256_hex(&bytes)),
+    )?;
+    settle_seal(table_oid, &t, &tgt)?;
+    Ok(Some(claimed))
+}
+
+/// Closes the window between an election's catch-up check and its claim. A deposed leader's write
+/// that landed in it is not what the claim sealed, so followers would ignore it for good while
+/// this node, which never saw it, would republish over its segments. Re-reads the catalog under
+/// the claim; if it moved, seals the new content (this node may rewrite its own epoch object),
+/// adopts it, and checks again, until the sealed catalog is the current one.
+fn settle_seal(table_oid: pgrx::pg_sys::Oid, t: &super::backup::TableTarget, tgt: &Target) -> Result<(), String> {
+    use koldstore_storage::StorageClient;
+
+    let key = super::table_metadata::leader_catalog_key(&t.namespace, &t.name);
+    let mut lease = current(tgt)?.ok_or("the lease claim vanished")?;
+    for _ in 0..5 {
+        let bytes = match tgt.client.get(&key) {
+            Ok(bytes) => bytes,
+            Err(koldstore_storage::StorageClientError::NotFound { .. }) => return Ok(()),
+            Err(error) => return Err(format!("cannot re-read the leader catalog under the claim: {error}")),
+        };
+        let sha = koldstore_storage::content_checksum_sha256_hex(&bytes);
+        if lease.sealed_sha.as_deref() == Some(sha.as_str()) {
+            return Ok(());
+        }
+        lease.sealed_sha = Some(sha);
+        write(tgt, &lease, PutPrecondition::Overwrite)?;
+        super::table_metadata::adopt_leader_catalog(table_oid)?;
+    }
+    Err("the leader catalog kept changing while the lease was being claimed; retrying later".into())
 }
 
 /// Claims the table's leader lease, or renews it when this node already holds it.

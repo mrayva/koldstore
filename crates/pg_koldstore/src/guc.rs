@@ -63,6 +63,8 @@ static LEADER_LEASE_TTL: GucSetting<i32> = GucSetting::<i32>::new(30);
 #[cfg(feature = "pg")]
 static ELECTION_PRIORITY: GucSetting<i32> = GucSetting::<i32>::new(100);
 #[cfg(feature = "pg")]
+static ELECTION_CLAIM_DELAY_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
+#[cfg(feature = "pg")]
 static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -313,6 +315,16 @@ pub fn define_gucs() {
         &ELECTION_PRIORITY,
         0,
         1000,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.election_claim_delay_ms",
+        c"Test hook: pause between an election's catch-up check and its lease claim.",
+        c"Widens the window in which a deposed leader's late catalog write can land before the claim, so tests can hit it on purpose. Leave at 0. Superuser-only.",
+        &ELECTION_CLAIM_DELAY_MS,
+        0,
+        60_000,
         GucContext::Suset,
         flags,
     );
@@ -698,6 +710,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "100",
         },
         GucDefinition {
+            name: ELECTION_CLAIM_DELAY_MS_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
             name: PUBLISHED_TOMBSTONE_LIMIT_GUC,
             internal: false,
             default_value: "10000",
@@ -894,6 +911,7 @@ pub const PUBLISHED_TOMBSTONE_LIMIT_GUC: &str = "koldstore.published_tombstone_l
 pub const AUTO_ELECT_GUC: &str = "koldstore.auto_elect";
 pub const LEADER_LEASE_TTL_GUC: &str = "koldstore.leader_lease_ttl_seconds";
 pub const ELECTION_PRIORITY_GUC: &str = "koldstore.election_priority";
+pub const ELECTION_CLAIM_DELAY_MS_GUC: &str = "koldstore.election_claim_delay_ms";
 pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
@@ -1046,6 +1064,20 @@ pub fn election_priority() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         100
+    }
+}
+
+/// Test hook: milliseconds an election pauses before claiming the lease.
+#[must_use]
+pub fn election_claim_delay_ms() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        ELECTION_CLAIM_DELAY_MS.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        0
     }
 }
 

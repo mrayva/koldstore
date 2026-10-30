@@ -613,6 +613,16 @@ pub fn publish_leader_catalog_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
 }
 
 fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
+    sync_from_leader_inner(table_oid, false)
+}
+
+/// Applies the leader catalog the way a follower does (prune, delete markers) on a node that is
+/// being promoted and so no longer carries the follower flag; no acknowledgement is recorded.
+pub(crate) fn adopt_leader_catalog(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String> {
+    sync_from_leader_inner(table_oid, true)
+}
+
+fn sync_from_leader_inner(table_oid: pgrx::pg_sys::Oid, promoting: bool) -> Result<Value, String> {
     use koldstore_storage::StorageClient;
 
     let target = super::backup::table_target(table_oid)?;
@@ -669,11 +679,11 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
     let added = take_added_ranges(&mut result);
     // Same transaction as the adoption: a failed prune rolls the sync back and the next tick
     // retries, so a follower never holds segments whose hot copies were not considered.
-    if is_follower(table_oid)? && !added.is_empty() {
+    if (promoting || is_follower(table_oid)?) && !added.is_empty() {
         let pruned = super::flush::peer_prune::prune_covered(table_oid, Some(&added))?;
         result["hot_pruned"] = pruned["hot_pruned"].clone();
     }
-    if is_follower(table_oid)? && metadata.get("tombstones").is_some() {
+    if (promoting || is_follower(table_oid)?) && metadata.get("tombstones").is_some() {
         let applied = super::flush::peer_prune::apply_leader_tombstones(table_oid, &tombstones)?;
         result["tombstones_added"] = applied["tombstones_added"].clone();
         result["tombstones_removed"] = applied["tombstones_removed"].clone();
