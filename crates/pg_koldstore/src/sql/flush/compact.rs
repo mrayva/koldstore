@@ -960,7 +960,14 @@ pub(crate) fn reap_compacted_segments(
         .map_err(|error| error.to_string())
     })??;
     let mut done: Vec<pgrx::Uuid> = Vec::with_capacity(due.len());
+    let mut checked = std::time::Instant::now();
     for (segment_id, key) in due {
+        // A reap can run long; stop as soon as the lease is gone rather than delete segments the
+        // new leader may still reference.
+        if checked.elapsed() > std::time::Duration::from_secs(1) {
+            crate::sql::leader_lease::require_lease(table_oid, "reap compacted segments")?;
+            checked = std::time::Instant::now();
+        }
         // Deletes are idempotent; a missing object is fine, any other failure leaves the row for
         // the next pass.
         match client.delete(&key) {
@@ -1022,7 +1029,12 @@ fn purge_history_segments(
     )
     .map_err(|error| error.to_string())?;
     let mut done: Vec<pgrx::Uuid> = Vec::with_capacity(due.len());
+    let mut checked = std::time::Instant::now();
     for (segment_id, key, _) in due {
+        if checked.elapsed() > std::time::Duration::from_secs(1) {
+            crate::sql::leader_lease::require_lease(table_oid, "purge history segments")?;
+            checked = std::time::Instant::now();
+        }
         match client.delete(&key) {
             Ok(()) => done.push(segment_id),
             Err(error) => pgrx::warning!("koldstore history purge: could not delete {key}: {error}"),

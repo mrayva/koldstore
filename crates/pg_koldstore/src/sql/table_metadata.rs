@@ -548,7 +548,13 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
         }
     }
     let bytes = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    // The export above can take a while; check again right before the write, and once more after
+    // it. The write itself cannot be made conditional on the lease, so readers also verify it
+    // against the checksum sealed by the successor's claim (verify_catalog_sealed).
+    super::leader_lease::require_lease(table_oid, "publish the leader catalog")?;
     koldstore_storage::publish_mutable_object(&client, &key, &bytes).map_err(|error| error.to_string())?;
+    super::leader_lease::require_lease(table_oid, "publish the leader catalog")
+        .map_err(|error| format!("{error} (the catalog was written just before the lease was lost; followers ignore it)"))?;
     Ok(json!({
         "key": key, "bytes": bytes.len(), "generation": generation,
         "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len),
@@ -583,6 +589,7 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         .get(&key)
         .map_err(|error| format!("no leader catalog at {key} ({error}); has the leader run publish_leader_catalog()?"))?;
     let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
+    super::leader_lease::verify_catalog_sealed(table_oid, &bytes, metadata["lease_epoch"].as_i64())?;
     // Epoch fencing: never move back to a catalog from a deposed leader.
     if let Some(epoch) = metadata["lease_epoch"].as_i64() {
         let seen = count(
@@ -783,4 +790,19 @@ pub fn set_table_follower_pg(table_name: pgrx::PgRelation, enabled: bool) -> boo
     authorize(Some(oid), "change follower mode");
     set_follower_value(oid, enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_follower failed: {error}"))
+}
+
+/// Etag of the published leader catalog, `None` when there is none. The sync worker compares it
+/// with the one it recorded after its own publish to notice a catalog overwritten by a deposed
+/// leader.
+pub(crate) fn catalog_etag(table_oid: pgrx::pg_sys::Oid) -> Result<Option<String>, String> {
+    use koldstore_storage::StorageClient;
+
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    match client.head(&leader_catalog_key(&target.namespace, &target.name)) {
+        Ok(object) => Ok(object.etag),
+        Err(koldstore_storage::StorageClientError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }

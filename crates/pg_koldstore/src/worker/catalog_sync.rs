@@ -70,6 +70,9 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
     let mut delay = FIRST_RUN_DELAY;
     // Generation last published per leader table, so an idle table costs one cheap query.
     let mut published: HashMap<u32, String> = HashMap::new();
+    // Etag of the catalog object right after our own publish: a different one later means a
+    // deposed leader overwrote it (followers ignore that content), so it is published again.
+    let mut etags: HashMap<u32, Option<String>> = HashMap::new();
     while super::wait_latch_interruptible(Some(delay)) {
         delay = interval;
         let tables = match super::txn::run_recoverable("catalog sync list", list_tables) {
@@ -80,6 +83,7 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
             }
         };
         published.retain(|oid, _| tables.iter().any(|(table, role)| table == oid && *role == Role::Leader));
+        etags.retain(|oid, _| published.contains_key(oid));
         for (table_oid, role) in tables {
             let result = match role {
                 Role::Follower => {
@@ -97,11 +101,24 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
                     } else {
                         renew_lease(table_oid)?;
                     }
-                    publish_one(table_oid, published.get(&table_oid).map(String::as_str))
+                    let clobbered = etags.get(&table_oid).is_some_and(|recorded| {
+                        crate::sql::table_metadata::catalog_etag(pgrx::pg_sys::Oid::from(table_oid))
+                            .is_ok_and(|current| &current != recorded)
+                    });
+                    if clobbered {
+                        pgrx::warning!(
+                            "koldstore catalog sync: database={database} table oid {table_oid} the published catalog changed behind this leader; publishing again"
+                        );
+                    }
+                    publish_one(table_oid, if clobbered { None } else { published.get(&table_oid).map(String::as_str) })
                 })
                 .map(|outcome| {
                     outcome.map(|(fingerprint, summary)| {
                         published.insert(table_oid, fingerprint);
+                        let etag = super::txn::run_recoverable("catalog etag", || {
+                            crate::sql::table_metadata::catalog_etag(pgrx::pg_sys::Oid::from(table_oid))
+                        });
+                        etags.insert(table_oid, etag.ok().flatten());
                         summary
                     })
                 }),

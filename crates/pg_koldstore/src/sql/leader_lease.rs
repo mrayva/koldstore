@@ -53,6 +53,9 @@ struct Lease {
     holder: String,
     heartbeat_ms: i64,
     ttl_s: i64,
+    /// SHA-256 of the published leader catalog when this epoch was claimed: the last catalog the
+    /// previous epoch is allowed to have written.
+    sealed_sha: Option<String>,
 }
 
 impl Lease {
@@ -139,12 +142,14 @@ fn current(target: &Target) -> Result<Option<Lease>, String> {
         holder: value["holder"].as_str().unwrap_or_default().to_string(),
         heartbeat_ms: value["heartbeat_ms"].as_i64().unwrap_or(0),
         ttl_s: value["ttl_s"].as_i64().unwrap_or(0),
+        sealed_sha: value["sealed_sha"].as_str().map(str::to_string),
     }))
 }
 
 fn write(target: &Target, lease: &Lease, mode: PutPrecondition) -> Result<(), String> {
     let body = serde_json::to_vec(&json!({
         "epoch": lease.epoch, "holder": lease.holder, "heartbeat_ms": lease.heartbeat_ms, "ttl_s": lease.ttl_s,
+        "sealed_sha": lease.sealed_sha,
     }))
     .map_err(|error| error.to_string())?;
     target
@@ -199,6 +204,51 @@ pub(crate) fn published_epoch(table_oid: pgrx::pg_sys::Oid) -> Result<Option<i64
     local_epoch(table_oid)
 }
 
+/// SHA-256 of the leader catalog object as it is now, `None` when none was published.
+fn published_catalog_sha(table_oid: pgrx::pg_sys::Oid) -> Result<Option<String>, String> {
+    let t = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&t.storage.storage_id)?;
+    match client.get(&super::table_metadata::leader_catalog_key(&t.namespace, &t.name)) {
+        Ok(bytes) => Ok(Some(koldstore_storage::content_checksum_sha256_hex(&bytes))),
+        Err(koldstore_storage::StorageClientError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(format!("cannot seal the previous epoch's catalog: {error}")),
+    }
+}
+
+/// Fencing check for a reader of the leader catalog. Storage cannot make "still the leader" and
+/// "write the catalog" one atomic step, so a deposed leader that passed its lease check and then
+/// stalled can still overwrite the catalog after its successor claimed the lease. Claiming epoch
+/// N+1 records the checksum of the catalog as it was, so a catalog stamped with epoch N is
+/// accepted only if it is exactly that content; anything written later is ignored.
+pub(crate) fn verify_catalog_sealed(
+    table_oid: pgrx::pg_sys::Oid,
+    catalog_bytes: &[u8],
+    catalog_epoch: Option<i64>,
+) -> Result<(), String> {
+    let Some(epoch) = catalog_epoch else {
+        return Ok(());
+    };
+    let target = target(table_oid)?;
+    let key = epoch_key(&target.prefix, epoch + 1);
+    let bytes = match target.client.get(&key) {
+        Ok(bytes) => bytes,
+        Err(koldstore_storage::StorageClientError::NotFound { .. }) => return Ok(()),
+        Err(error) => return Err(format!("cannot read lease epoch {}: {error}", epoch + 1)),
+    };
+    let sealed = serde_json::from_slice::<Value>(&bytes)
+        .map_err(|error| format!("lease object is not valid: {error}"))?["sealed_sha"]
+        .as_str()
+        .map(str::to_string);
+    match sealed {
+        Some(sha) if sha != koldstore_storage::content_checksum_sha256_hex(catalog_bytes) => Err(format!(
+            "the leader catalog (lease epoch {epoch}) was modified after lease epoch {} was claimed; \
+             ignoring it until the new leader publishes",
+            epoch + 1
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool) -> Result<Value, String> {
     if ttl_s < 3 {
         return Err("ttl_seconds must be at least 3".into());
@@ -246,7 +296,13 @@ fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool) -> Result
             None => break 1,
         }
     };
-    let claimed = Lease { epoch: next, holder: me.clone(), heartbeat_ms: now, ttl_s: i64::from(ttl_s) };
+    let claimed = Lease {
+        epoch: next,
+        holder: me.clone(),
+        heartbeat_ms: now,
+        ttl_s: i64::from(ttl_s),
+        sealed_sha: published_catalog_sha(table_oid)?,
+    };
     write(&target, &claimed, PutPrecondition::CreateIfAbsent)
         .map_err(|error| format!("lost the race for lease epoch {next}: {error}"))?;
     set_local_epoch(table_oid, Some(next))?;
