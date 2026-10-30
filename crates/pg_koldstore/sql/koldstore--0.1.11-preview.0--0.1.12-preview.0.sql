@@ -645,6 +645,15 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'acquire_leader_lease_pg_wrapper';
 
+CREATE FUNCTION koldstore."wait_for_publication"(
+	"table_name" regclass,
+	"publication" bigint,
+	"timeout_ms" int DEFAULT 10000
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'wait_for_publication_pg_wrapper';
+
 CREATE FUNCTION koldstore."leader_lease_status"(
 	"table_name" regclass
 ) RETURNS jsonb

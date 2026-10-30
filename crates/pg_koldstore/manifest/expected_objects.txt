@@ -211,3 +211,4 @@ function validate_cold_storage(table_name regclass DEFAULT NULL::regclass, deep 
 function validate_sql_objects() returns jsonb [validate_sql_objects_pg_wrapper]
 function verify_table_integrity(table_name regclass) returns jsonb security definer [verify_table_integrity_pg_wrapper]
 function wait_for_async_mirror() returns bigint [wait_for_async_mirror_wrapper]
+function wait_for_publication(table_name regclass, publication bigint, timeout_ms integer DEFAULT 10000) returns jsonb security definer [wait_for_publication_pg_wrapper]

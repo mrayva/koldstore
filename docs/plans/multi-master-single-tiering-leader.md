@@ -125,3 +125,14 @@ Do stages 0 to 2 only if the goal is "followers read the leader's cold tier". Do
 before deciding the per-row version comparison, since it determines whether segments need a row
 hash column. Until then the existing per-node tiering plus the reconciler remains the supported
 multi-master mode.
+
+## Read-your-writes (implemented)
+
+Every `publish_leader_catalog` stamps the catalog with a `publication` number, one higher than the
+catalog it replaces, so it keeps increasing across leaders. The call returns it. A client that wrote
+on the leader passes that number to `koldstore.wait_for_publication(table, n)` on a follower, which
+polls the shared catalog, syncs as soon as it reaches `n`, and records `seen_publication` in
+`koldstore.schemas.options`. A follower that has already applied `n` returns without a sync; a
+publication that never arrives is an error after `timeout_ms`. This covers cold-tier visibility
+(flushed rows, delete markers, compaction); a write still in the leader's hot tier is not on the
+follower until it flushes. Test: `scripts/test-read-your-writes.sh` (12 checks).

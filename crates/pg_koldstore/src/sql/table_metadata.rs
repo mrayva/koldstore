@@ -549,10 +549,14 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     }
     let key = leader_catalog_key(&target.namespace, &target.name);
     let generation = max_generation(&metadata);
+    // Every publish gets the next publication number, across leaders (the successor reads the
+    // catalog it follows), so a client can wait for a follower to reach the state it just wrote.
+    let mut publication = 1_i64;
     // Fencing floor: a node whose catalog is behind what is already published is not the leader
     // any more (or has not caught up) and must not move the shared catalog backwards.
     if let Ok(existing) = client.get(&key) {
         if let Ok(existing) = serde_json::from_slice::<Value>(&existing) {
+            publication = existing["publication"].as_i64().unwrap_or(0).saturating_add(1);
             if let (Some(mine), Some(theirs)) = (epoch, existing["lease_epoch"].as_i64()) {
                 if theirs > mine {
                     return Err(format!(
@@ -568,6 +572,7 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
             }
         }
     }
+    metadata["publication"] = json!(publication);
     let bytes = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
     // The export above can take a while; check again right before the write, and once more after
     // it. The write itself cannot be made conditional on the lease, so readers also verify it
@@ -583,7 +588,7 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
         }
     }
     Ok(json!({
-        "key": key, "bytes": bytes.len(), "generation": generation,
+        "key": key, "bytes": bytes.len(), "generation": generation, "publication": publication,
         "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len)
             + metadata["tombstone_chunks"].as_array().map_or(0, |c| c.iter().filter_map(|c| c["count"].as_u64()).sum::<u64>() as usize),
         "tombstones_truncated": metadata["tombstones_truncated"].as_bool().unwrap_or(false),
@@ -652,6 +657,15 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         }
     }
     let mut result = sync_value(table_oid, &metadata)?;
+    if let Some(publication) = metadata["publication"].as_i64() {
+        pgrx::Spi::run_with_args(
+            "UPDATE koldstore.schemas SET options = jsonb_set(coalesce(options, '{}'::jsonb), '{seen_publication}', to_jsonb($2::bigint), true) \
+             WHERE table_oid = $1 AND active",
+            &[DatumWithOid::from(table_oid), DatumWithOid::from(publication)],
+        )
+        .map_err(|error| error.to_string())?;
+        result["publication"] = json!(publication);
+    }
     let added = take_added_ranges(&mut result);
     // Same transaction as the adoption: a failed prune rolls the sync back and the next tick
     // retries, so a follower never holds segments whose hot copies were not considered.
@@ -716,6 +730,73 @@ pub fn sync_from_leader_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
     sync_from_leader_value(oid)
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("sync from leader failed: {error}"))
+}
+
+/// Blocks until this follower has applied the leader publication numbered `want` or later, then
+/// returns the sync report (`{publication, waited_ms, synced, ...}`).
+fn wait_for_publication_value(table_oid: pgrx::pg_sys::Oid, want: i64, timeout_ms: i32) -> Result<Value, String> {
+    use koldstore_storage::StorageClient;
+
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    let key = leader_catalog_key(&target.namespace, &target.name);
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
+    loop {
+        let seen = count(
+            "SELECT (SELECT coalesce((options->>'seen_publication')::bigint, 0) FROM koldstore.schemas WHERE table_oid = $1 AND active)",
+            &[DatumWithOid::from(table_oid)],
+        )?;
+        let waited = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        if seen >= want {
+            return Ok(json!({ "publication": seen, "waited_ms": waited, "synced": false }));
+        }
+        let published = client
+            .get(&key)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|catalog| catalog["publication"].as_i64())
+            .unwrap_or(0);
+        if published >= want {
+            let mut result = sync_from_leader_value(table_oid)?;
+            result["waited_ms"] = json!(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
+            result["synced"] = json!(true);
+            return Ok(result);
+        }
+        if started.elapsed() >= deadline {
+            return Err(format!(
+                "timed out after {timeout_ms} ms waiting for leader publication {want}; the leader has published {published} \
+                 and this follower has applied {seen}"
+            ));
+        }
+        pgrx::check_for_interrupts!();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Follower side of read-your-writes: waits until the leader publication numbered `publication`
+/// has been applied here.
+///
+/// SQL contract: `koldstore.wait_for_publication(table_name regclass, publication bigint,
+/// timeout_ms integer default 10000) → jsonb`.
+///
+/// After a write on the leader, `koldstore.publish_leader_catalog()` there returns the number of
+/// the publication that contains it (`publication`). Calling this on a follower with that number
+/// returns once the follower has synced that publication or a later one, so a read that follows
+/// sees the write (a flushed row, a delete marker, a compaction). It polls the shared catalog and
+/// syncs at once rather than waiting for the sync worker's next tick; it errors when the
+/// timeout passes first.
+#[pgrx::pg_extern(name = "wait_for_publication", schema = "koldstore", security_definer)]
+pub fn wait_for_publication_pg(
+    table_name: pgrx::PgRelation,
+    publication: i64,
+    timeout_ms: pgrx::default!(i32, 10000),
+) -> pgrx::JsonB {
+    let oid = table_name.oid();
+    authorize(Some(oid), "wait for publication");
+    wait_for_publication_value(oid, publication, timeout_ms)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("wait for publication failed: {error}"))
 }
 
 /// Whether `table_oid` is marked as a follower of a leader's cold tier.

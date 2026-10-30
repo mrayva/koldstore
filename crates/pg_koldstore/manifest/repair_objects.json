@@ -1298,6 +1298,12 @@
             "create": "CREATE OR REPLACE FUNCTION koldstore.renew_leader_lease(table_name regclass)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$renew_leader_lease_pg_wrapper$function$\n",
             "revoke_public": false
         },
+        "function wait_for_publication(table_name regclass, publication bigint, timeout_ms integer DEFAULT 10000) returns jsonb security definer [wait_for_publication_pg_wrapper]": {
+            "add": "koldstore.wait_for_publication(table_name regclass, publication bigint, timeout_ms integer)",
+            "name": "wait_for_publication",
+            "create": "CREATE OR REPLACE FUNCTION koldstore.wait_for_publication(table_name regclass, publication bigint, timeout_ms integer DEFAULT 10000)\n RETURNS jsonb\n LANGUAGE c\n STRICT SECURITY DEFINER\nAS '$libdir/koldstore', $function$wait_for_publication_pg_wrapper$function$\n",
+            "revoke_public": false
+        },
         "function sync_from_leader(table_name regclass) returns jsonb security definer [sync_from_leader_pg_wrapper]": {
             "add": "koldstore.sync_from_leader(table_name regclass)",
             "name": "sync_from_leader",
