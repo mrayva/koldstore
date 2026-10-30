@@ -127,8 +127,15 @@ say "6: a node that stops following no longer holds reaping back"
 reapA >/dev/null   # drain what the follower has already moved past
 round 6
 has "refused while the follower lags" "$(reapA)" "has not caught up"
+seen() { ls $SHARE/_follower_seen/public/t/ 2>/dev/null | wc -l; }
+check "the leader recorded when it first saw the follower's acknowledgement" "$(seen)" "1"
 q $PB spike -c "SELECT koldstore.set_table_follower('t'::regclass, false)" >/dev/null
 check "turning follower mode off removed the acknowledgement" "$(acks)" "0"
+check "and the leader's observation record" "$(seen)" "0"
+echo '{"observed_by":"x","generation":1,"synced_ms":1,"seen_ms":1}' > $SHARE/_follower_seen/public/t/orphan.json 2>/dev/null || { mkdir -p $SHARE/_follower_seen/public/t; echo '{"observed_by":"x","generation":1,"synced_ms":1,"seen_ms":1}' > $SHARE/_follower_seen/public/t/orphan.json; }
+check "an orphan observation record is there" "$(seen)" "1"
+reapA >/dev/null
+check "the leader's next follower check swept the orphan" "$(seen)" "0"
 OUT=$(reapA)
 if echo "$OUT" | grep -q ERROR; then fail "reap after the follower left: $OUT"; else pass "reap proceeds once the follower left"; fi
 

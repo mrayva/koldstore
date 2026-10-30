@@ -17,7 +17,9 @@
 //! The acknowledgement is written after the follower's transaction commits, so a sync that rolled
 //! back never claims a generation the node does not hold. `set_table_follower(true)` records one at
 //! once, so the leader waits for a follower even before its first sync; `set_table_follower(false)`
-//! (promotion or decommissioning) removes it, so a node that left does not hold reaping back.
+//! (promotion or decommissioning) removes it, so a node that left does not hold reaping back. It also
+//! removes the leader's observation record of that node, and the leader sweeps any observation record
+//! left without an acknowledgement each time it checks the followers.
 
 use std::sync::Mutex;
 
@@ -83,6 +85,8 @@ pub(crate) fn forget(table_oid: pgrx::pg_sys::Oid) {
         let target = super::backup::table_target(table_oid)?;
         let client = super::backup::storage_client(&target.storage.storage_id)?;
         let node = super::leader_lease::node_id()?;
+        // The leader's observation of this node goes too, or it would outlive the follower.
+        let _ = client.delete(&seen_key(&target.namespace, &target.name, &node));
         client
             .delete(&format!("{}{node}.json", prefix(&target.namespace, &target.name)))
             .map_err(|error| error.to_string())
@@ -130,6 +134,23 @@ pub(crate) fn record(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<()
     Ok(())
 }
 
+/// Deletes the observation records of nodes that no longer have an acknowledgement (a follower that
+/// left, or whose own cleanup failed). A node that comes back writes a new acknowledgement and starts
+/// at age zero either way, so nothing is lost. Best effort.
+fn sweep_observations(client: &impl StorageClient, namespace: &str, name: &str, acks: &[koldstore_storage::StorageObject]) {
+    let ack_prefix = prefix(namespace, name);
+    let seen_prefix = seen_key(namespace, name, "");
+    let seen_prefix = seen_prefix.trim_end_matches(".json");
+    let Ok(seen) = client.list(seen_prefix) else { return };
+    for object in seen {
+        let Some(node) = object.key.strip_prefix(seen_prefix).and_then(|rest| rest.strip_suffix(".json")) else { continue };
+        let acked = format!("{ack_prefix}{node}.json");
+        if !acks.iter().any(|ack| ack.key == acked) {
+            let _ = client.delete(&object.key);
+        }
+    }
+}
+
 /// Live followers whose acknowledged generation is below `generation`. Empty when the check is off
 /// (`koldstore.follower_ack_max_age_seconds = 0`).
 pub(crate) fn laggards(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<Vec<Laggard>, String> {
@@ -142,10 +163,11 @@ pub(crate) fn laggards(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<
     let now = super::leader_lease::now_ms();
     let me = super::leader_lease::node_id()?;
     let mut out = Vec::new();
-    for object in client
+    let acks = client
         .list(&prefix(&target.namespace, &target.name))
-        .map_err(|error| error.to_string())?
-    {
+        .map_err(|error| error.to_string())?;
+    sweep_observations(&client, &target.namespace, &target.name, &acks);
+    for object in acks {
         let Ok(bytes) = client.get(&object.key) else { continue };
         let Ok(ack) = serde_json::from_slice::<Value>(&bytes) else { continue };
         let node = ack["node"].as_str().unwrap_or_default().to_string();

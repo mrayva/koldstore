@@ -184,6 +184,12 @@ not seen the acknowledgement before starts at zero, so a new leader waits one fu
 `follower_ack_max_age_seconds` before writing off a follower. Test:
 `scripts/test-reap-follower-guard.sh` section 8 (clock decades behind and far ahead).
 
+Those observation records used to outlive a follower that left. `set_table_follower(false)` now removes
+the node's record along with its acknowledgement, and every follower check on the leader deletes any
+record whose node has no acknowledgement left (covers a follower that was removed some other way). A
+node that returns writes a new acknowledgement and starts at age zero, so nothing is lost. Test:
+`scripts/test-reap-follower-guard.sh` section 6.
+
 ## Closing the claim window (implemented)
 
 An election checked that the node had caught up with the leader catalog, then (later) read the
