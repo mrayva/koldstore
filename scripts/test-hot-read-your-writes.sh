@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Hot-tier read-your-writes: hot rows reach a follower through replication, so the leader's
 # publish_for_followers() also returns the WAL position (lsn) and wait_for_replication() on the follower
-# waits until replication has applied it (two scratch clusters, native logical replication). Pass/fail.
+# waits until replication has applied it (scratch clusters: native logical replication, and a physical
+# standby). Pass/fail.
 # Usage: KOLDSTORE_PKG=<cargo pgrx package output dir> [PG_BIN=...] [HOT_TEST_DIR=...] scripts/test-hot-read-your-writes.sh
 set -uo pipefail
 PG_BIN=${PG_BIN:-/usr/lib/postgresql/18/bin}
 PKG=${KOLDSTORE_PKG:?set KOLDSTORE_PKG to the package output directory}
 PG_OPTS="-c dynamic_library_path='$PKG/usr/lib/postgresql/18/lib:\$libdir' -c extension_control_path='$PKG/usr/share/postgresql/18:\$system'"
-PA=28971; PB=28972
+PA=28971; PB=28972; PC=28973
 W=${HOT_TEST_DIR:-/tmp/ks-hot-test}
 SOCK=/tmp/ks-hot-sock; SHARE=/tmp/ks-hot-share
 q() { local port=$1 db=$2; shift 2; $PG_BIN/psql -X -q -At -h $SOCK -p $port -d $db "$@" 2>&1 | grep -v pg_circuit; }
@@ -17,7 +18,7 @@ pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAILS=$((FAILS + 1)); }
 check() { if [ "$2" = "$3" ]; then pass "$1 ($2)"; else fail "$1: got '$2', want '$3'"; fi; }
 has() { if echo "$2" | grep -q "$3"; then pass "$1"; else fail "$1: '$(echo "$2" | head -c 160)' lacks '$3'"; fi; }
-cleanup() { $PG_BIN/pg_ctl -D $W/a -m immediate stop >/dev/null 2>&1; $PG_BIN/pg_ctl -D $W/b -m immediate stop >/dev/null 2>&1; }
+cleanup() { for n in a b c; do $PG_BIN/pg_ctl -D $W/$n -m immediate stop >/dev/null 2>&1; done; }
 cleanup
 sudo rm -rf $W $SOCK $SHARE; mkdir -p $W $SOCK $SHARE; chmod 777 $SHARE
 for n in a b; do
@@ -73,6 +74,20 @@ OUT=$(q $PB spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$LSN
 T1=$(date +%s)
 has "errors on timeout" "$OUT" "timed out"
 [ $((T1 - T0)) -le 5 ] && pass "timeout honoured ($((T1 - T0)) s)" || fail "timeout took $((T1 - T0)) s"
+
+say "3: physical standby (waits for WAL replay)"
+$PG_BIN/pg_basebackup -h $SOCK -p $PA -D $W/c -R -X stream >/dev/null 2>&1 || { fail "pg_basebackup"; }
+$PG_BIN/pg_ctl -D $W/c -l $W/c.log -w -o "-p $PC -k $SOCK $PG_OPTS" start >/dev/null || { tail $W/c.log; exit 1; }
+check "standby is in recovery" "$(q $PC spike -c 'SELECT pg_is_in_recovery()' | tail -1)" "t"
+q $PC spike -c "SELECT pg_wal_replay_pause()" >/dev/null
+LSN=$(q $PA spike -c "INSERT INTO t VALUES (2001, 'standby')" -c "SELECT koldstore.publish_for_followers('t'::regclass)->>'lsn'" | tail -1)
+OUT=$(q $PC spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$LSN', 1000)")
+has "paused replay: the wait times out" "$OUT" "timed out"
+check "the standby does not have the row yet" "$(q $PC spike -c "SELECT count(*) FROM t WHERE id = 2001" | tail -1)" "0"
+q $PC spike -c "SELECT pg_wal_replay_resume()" >/dev/null
+OUT=$(q $PC spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$LSN')::text" | tail -1)
+has "after resume the wait returns" "$OUT" '"waited_ms"'
+check "the standby reads the row" "$(q $PC spike -c "SELECT v FROM t WHERE id = 2001" | tail -1)" "standby"
 
 cleanup
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi

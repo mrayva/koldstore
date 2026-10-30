@@ -158,8 +158,8 @@ n1 cut, n2's position released a wait for an n1 write at once. So the token also
 leader's `spock.local_node`), and `wait_for_replication(..., spock_node_id)` then reads that upstream's own
 `spock.progress.remote_commit_lsn`; with the link cut the wait times out as it should. Limits: the client
 must call it in the session that wrote; without a `spock_node_id` and with several native upstreams the
-highest origin decides; native logical replication is tested (`scripts/test-hot-read-your-writes.sh`), the
-physical-standby branch is not. Cold tier: `scripts/test-read-your-writes.sh`.
+highest origin decides; native logical replication and a physical standby (replay paused, then resumed) are tested (`scripts/test-hot-read-your-writes.sh`).
+Cold tier: `scripts/test-read-your-writes.sh`.
 
 ## Reap no longer starves under fast flushing (implemented)
 
