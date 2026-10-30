@@ -124,12 +124,38 @@ syncB >/dev/null
 check "a committed sync acknowledges" "$(ackgen)" "$G5"
 
 say "6: a node that stops following no longer holds reaping back"
+reapA >/dev/null   # drain what the follower has already moved past
 round 6
 has "refused while the follower lags" "$(reapA)" "has not caught up"
 q $PB spike -c "SELECT koldstore.set_table_follower('t'::regclass, false)" >/dev/null
 check "turning follower mode off removed the acknowledgement" "$(acks)" "0"
 OUT=$(reapA)
 if echo "$OUT" | grep -q ERROR; then fail "reap after the follower left: $OUT"; else pass "reap proceeds once the follower left"; fi
+
+
+say "7: a leader that keeps moving does not starve the reap"
+q $PB spike -c "SELECT koldstore.set_table_follower('t'::regclass, true)" >/dev/null
+round 7
+G7=$(publish)
+check "follower syncs to the generation that retired the first batch" "$(syncB)" "$G7"
+C7=$(compacted)
+round 8
+G8=$(publish)
+[ "$G8" -gt "$G7" ] && pass "leader moved on ($G7 -> $G8) while the follower stayed behind" || fail "leader did not move on"
+C8=$(compacted)
+[ "$C8" -gt "$C7" ] && pass "a second batch was retired ($C7 -> $C8)" || fail "no second batch retired"
+echo "retired generations: $(q $PA spike -c "SELECT string_agg(coalesce(retired_generation::text,'null'), ',' ORDER BY created_at) FROM koldstore.cold_segments WHERE status='compacted'" | tail -1); manifest: $(q $PA spike -c "SELECT generation FROM koldstore.manifest" | tail -1); acks: $(cat $SHARE/_follower_acks/public/t/*.json)"
+OUT=$(reapA)
+if echo "$OUT" | grep -q ERROR; then fail "partial reap errored: $OUT"; else pass "reap proceeds for the batch the follower has moved past"; fi
+C9=$(compacted)
+[ "$C9" -gt 0 ] && [ "$C9" -lt "$C8" ] && pass "the older batch went, the newer stays ($C8 -> $C9)" || fail "expected a partial reap, compacted $C8 -> $C9"
+has "the held-back batch still refuses once nothing else is due" "$(reapA)" "has not caught up"
+check "follower still reads correctly from the old catalog" "$(snap $PB | cut -d: -f1)" "300"
+syncB >/dev/null
+OUT=$(reapA)
+if echo "$OUT" | grep -q ERROR; then fail "reap after catch-up: $OUT"; else pass "reap proceeds after the follower syncs"; fi
+check "compacted segments gone" "$(compacted)" "0"
+check "leader and follower agree" "$(snap $PB)" "$(snap $PA)"
 
 cleanup
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi

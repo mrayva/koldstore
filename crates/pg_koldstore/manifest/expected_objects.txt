@@ -39,6 +39,7 @@ column cold_segments.min_seq bigint not null
 column cold_segments.object_etag text
 column cold_segments.pass_id uuid
 column cold_segments.path text not null
+column cold_segments.retired_generation bigint
 column cold_segments.row_count bigint not null
 column cold_segments.row_group_count integer not null
 column cold_segments.row_group_max_seqs bigint[] not null

@@ -1228,10 +1228,15 @@ WHERE cs.table_oid = $1::oid
   AND cs.created_at <= now() - make_interval(secs => $2::double precision)
   -- a backup taken before the retirement still references this object
   AND NOT EXISTS (SELECT 1 FROM koldstore.backups b WHERE b.taken_at < cs.created_at)
+  -- every live follower has applied a catalog that no longer lists it (NULL: no follower check);
+  -- rows retired before the column existed count as retired at the current generation
+  AND ($3::bigint IS NULL
+       OR COALESCE(cs.retired_generation,
+                   (SELECT max(m.generation) FROM koldstore.manifest m WHERE m.table_oid = cs.table_oid)) <= $3::bigint)
 ORDER BY cs.created_at, cs.segment_id
 "#
         ),
-        [SqlParamType::Oid, SqlParamType::Float8],
+        [SqlParamType::Oid, SqlParamType::Float8, SqlParamType::BigInt],
     )
 }
 

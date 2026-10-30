@@ -116,6 +116,26 @@ pub(crate) fn laggards(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<
     Ok(out)
 }
 
+/// The generation every live follower has acknowledged (the lowest), or `None` when there is no
+/// live follower or the check is off. A segment retired at a generation at or below it is
+/// referenced by no follower's catalog.
+pub(crate) fn ack_floor(table_oid: pgrx::pg_sys::Oid) -> Result<Option<i64>, String> {
+    // Asking for "behind i64::MAX" lists every live follower.
+    Ok(laggards(table_oid, i64::MAX)?.iter().map(|l| l.generation).min())
+}
+
+/// Compacted segments of `table_oid` that a live follower may still reference.
+pub(crate) fn held_back(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    let Some(floor) = ack_floor(table_oid)? else { return Ok(0) };
+    pgrx::Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM koldstore.cold_segments cs WHERE cs.table_oid = $1 AND cs.status = 'compacted' \
+         AND COALESCE(cs.retired_generation, (SELECT max(m.generation) FROM koldstore.manifest m WHERE m.table_oid = cs.table_oid)) > $2",
+        &[pgrx::datum::DatumWithOid::from(table_oid), pgrx::datum::DatumWithOid::from(floor)],
+    )
+    .map_err(|error| error.to_string())
+    .map(|n| n.unwrap_or(0))
+}
+
 /// Errors naming the followers still behind `table_oid`'s current generation, if any.
 pub(crate) fn require_followers_caught_up(table_oid: pgrx::pg_sys::Oid, action: &str) -> Result<(), String> {
     let generation = pgrx::Spi::get_one_with_args::<i64>(
@@ -124,6 +144,11 @@ pub(crate) fn require_followers_caught_up(table_oid: pgrx::pg_sys::Oid, action: 
     )
     .map_err(|error| error.to_string())?
     .unwrap_or(0);
+    require_followers_caught_up_to(table_oid, action, generation)
+}
+
+/// Errors naming the followers still behind `generation`, if any.
+pub(crate) fn require_followers_caught_up_to(table_oid: pgrx::pg_sys::Oid, action: &str, generation: i64) -> Result<(), String> {
     let behind = laggards(table_oid, generation)?;
     if behind.is_empty() {
         return Ok(());

@@ -674,3 +674,7 @@ CREATE FUNCTION koldstore."renew_leader_lease"(
 STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'renew_leader_lease_pg_wrapper';
+
+-- Manifest generation at which a compaction stopped listing the segment; the reaper deletes it
+-- once every live follower has acknowledged that generation, however far the leader has moved on.
+ALTER TABLE koldstore.cold_segments ADD COLUMN IF NOT EXISTS retired_generation bigint;

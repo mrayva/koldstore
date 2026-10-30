@@ -234,6 +234,8 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   -- Scope this segment's rows belong to (user-scoped tables, see ADR-010). NULL means table-wide.
   scope_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
+  -- Manifest generation at which compaction retired the segment (status 'compacted').
+  retired_generation bigint,
   CHECK (min_seq > 0 AND min_seq <= max_seq),
   CHECK (row_count > 0),
   CHECK (byte_size > 0),

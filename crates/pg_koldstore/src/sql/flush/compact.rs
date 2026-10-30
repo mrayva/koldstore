@@ -942,9 +942,12 @@ pub(crate) fn reap_compacted_segments(
     let purged_history = purge_history_segments(table_oid, client)?;
     let statement = koldstore_catalog::queries::plan_compacted_segments_past_grace()
         .map_err(|error| error.to_string())?;
+    // A follower still on a catalog that lists a retired segment keeps it; the rest go.
+    let floor = crate::sql::follower_ack::ack_floor(table_oid)?;
     let args = [
         DatumWithOid::from(table_oid),
         DatumWithOid::from(f64::from(grace_seconds.max(0))),
+        DatumWithOid::from(floor),
     ];
     let due: Vec<(pgrx::Uuid, String)> = crate::catalog::owner::with_extension_owner(|| {
         crate::spi::execute_prepared(&statement, &args, |tuples| {
@@ -1059,7 +1062,6 @@ pub(crate) fn reap_table(
 ) -> Result<i64, String> {
     crate::sql::table_metadata::refuse_on_follower(table_oid, "reap compacted segments")?;
     crate::sql::leader_lease::require_lease(table_oid, "reap compacted segments")?;
-    crate::sql::follower_ack::require_followers_caught_up(table_oid, "reap compacted segments")?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let client = crate::object_store::open_managed_object_store_client(
         &storage.storage_type,
@@ -1068,7 +1070,18 @@ pub(crate) fn reap_table(
         &storage.config,
     )
     .map_err(|error| error.to_string())?;
-    reap_compacted_segments(table_oid, &client, grace_seconds)
+    let reaped = reap_compacted_segments(table_oid, &client, grace_seconds)?;
+    // Nothing could go because a follower has not caught up: say which one.
+    if reaped == 0 && crate::sql::follower_ack::held_back(table_oid)? > 0 {
+        let generation = pgrx::Spi::get_one_with_args::<i64>(
+            "SELECT COALESCE(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = $1",
+            &[DatumWithOid::from(table_oid)],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+        crate::sql::follower_ack::require_followers_caught_up_to(table_oid, "reap compacted segments", generation)?;
+    }
+    Ok(reaped)
 }
 
 /// Grace the maintenance worker applies before deleting a retired segment's object.
@@ -1105,11 +1118,12 @@ pub(crate) fn reap_tick() -> Result<Option<Value>, String> {
     }
     let mut reaped = 0_i64;
     for table_oid in tables {
-        // A follower still reading older segments defers the pass; the next tick retries.
-        if crate::sql::follower_ack::require_followers_caught_up(table_oid, "reap compacted segments").is_err() {
-            continue;
+        // A follower still reading older segments defers its share of the pass; the next tick retries.
+        match reap_table(table_oid, grace) {
+            Ok(n) => reaped += n,
+            Err(error) if error.contains("has not caught up") => {}
+            Err(error) => return Err(error),
         }
-        reaped += reap_table(table_oid, grace)?;
     }
     Ok(Some(json!({ "reaped_segments": reaped })))
 }

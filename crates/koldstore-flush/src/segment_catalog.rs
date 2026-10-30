@@ -401,6 +401,7 @@ WITH cas AS (
 retired AS (
     UPDATE koldstore.cold_segments
     SET status = 'compacted',
+        retired_generation = $3::bigint,
         created_at = now()
     WHERE table_oid = $1::oid
       AND scope_key = ''

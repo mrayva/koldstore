@@ -136,3 +136,15 @@ polls the shared catalog, syncs as soon as it reaches `n`, and records `seen_pub
 publication that never arrives is an error after `timeout_ms`. This covers cold-tier visibility
 (flushed rows, delete markers, compaction); a write still in the leader's hot tier is not on the
 follower until it flushes. Test: `scripts/test-read-your-writes.sh` (12 checks).
+
+## Reap no longer starves under fast flushing (implemented)
+
+The reap guard used to compare every live follower with the table's *current* generation, so a
+leader that flushed faster than followers synced always had someone "behind" and never reaped.
+Compaction now records the manifest generation that stopped listing each segment
+(`cold_segments.retired_generation`). A segment is deletable once every live follower has
+acknowledged that generation, however far the leader has moved since; the lowest live
+acknowledgement is the floor. Segments retired before the column existed count as retired at the
+current generation (the old, stricter behaviour). A manual reap that can delete nothing because of
+a lagging follower still errors and names it; one that can delete some does so. Compaction's own
+reap pass is now guarded too. Test: `scripts/test-reap-follower-guard.sh` section 7.
