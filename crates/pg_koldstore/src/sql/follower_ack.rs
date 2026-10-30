@@ -7,6 +7,13 @@
 //! acknowledgement is behind the leader's own generation. A follower that never acknowledged is not
 //! known to the leader, and one that went silent for longer than the max age is treated as gone.
 //!
+//! "Silent" is judged on the leader's own clock alone. The acknowledgement carries the follower's
+//! wall-clock `synced_ms`, but comparing that with the leader's clock would let a skewed follower
+//! look dead (and its segments get reaped) or immortal. Instead the leader records when it first saw
+//! each distinct acknowledgement in `_follower_seen/<schema>/<table>/<node>.json` and measures age
+//! from there. That record lives on the shared storage so every backend, a restart, and a successor
+//! leader share it (a new observer starts the age at zero, the conservative side).
+//!
 //! The acknowledgement is written after the follower's transaction commits, so a sync that rolled
 //! back never claims a generation the node does not hold. `set_table_follower(true)` records one at
 //! once, so the leader waits for a follower even before its first sync; `set_table_follower(false)`
@@ -23,6 +30,41 @@ const REFRESH_MS: i64 = 30_000;
 
 /// `(table oid, generation, written at)` of the acknowledgements this process wrote.
 static WRITTEN: Mutex<Vec<(u32, i64, i64)>> = Mutex::new(Vec::new());
+
+fn seen_key(namespace: &str, name: &str, node: &str) -> String {
+    format!("_follower_seen/{namespace}/{name}/{node}.json")
+}
+
+/// Milliseconds this leader has seen the acknowledgement `(generation, synced_ms)` of `node`
+/// unchanged; 0 when it is new to this leader.
+fn observed_age_ms(
+    client: &impl StorageClient,
+    key: &str,
+    me: &str,
+    generation: i64,
+    synced_ms: i64,
+    now: i64,
+) -> i64 {
+    let previous = client
+        .get(key)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(seen) = previous {
+        if seen["observed_by"].as_str() == Some(me)
+            && seen["generation"].as_i64() == Some(generation)
+            && seen["synced_ms"].as_i64() == Some(synced_ms)
+        {
+            return now.saturating_sub(seen["seen_ms"].as_i64().unwrap_or(now));
+        }
+    }
+    let body = json!({ "observed_by": me, "generation": generation, "synced_ms": synced_ms, "seen_ms": now });
+    if let Ok(bytes) = serde_json::to_vec(&body) {
+        if let Err(error) = client.put(key, &bytes, PutPrecondition::Overwrite) {
+            pgrx::log!("koldstore: could not record the follower observation {key}: {error}");
+        }
+    }
+    0
+}
 
 pub(crate) struct Laggard {
     pub node: String,
@@ -108,8 +150,18 @@ pub(crate) fn laggards(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<
         let Ok(ack) = serde_json::from_slice::<Value>(&bytes) else { continue };
         let node = ack["node"].as_str().unwrap_or_default().to_string();
         let held = ack["generation"].as_i64().unwrap_or(0);
-        let age = now.saturating_sub(ack["synced_ms"].as_i64().unwrap_or(0));
-        if node != me && held < generation && age <= max_age_ms {
+        if node == me || held >= generation {
+            continue;
+        }
+        let age = observed_age_ms(
+            &client,
+            &seen_key(&target.namespace, &target.name, &node),
+            &me,
+            held,
+            ack["synced_ms"].as_i64().unwrap_or(0),
+            now,
+        );
+        if age <= max_age_ms {
             out.push(Laggard { node, generation: held, age_s: age / 1000 });
         }
     }

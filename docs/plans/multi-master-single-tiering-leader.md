@@ -148,3 +148,14 @@ acknowledgement is the floor. Segments retired before the column existed count a
 current generation (the old, stricter behaviour). A manual reap that can delete nothing because of
 a lagging follower still errors and names it; one that can delete some does so. Compaction's own
 reap pass is now guarded too. Test: `scripts/test-reap-follower-guard.sh` section 7.
+
+## Follower liveness without trusting its clock (implemented)
+
+The reap guard used to age a follower's acknowledgement by `now - synced_ms`, where `synced_ms` is
+the follower's wall clock. A follower running behind looked dead (its segments could be reaped from
+under it); one running ahead never expired. The leader now records the first time it saw each
+distinct acknowledgement in `_follower_seen/<ns>/<name>/<node>.json` (its own clock only, on the
+shared storage so every backend and a restart share it) and ages from there. An observer that has
+not seen the acknowledgement before starts at zero, so a new leader waits one full
+`follower_ack_max_age_seconds` before writing off a follower. Test:
+`scripts/test-reap-follower-guard.sh` section 8 (clock decades behind and far ahead).

@@ -157,5 +157,25 @@ if echo "$OUT" | grep -q ERROR; then fail "reap after catch-up: $OUT"; else pass
 check "compacted segments gone" "$(compacted)" "0"
 check "leader and follower agree" "$(snap $PB)" "$(snap $PA)"
 
+
+say "8: a follower's skewed clock neither condemns it nor shields it"
+skew() { python3 -I -c "
+import json,glob
+f=glob.glob('$SHARE/_follower_acks/public/t/*.json')[0]
+a=json.load(open(f)); a['synced_ms']=$1; json.dump(a,open(f,'w'))"; }
+syncB >/dev/null
+round 9
+publish >/dev/null
+[ "$(compacted)" -gt 0 ] && pass "a batch is waiting on the follower" || fail "nothing retired"
+skew 1
+has "an ack stamped by a clock decades behind still counts as live" "$(reapA)" "has not caught up"
+skew 4102444800000
+has "an ack stamped by a clock far ahead is refused too" "$(reapA)" "has not caught up"
+sleep 2
+q $PA spike -c "SET koldstore.follower_ack_max_age_seconds=1; SELECT koldstore.reap_compacted_segments('t'::regclass, 0)" > $W/reap8.out
+if grep -q ERROR $W/reap8.out; then fail "a silent follower never expires when its clock runs ahead: $(cat $W/reap8.out)"; else pass "it expires once the leader has watched it stay silent"; fi
+syncB >/dev/null
+check "follower converges" "$(snap $PB)" "$(snap $PA)"
+
 cleanup
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi
