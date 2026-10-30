@@ -152,8 +152,13 @@ it: `pg_last_wal_replay_lsn()` on a physical standby, otherwise the highest `rem
 `pg_replication_origin_status`, which native logical replication and Spock both advance. The commit end,
 not the current position, is the token because an origin position stops at the last replicated commit: the
 current position is not reached on an idle table (first attempt: every wait timed out although the rows had
-arrived). Limits: the client must call it in the session that wrote; with several upstreams the highest
-origin decides; only native logical replication was tested (`scripts/test-hot-read-your-writes.sh`), the
+arrived). Spock check (3-node mesh gate): 15 leader writes were readable on both followers right after the
+wait with no misses, but on n3, which has two upstreams, the highest-origin rule was wrong: with n3's link to
+n1 cut, n2's position released a wait for an n1 write at once. So the token also carries `spock_node_id` (the
+leader's `spock.local_node`), and `wait_for_replication(..., spock_node_id)` then reads that upstream's own
+`spock.progress.remote_commit_lsn`; with the link cut the wait times out as it should. Limits: the client
+must call it in the session that wrote; without a `spock_node_id` and with several native upstreams the
+highest origin decides; native logical replication is tested (`scripts/test-hot-read-your-writes.sh`), the
 physical-standby branch is not. Cold tier: `scripts/test-read-your-writes.sh`.
 
 ## Reap no longer starves under fast flushing (implemented)

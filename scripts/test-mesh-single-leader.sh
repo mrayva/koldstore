@@ -136,6 +136,28 @@ exc() { for i in 1 2 3; do echo "  n$i spock exceptions: $(q ${ports[$((i-1))]} 
 exc
 heal
 converge "concurrent writes converge after the reconciler" "1 2 3" 20
+say "hot-tier read-your-writes over Spock: publish_for_followers on the leader, wait_for_replication on the followers"
+HOTMISS=0
+for k in $(seq 1 15); do
+  OUT=$(q $P1 spike -c "INSERT INTO t VALUES ($((50000+k)), 'ryw$k')" -c "SELECT koldstore.publish_for_followers('t'::regclass)->>'lsn'" | tail -1)
+  NID=$(q $P1 spike -c "SELECT node_id FROM spock.local_node" | tail -1)
+  for P in $P2 $P3; do
+    q $P spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$OUT', 15000, '$NID') IS NOT NULL" >/dev/null
+    [ "$(q $P spike -c "SELECT v FROM t WHERE id = $((50000+k))")" = "ryw$k" ] || HOTMISS=$((HOTMISS+1))
+  done
+done
+check "15 leader writes were readable on both followers right after the wait ($HOTMISS misses)" test "$HOTMISS" = 0
+# n3 has two upstreams (n1, n2): with n1's subscription cut, an n2 position must not release a wait for an n1 write.
+q $P3 spike -c "SELECT spock.sub_disable('s3_1')" >/dev/null
+OUT=$(q $P1 spike -c "INSERT INTO t VALUES (50100, 'cut')" -c "SELECT koldstore.publish_for_followers('t'::regclass)->>'lsn'" | tail -1)
+q $P2 spike -c "INSERT INTO t VALUES (50101, 'via-n2')" >/dev/null; settle
+R0=$(q $P3 spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$OUT', 2000)")
+echo "without the node id (highest origin): $(echo "$R0" | head -1 | cut -c1-100)"
+R=$(q $P3 spike -c "SELECT koldstore.wait_for_replication('t'::regclass, '$OUT', 2000, '$NID')")
+echo "wait on n3 with the n1 link cut: $(echo "$R" | head -1 | cut -c1-120)"
+check "with the node id, a wait for an n1 write is not released by n2's position (multi-upstream)" has "$R" "timed out"
+q $P3 spike -c "SELECT spock.sub_enable('s3_1')" >/dev/null; settle
+
 say "leader flush #2, followers sync + prune"
 q $P1 spike -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
 echo "flush: $(flush1 $P1)"

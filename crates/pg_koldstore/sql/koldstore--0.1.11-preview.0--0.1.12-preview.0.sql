@@ -665,9 +665,10 @@ AS 'MODULE_PATHNAME', 'wait_for_publication_pg_wrapper';
 CREATE FUNCTION koldstore."wait_for_replication"(
 	"table_name" regclass,
 	"lsn" TEXT,
-	"timeout_ms" int DEFAULT 10000
+	"timeout_ms" int DEFAULT 10000,
+	"spock_node_id" TEXT DEFAULT NULL
 ) RETURNS jsonb
-STRICT SECURITY DEFINER
+SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'wait_for_replication_pg_wrapper';
 

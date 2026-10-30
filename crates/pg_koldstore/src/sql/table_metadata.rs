@@ -638,6 +638,12 @@ pub fn publish_for_followers_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
         .map_err(|error| error.to_string())
         .and_then(|()| publish_leader_catalog_value(oid))
         .and_then(|mut result| {
+            result["spock_node_id"] = json!(crate::spi::select_one_sql::<String>(
+                "SELECT CASE WHEN to_regclass('spock.local_node') IS NOT NULL
+                        THEN (SELECT node_id::text FROM spock.local_node) END",
+                &[],
+            )
+            .map_err(|error| error.to_string())?);
             result["lsn"] = json!(if committed == 0 {
                 crate::spi::select_one_sql::<String>("SELECT pg_current_wal_lsn()::text", &[]).map_err(|error| error.to_string())?
             } else {
@@ -838,33 +844,55 @@ fn wait_for_publication_value(table_oid: pgrx::pg_sys::Oid, want: i64, timeout_m
     }
 }
 
-fn replication_reached(lsn: &str) -> Result<bool, String> {
+fn replication_reached(lsn: &str, spock_node_id: Option<&str>) -> Result<bool, String> {
+    let to_error = |error: pgrx::spi::SpiError| error.to_string();
+    if let Some(node_id) = spock_node_id {
+        let has_progress = crate::spi::select_one_sql::<bool>("SELECT to_regclass('spock.progress') IS NOT NULL", &[])
+            .map_err(to_error)?
+            .unwrap_or(false);
+        if has_progress {
+            // The leader's own position in Spock's per-upstream progress, not the highest of all upstreams.
+            return crate::spi::select_one_sql::<bool>(
+                "SELECT coalesce((SELECT remote_commit_lsn FROM spock.progress WHERE remote_node_id = $1::oid), '0/0'::pg_lsn) >= $2::pg_lsn",
+                &[DatumWithOid::from(node_id), DatumWithOid::from(lsn)],
+            )
+            .map(|reached| reached.unwrap_or(false))
+            .map_err(to_error);
+        }
+    }
     crate::spi::select_one_sql::<bool>(
         "SELECT CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() >= $1::pg_lsn
                 ELSE coalesce((SELECT max(remote_lsn) FROM pg_replication_origin_status), '0/0'::pg_lsn) >= $1::pg_lsn END",
         &[DatumWithOid::from(lsn)],
     )
     .map(|reached| reached.unwrap_or(false))
-    .map_err(|error| error.to_string())
+    .map_err(to_error)
 }
 
 /// Follower side of read-your-writes for the hot tier: waits until replication has applied the leader
 /// position `lsn` returned by `publish_for_followers`.
 ///
 /// SQL contract: `koldstore.wait_for_replication(table_name regclass, lsn text,
-/// timeout_ms integer default 10000) → jsonb` (`{lsn, waited_ms}`).
+/// timeout_ms integer default 10000, spock_node_id text default null) → jsonb` (`{lsn, waited_ms}`).
 ///
 /// Hot rows reach a follower through replication, not through the shared storage. On a physical
 /// standby this waits for WAL replay to reach `lsn`; otherwise for the highest remote LSN of any
 /// replication origin (native logical replication and Spock both advance one) to reach it. With several
-/// upstreams the highest origin decides, so it can return early for a slower one.
+/// upstreams the highest origin decides, so it can return early for a slower one. Pass the
+/// `spock_node_id` that `publish_for_followers` returned (set when the leader runs Spock) to wait on that
+/// upstream's own `spock.progress` entry instead.
 #[pgrx::pg_extern(name = "wait_for_replication", schema = "koldstore", security_definer)]
-pub fn wait_for_replication_pg(table_name: pgrx::PgRelation, lsn: &str, timeout_ms: pgrx::default!(i32, 10000)) -> pgrx::JsonB {
+pub fn wait_for_replication_pg(
+    table_name: pgrx::PgRelation,
+    lsn: &str,
+    timeout_ms: pgrx::default!(i32, 10000),
+    spock_node_id: pgrx::default!(Option<&str>, "NULL"),
+) -> pgrx::JsonB {
     authorize(Some(table_name.oid()), "wait for replication");
     let started = std::time::Instant::now();
     let deadline = std::time::Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
     loop {
-        match replication_reached(lsn) {
+        match replication_reached(lsn, spock_node_id) {
             Ok(true) => {
                 let waited = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
                 return pgrx::JsonB(json!({ "lsn": lsn, "waited_ms": waited }));
