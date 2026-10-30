@@ -519,6 +519,7 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     let client = super::backup::storage_client(&target.storage.storage_id)?;
     let chunk_prefix = format!("_leader_tombstones/{}/{}/", target.namespace, target.name);
     let mut chunk_keys = Vec::new();
+    let _ = super::flush::peer_prune::prune_reinserted(table_oid);
     if let Ok((mut keys, truncated)) = super::flush::peer_prune::leader_tombstones(table_oid) {
         let limit = crate::guc::published_tombstone_limit();
         let overflow = if keys.len() > limit { keys.split_off(limit) } else { Vec::new() };

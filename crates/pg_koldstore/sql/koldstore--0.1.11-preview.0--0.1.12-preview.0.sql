@@ -463,6 +463,14 @@ CREATE TABLE IF NOT EXISTS koldstore.table_prefix_pins (
 );
 REVOKE ALL ON koldstore.table_prefix_pins FROM PUBLIC;
 
+-- Keys a leader re-inserted after deleting them, until it flushes the new row (published as markers).
+CREATE TABLE IF NOT EXISTS koldstore.reinserted_keys (
+  table_oid oid NOT NULL,
+  key jsonb NOT NULL,
+  PRIMARY KEY (table_oid, key)
+);
+REVOKE ALL ON koldstore.reinserted_keys FROM PUBLIC;
+
 CREATE FUNCTION koldstore."register_backup"(
 	"name" TEXT,
 	"taken_at" timestamptz DEFAULT now()

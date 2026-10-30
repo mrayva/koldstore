@@ -207,6 +207,15 @@ CREATE TABLE IF NOT EXISTS koldstore.table_prefix_pins (
   prefix text NOT NULL
 );
 
+-- Keys a leader re-inserted after deleting them, until the leader flushes the new row. The delete marker
+-- is overwritten by the insert's mirror row, but a follower that does not replicate the leader's hot
+-- rows must keep masking the old cold row; the leader publishes these as markers (peer_prune.rs).
+CREATE TABLE IF NOT EXISTS koldstore.reinserted_keys (
+  table_oid oid NOT NULL,
+  key jsonb NOT NULL,
+  PRIMARY KEY (table_oid, key)
+);
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
@@ -454,6 +463,7 @@ REVOKE ALL ON
   koldstore.partition_templates,
   koldstore.backups,
   koldstore.table_prefix_pins,
+  koldstore.reinserted_keys,
   koldstore.cold_segments,
   koldstore.cold_segment_index,
   koldstore.cold_segment_order_index

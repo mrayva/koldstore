@@ -342,6 +342,13 @@ pub fn cold_insert_guard_check_pg(table_oid: pgrx::pg_sys::Oid, row: pgrx::JsonB
         // INSERT ... ON CONFLICT on the primary key: the row is hot now, native conflict handling takes over.
         return;
     }
+    if !exists {
+        // Re-inserting a deleted key: remember it so the leader keeps masking the old cold row for
+        // followers that never see this hot row. Best effort; the INSERT itself must not fail on it.
+        if let Err(error) = crate::sql::flush::peer_prune::record_reinsert(table_oid, &row.0) {
+            pgrx::warning!("koldstore: could not record a re-inserted key for followers: {error}");
+        }
+    }
     if exists {
         pgrx::error!(
             "koldstore: refusing INSERT on managed table {table_name} -- this primary key already \

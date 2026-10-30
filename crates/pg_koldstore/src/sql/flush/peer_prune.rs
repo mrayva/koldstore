@@ -198,12 +198,85 @@ fn mirror_parts(table_oid: pgrx::pg_sys::Oid) -> Result<MirrorParts, String> {
 /// Cheap change detector for the leader's unflushed delete markers (count and seq range).
 pub(crate) fn tombstone_fingerprint(table_oid: pgrx::pg_sys::Oid) -> Result<String, String> {
     let parts = mirror_parts(table_oid)?;
-    pgrx::Spi::get_one::<String>(&format!(
+    let deletes = pgrx::Spi::get_one::<String>(&format!(
         "SELECT count(*) || ':' || coalesce(min(\"seq\"), 0) || ':' || coalesce(max(\"seq\"), 0) \
          FROM {} WHERE \"op\" = 3 AND \"seq\" > 0",
         parts.mirror
     ))
     .map(Option::unwrap_or_default)
+    .map_err(|error| error.to_string())?;
+    let reinserts = pgrx::Spi::get_one_with_args::<String>(
+        &format!(
+            "SELECT count(*) || ':' || coalesce(max(m.\"seq\"), 0) FROM {}",
+            reinserted_join(&parts)
+        ),
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
+    .map(Option::unwrap_or_default)
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{deletes}/{reinserts}"))
+}
+
+/// The recorded re-inserted keys that are still unflushed, joined to their mirror rows (`m`).
+/// Takes the table oid as `$1`.
+fn reinserted_join(parts: &MirrorParts) -> String {
+    let same = parts.pk.iter().map(|c| format!("m.{c} = k.{c}")).collect::<Vec<_>>().join(" AND ");
+    format!(
+        "koldstore.reinserted_keys r \
+         CROSS JOIN LATERAL jsonb_populate_record(NULL::{table}, r.key) k \
+         JOIN {mirror} m ON {same} \
+         WHERE r.table_oid = $1 AND m.\"op\" <> 3 AND m.\"seq\" > 0",
+        table = parts.table,
+        mirror = parts.mirror,
+    )
+}
+
+/// Called by the insert guard on a leader: an INSERT of a key the mirror holds a delete marker for
+/// is a re-insert of a deleted key, and the cold row it deleted is still in the segments. The
+/// delete marker is about to be overwritten by the insert's mirror row, so the key is recorded
+/// here and published as a marker until the leader flushes the new row; without it a follower that
+/// does not replicate the leader's hot rows (no Spock) would return the old, deleted version.
+pub(crate) fn record_reinsert(table_oid: pgrx::pg_sys::Oid, row: &Value) -> Result<(), String> {
+    let parts = mirror_parts(table_oid)?;
+    let object = parts
+        .pk
+        .iter()
+        .zip(&parts.pk_names)
+        .map(|(quoted, name)| format!("'{}', k.{quoted}", name.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let same = parts.pk.iter().map(|c| format!("x.{c} = k.{c}")).collect::<Vec<_>>().join(" AND ");
+    pgrx::Spi::run_with_args(
+        &format!(
+            "INSERT INTO koldstore.reinserted_keys (table_oid, key) \
+             SELECT $1, jsonb_build_object({object}) FROM jsonb_populate_record(NULL::{table}, $2) k \
+             WHERE coalesce((SELECT (options->>'leader')::boolean FROM koldstore.schemas \
+                             WHERE table_oid = $1 AND active), false) \
+               AND EXISTS (SELECT 1 FROM {mirror} x WHERE {same} AND x.\"op\" = 3) \
+             ON CONFLICT DO NOTHING",
+            table = parts.table,
+            mirror = parts.mirror,
+        ),
+        &[pgrx::datum::DatumWithOid::from(table_oid), pgrx::datum::DatumWithOid::from(pgrx::JsonB(row.clone()))],
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Forgets recorded keys whose mirror row is gone (the leader flushed them): the new row is in a
+/// segment followers get with the catalog, so the marker must stop masking it.
+pub(crate) fn prune_reinserted(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    let parts = mirror_parts(table_oid)?;
+    let same = parts.pk.iter().map(|c| format!("m.{c} = k.{c}")).collect::<Vec<_>>().join(" AND ");
+    pgrx::Spi::run_with_args(
+        &format!(
+            "DELETE FROM koldstore.reinserted_keys r WHERE r.table_oid = $1 AND NOT EXISTS \
+             (SELECT 1 FROM jsonb_populate_record(NULL::{table}, r.key) k \
+              JOIN {mirror} m ON {same} WHERE m.\"seq\" > 0)",
+            table = parts.table,
+            mirror = parts.mirror,
+        ),
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -223,13 +296,22 @@ pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Vec<Val
         .map(|(quoted, name)| format!("'{}', m.{quoted}", name.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
-    let pgrx::JsonB(Value::Array(mut keys)) = pgrx::Spi::get_one::<pgrx::JsonB>(&format!(
-        "SELECT coalesce(jsonb_agg(j), '[]'::jsonb) FROM \
-         (SELECT jsonb_build_object({object}) AS j FROM {} m \
-          WHERE m.\"op\" = 3 AND m.\"seq\" > 0 ORDER BY m.\"seq\" LIMIT {}) x",
-        parts.mirror,
-        limit + 1
-    ))
+    // Deletes first, then re-inserted keys (see `record_reinsert`), each oldest first.
+    let pgrx::JsonB(Value::Array(mut keys)) = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
+        &format!(
+            "SELECT coalesce(jsonb_agg(j ORDER BY grp, ord), '[]'::jsonb) FROM \
+             (SELECT j, grp, ord FROM \
+               (SELECT jsonb_build_object({object}) AS j, 0 AS grp, m.\"seq\" AS ord FROM {mirror} m \
+                 WHERE m.\"op\" = 3 AND m.\"seq\" > 0 \
+                UNION ALL \
+                SELECT r.key AS j, 1 AS grp, m.\"seq\" AS ord FROM {reinserted}) u \
+              ORDER BY grp, ord LIMIT {limit1}) x",
+            mirror = parts.mirror,
+            reinserted = reinserted_join(&parts),
+            limit1 = limit + 1,
+        ),
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
     .map_err(|error| error.to_string())?
     .ok_or("no tombstone result")?
     else {

@@ -74,6 +74,7 @@ pub(super) fn unmanage_table_pg_impl(
         for statement in [
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1::oid",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1::oid",
+            "DELETE FROM koldstore.reinserted_keys WHERE table_oid = $1::oid",
         ] {
             pgrx::Spi::run_with_args(statement, &[pgrx::datum::DatumWithOid::from(table_oid)])
                 .map_err(|error| error.to_string())?;

@@ -100,6 +100,8 @@ column partition_templates.created_at timestamp with time zone not null
 column partition_templates.options jsonb not null
 column partition_templates.parent_oid oid not null
 column partition_templates.template_id uuid not null
+column reinserted_keys.key jsonb not null
+column reinserted_keys.table_oid oid not null
 column schemas.activation_lsn pg_lsn
 column schemas.active boolean not null
 column schemas.columns jsonb not null
