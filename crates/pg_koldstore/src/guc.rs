@@ -61,6 +61,8 @@ static AUTO_ELECT: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static LEADER_LEASE_TTL: GucSetting<i32> = GucSetting::<i32>::new(30);
 #[cfg(feature = "pg")]
+static ELECTION_PRIORITY: GucSetting<i32> = GucSetting::<i32>::new(100);
+#[cfg(feature = "pg")]
 static CATALOG_SYNC_DATABASES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 #[cfg(feature = "pg")]
 static MAX_HYDRATE_ROWS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -301,6 +303,16 @@ pub fn define_gucs() {
         &LEADER_LEASE_TTL,
         3,
         86_400,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.election_priority",
+        c"How strongly this node is preferred as the next tiering leader.",
+        c"When the leader's lease runs out, the live follower with the highest priority that holds the latest published generation claims it first; ties go to the node with more generation, then the lower cluster identifier. The others wait one stagger (a fifth of the lease ttl, at least 2 s) per rank in case the preferred node is down. 0 means this node never elects itself. Superuser-only.",
+        &ELECTION_PRIORITY,
+        0,
+        1000,
         GucContext::Suset,
         flags,
     );
@@ -681,6 +693,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "30",
         },
         GucDefinition {
+            name: ELECTION_PRIORITY_GUC,
+            internal: false,
+            default_value: "100",
+        },
+        GucDefinition {
             name: PUBLISHED_TOMBSTONE_LIMIT_GUC,
             internal: false,
             default_value: "10000",
@@ -876,6 +893,7 @@ pub const FOLLOWER_ACK_MAX_AGE_GUC: &str = "koldstore.follower_ack_max_age_secon
 pub const PUBLISHED_TOMBSTONE_LIMIT_GUC: &str = "koldstore.published_tombstone_limit";
 pub const AUTO_ELECT_GUC: &str = "koldstore.auto_elect";
 pub const LEADER_LEASE_TTL_GUC: &str = "koldstore.leader_lease_ttl_seconds";
+pub const ELECTION_PRIORITY_GUC: &str = "koldstore.election_priority";
 pub const CATALOG_SYNC_DATABASES_GUC: &str = "koldstore.catalog_sync_databases";
 pub const CAPTURE_REPLICATED_CHANGES_GUC: &str = "koldstore.capture_replicated_changes";
 pub const HYDRATING_GUC: &str = "koldstore.hydrating";
@@ -1014,6 +1032,20 @@ pub fn auto_elect() -> bool {
     #[cfg(not(feature = "pg"))]
     {
         false
+    }
+}
+
+/// Preference of this node in an election; 0 opts out.
+#[must_use]
+pub fn election_priority() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        ELECTION_PRIORITY.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        100
     }
 }
 

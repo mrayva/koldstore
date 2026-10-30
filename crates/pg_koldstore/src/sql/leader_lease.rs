@@ -84,21 +84,94 @@ static OBSERVED: std::sync::Mutex<Vec<(String, i64, i64, std::time::Instant)>> =
 
 /// Milliseconds this process has seen `lease` unchanged (0 the first time it is seen or after it moved).
 fn silent_ms(target: &Target, lease: &Lease) -> i64 {
+    silent_for(&target.key, lease.epoch, lease.heartbeat_ms)
+}
+
+/// Milliseconds the observation `(epoch, heartbeat)` under `key` has stayed unchanged here.
+fn silent_for(key: &str, epoch: i64, heartbeat_ms: i64) -> i64 {
     let mut seen = OBSERVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = std::time::Instant::now();
-    match seen.iter_mut().find(|entry| entry.0 == target.key) {
-        Some(entry) if entry.1 == lease.epoch && entry.2 == lease.heartbeat_ms => {
+    match seen.iter_mut().find(|entry| entry.0 == key) {
+        Some(entry) if entry.1 == epoch && entry.2 == heartbeat_ms => {
             i64::try_from(now.duration_since(entry.3).as_millis()).unwrap_or(i64::MAX)
         }
         Some(entry) => {
-            *entry = (target.key.clone(), lease.epoch, lease.heartbeat_ms, now);
+            *entry = (key.to_string(), epoch, heartbeat_ms, now);
             0
         }
         None => {
-            seen.push((target.key.clone(), lease.epoch, lease.heartbeat_ms, now));
+            seen.push((key.to_string(), epoch, heartbeat_ms, now));
             0
         }
     }
+}
+
+/// Per process: when each table's lease was first seen electable by this node.
+static ELECTABLE: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+fn candidate_prefix(namespace: &str, name: &str) -> String {
+    format!("_leader_candidates/{namespace}/{name}/")
+}
+
+fn held_and_seen(table_oid: pgrx::pg_sys::Oid) -> Result<(i64, i64), String> {
+    let (held, seen) = pgrx::Spi::get_two_with_args::<i64, i64>(
+        "SELECT (SELECT coalesce(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = $1), \
+                (SELECT coalesce((options->>'seen_leader_epoch')::bigint, 0) FROM koldstore.schemas \
+                 WHERE table_oid = $1 AND active)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((held.unwrap_or(0), seen.unwrap_or(0)))
+}
+
+/// A follower advertises itself as an election candidate: its priority and how much of the
+/// leader's state it holds. Called by the catalog sync worker on every follower tick.
+pub(crate) fn publish_candidacy(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    use koldstore_storage::StorageClient;
+
+    let t = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&t.storage.storage_id)?;
+    let (held, seen) = held_and_seen(table_oid)?;
+    let node = node_id()?;
+    let body = serde_json::to_vec(&json!({
+        "node": node, "priority": crate::guc::election_priority(), "generation": held, "epoch": seen,
+        "heartbeat_ms": now_ms(),
+    }))
+    .map_err(|error| error.to_string())?;
+    client
+        .put(&format!("{}{node}.json", candidate_prefix(&t.namespace, &t.name)), &body, PutPrecondition::Overwrite)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// This node's place in the election order (0 is the preferred candidate) among the live
+/// followers that hold at least `(generation, epoch)`. A candidate is live while its heartbeat
+/// keeps changing as seen on this node's own clock. `None` when this node opted out.
+fn election_rank(t: &super::backup::TableTarget, client: &impl koldstore_storage::StorageClient, held: i64, generation: i64, epoch: i64, ttl_s: i64) -> Result<Option<usize>, String> {
+    let me = node_id()?;
+    let priority = i64::from(crate::guc::election_priority());
+    if priority == 0 {
+        return Ok(None);
+    }
+    let prefix = candidate_prefix(&t.namespace, &t.name);
+    let mut field = vec![(priority, held, me.clone())];
+    for object in client.list(&prefix).map_err(|error| error.to_string())? {
+        let Ok(bytes) = client.get(&object.key) else { continue };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        let node = value["node"].as_str().unwrap_or_default().to_string();
+        if node.is_empty() || node == me {
+            continue;
+        }
+        let key = format!("{}|{}", t.storage.storage_id, object.key);
+        let silent = silent_for(&key, 0, value["heartbeat_ms"].as_i64().unwrap_or(0));
+        let caught_up = value["generation"].as_i64().unwrap_or(0) >= generation && value["epoch"].as_i64().unwrap_or(0) >= epoch;
+        let priority = value["priority"].as_i64().unwrap_or(0);
+        if caught_up && priority > 0 && silent < ttl_s.saturating_mul(3000) {
+            field.push((priority, value["generation"].as_i64().unwrap_or(0), node));
+        }
+    }
+    field.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    Ok(field.iter().position(|entry| entry.2 == me))
 }
 
 /// Whether a lease held by another node may be taken over, and how long until it may be.
@@ -384,10 +457,13 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
     let Some(lease) = current(&tgt)? else {
         return Ok(None);
     };
+    let clear = || ELECTABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|entry| entry.0 != tgt.key);
     if lease.holder != node_id()? && takeover_wait_ms(&tgt, &lease) > 0 {
+        clear();
         return Ok(None);
     }
     if lease.holder == node_id()? && !lease.expired(now_ms()) {
+        clear();
         return Ok(None);
     }
     let bytes = tgt
@@ -395,14 +471,7 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
         .get(&super::table_metadata::leader_catalog_key(&t.namespace, &t.name))
         .map_err(|error| format!("cannot elect: no leader catalog ({error})"))?;
     let published: Value = serde_json::from_slice(&bytes).map_err(|error| format!("leader catalog is not valid: {error}"))?;
-    let (held, seen) = pgrx::Spi::get_two_with_args::<i64, i64>(
-        "SELECT (SELECT coalesce(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = $1), \
-                (SELECT coalesce((options->>'seen_leader_epoch')::bigint, 0) FROM koldstore.schemas \
-                 WHERE table_oid = $1 AND active)",
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?;
-    let (held, seen) = (held.unwrap_or(0), seen.unwrap_or(0));
+    let (held, seen) = held_and_seen(table_oid)?;
     let behind = held < super::table_metadata::max_generation(&published)
         || seen < published["lease_epoch"].as_i64().unwrap_or(0);
     if behind {
@@ -413,6 +482,29 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
             published["lease_epoch"].as_i64().unwrap_or(0)
         ));
     }
+    // The preferred candidate claims at once; each later one waits a stagger per rank, in case
+    // the better ones are gone. The lease claim below still arbitrates, so this only orders tries.
+    let first = {
+        let mut seen_at = ELECTABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match seen_at.iter().find(|entry| entry.0 == tgt.key) {
+            Some(entry) => entry.1,
+            None => {
+                let now = std::time::Instant::now();
+                seen_at.push((tgt.key.clone(), now));
+                now
+            }
+        }
+    };
+    let ttl = i64::from(crate::guc::leader_lease_ttl_seconds());
+    let Some(rank) = election_rank(&t, &tgt.client, held, super::table_metadata::max_generation(&published), published["lease_epoch"].as_i64().unwrap_or(0), ttl)? else {
+        return Ok(None);
+    };
+    let stagger_ms = (ttl * 200).max(2000);
+    let waited = i64::try_from(first.elapsed().as_millis()).unwrap_or(i64::MAX);
+    if waited < stagger_ms.saturating_mul(i64::try_from(rank).unwrap_or(i64::MAX)) {
+        return Ok(None);
+    }
+    clear();
     super::table_metadata::set_follower_value(table_oid, false)?;
     super::table_metadata::set_leader_value(table_oid, true)?;
     // A lost create-if-absent race errors here, so the caller's transaction rolls the flags back.

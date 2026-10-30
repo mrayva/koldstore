@@ -89,6 +89,12 @@ pub extern "C-unwind" fn koldstore_catalog_sync_main(argument: pgrx::pg_sys::Dat
                 Role::Follower => {
                     let synced = super::txn::run_recoverable("follower sync", || sync_one(table_oid));
                     if crate::guc::auto_elect() {
+                        let advertised = super::txn::run_recoverable("candidacy", || {
+                            crate::sql::leader_lease::publish_candidacy(pgrx::pg_sys::Oid::from(table_oid))
+                        });
+                        if let Err(error) = advertised {
+                            pgrx::log!("koldstore catalog sync: database={database} table oid {table_oid} candidacy not published: {error}");
+                        }
                         elect(&database, table_oid);
                     }
                     synced

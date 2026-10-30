@@ -14,6 +14,7 @@ declare -A PORT=([a]=28971 [b]=28972 [c]=28973)
 W=$ROOT/data; SOCK=$ROOT/sock; SHARE=$ROOT/share
 TTL=8
 # Optional per-node wall-clock skew in seconds (see scripts/test-clock-skew.sh).
+declare -A PRIO=([a]=${PRIO_A:-100} [b]=${PRIO_B:-100} [c]=${PRIO_C:-100})
 declare -A SKEW=([a]=${SKEW_A:-0} [b]=${SKEW_B:-0} [c]=${SKEW_C:-0})
 q() { local port=$1 db=$2; shift 2; $PG_BIN/psql -X -q -At -h $SOCK -p $port -d $db "$@" 2>&1 | grep -v pg_circuit; }
 FAILS=0
@@ -42,6 +43,7 @@ koldstore.catalog_sync_interval_seconds = 2
 koldstore.catalog_sync_databases = 'spike'
 koldstore.auto_elect = on
 koldstore.leader_lease_ttl_seconds = $TTL
+koldstore.election_priority = ${PRIO[$n]}
 EOC
 done
 start() { CLOCK_SKEW_SECONDS=${SKEW[$1]} LD_PRELOAD=$SHIM $PG_BIN/pg_ctl -D $W/$1 -l $W/$1.log -w -o "-p ${PORT[$1]} -k $SOCK $PG_OPTS" start >/dev/null || { tail $W/$1.log; exit 1; }; }
@@ -96,6 +98,7 @@ check "election within 3 x ttl of the kill" "$([ $TOOK -le $((TTL * 3)) ] && ech
 sleep 3
 NEW=$(leaders b c)
 echo "elected: '$NEW'"
+[ -z "${EXPECT_FIRST:-}" ] || check "the preferred candidate won the first election" "$NEW" "$EXPECT_FIRST"
 check "exactly one follower became leader" "$(echo -n "$NEW" | wc -c)" "1"
 [ "${#NEW}" = 1 ] || { echo "== done: $FAILS check(s) FAILED"; exit 1; }
 OTHER=$(echo b c | tr -d " $NEW")
@@ -129,6 +132,7 @@ check "second election within 3 x ttl of the kill" "$([ $TOOK -le $((TTL * 3)) ]
 sleep 3
 NEW2=$(leaders a b c | tr -d "$NEW")
 echo "elected: '$NEW2'"
+[ -z "${EXPECT_SECOND:-}" ] || check "the preferred survivor won the second election" "$NEW2" "$EXPECT_SECOND"
 check "one survivor leads at epoch 3" "$NEW2:$(role ${NEW2:-a})" "$NEW2:leader:3"
 
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi
