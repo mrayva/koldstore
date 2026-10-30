@@ -140,11 +140,21 @@ follower until it flushes.
 A bare `publish_leader_catalog` right after a write can still miss it: deletes reach the catalog through
 the async mirror, which lags the commit. `koldstore.publish_for_followers(table)` runs
 `wait_for_async_mirror()` first, then publishes, and returns the same result, so the token includes the
-caller's own delete. Hot-tier inserts and updates are not covered, and a forced flush does not fix that:
-the leader keeps the flushed rows in its heap, and a follower without Spock reads its own stale heap row
-ahead of the cold copy (measured: an updated row still read the old value after a forced flush and a
-published, applied catalog). Under Spock the hot rows replicate on their own, and Spock's lag is not
-covered by the token. Test: `scripts/test-read-your-writes.sh`.
+caller's own delete.
+
+Hot-tier rows do not travel through the shared storage, and a forced flush does not make them visible
+(the leader keeps the flushed rows in its heap, and a follower reads its own stale heap row ahead of the
+cold copy; measured). They travel by replication, so the missing piece was waiting for it.
+`publish_for_followers` also returns `lsn`, the end of the calling session's last commit
+(`XactLastCommitEnd`; the current WAL position when the session has not committed), and
+`koldstore.wait_for_replication(table, lsn, timeout_ms)` on the follower waits until replication has applied
+it: `pg_last_wal_replay_lsn()` on a physical standby, otherwise the highest `remote_lsn` in
+`pg_replication_origin_status`, which native logical replication and Spock both advance. The commit end,
+not the current position, is the token because an origin position stops at the last replicated commit: the
+current position is not reached on an idle table (first attempt: every wait timed out although the rows had
+arrived). Limits: the client must call it in the session that wrote; with several upstreams the highest
+origin decides; only native logical replication was tested (`scripts/test-hot-read-your-writes.sh`), the
+physical-standby branch is not. Cold tier: `scripts/test-read-your-writes.sh`.
 
 ## Reap no longer starves under fast flushing (implemented)
 

@@ -662,6 +662,15 @@ STRICT SECURITY DEFINER
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'wait_for_publication_pg_wrapper';
 
+CREATE FUNCTION koldstore."wait_for_replication"(
+	"table_name" regclass,
+	"lsn" TEXT,
+	"timeout_ms" int DEFAULT 10000
+) RETURNS jsonb
+STRICT SECURITY DEFINER
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'wait_for_replication_pg_wrapper';
+
 CREATE FUNCTION koldstore."publish_for_followers"(
 	"table_name" regclass
 ) RETURNS jsonb

@@ -630,9 +630,21 @@ pub(crate) fn sidecars_missing(table_oid: pgrx::pg_sys::Oid) -> Result<bool, Str
 pub fn publish_for_followers_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
     let oid = table_name.oid();
     authorize(Some(oid), "publish for followers");
+    // The end of this session's last commit: a subscriber's origin position reaches exactly that once it
+    // has applied the commit, whereas the current WAL position may never be reached on an idle table.
+    // A session that has not committed yet falls back to the current position.
+    let committed = unsafe { pgrx::pg_sys::XactLastCommitEnd };
     pgrx::Spi::run("SELECT koldstore.wait_for_async_mirror()")
         .map_err(|error| error.to_string())
         .and_then(|()| publish_leader_catalog_value(oid))
+        .and_then(|mut result| {
+            result["lsn"] = json!(if committed == 0 {
+                crate::spi::select_one_sql::<String>("SELECT pg_current_wal_lsn()::text", &[]).map_err(|error| error.to_string())?
+            } else {
+                Some(koldstore_common::format_pg_lsn(committed))
+            });
+            Ok(result)
+        })
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("publish for followers failed: {error}"))
 }
@@ -820,6 +832,48 @@ fn wait_for_publication_value(table_oid: pgrx::pg_sys::Oid, want: i64, timeout_m
                 "timed out after {timeout_ms} ms waiting for leader publication {want}; the leader has published {published} \
                  and this follower has applied {seen}"
             ));
+        }
+        pgrx::check_for_interrupts!();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn replication_reached(lsn: &str) -> Result<bool, String> {
+    crate::spi::select_one_sql::<bool>(
+        "SELECT CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() >= $1::pg_lsn
+                ELSE coalesce((SELECT max(remote_lsn) FROM pg_replication_origin_status), '0/0'::pg_lsn) >= $1::pg_lsn END",
+        &[DatumWithOid::from(lsn)],
+    )
+    .map(|reached| reached.unwrap_or(false))
+    .map_err(|error| error.to_string())
+}
+
+/// Follower side of read-your-writes for the hot tier: waits until replication has applied the leader
+/// position `lsn` returned by `publish_for_followers`.
+///
+/// SQL contract: `koldstore.wait_for_replication(table_name regclass, lsn text,
+/// timeout_ms integer default 10000) → jsonb` (`{lsn, waited_ms}`).
+///
+/// Hot rows reach a follower through replication, not through the shared storage. On a physical
+/// standby this waits for WAL replay to reach `lsn`; otherwise for the highest remote LSN of any
+/// replication origin (native logical replication and Spock both advance one) to reach it. With several
+/// upstreams the highest origin decides, so it can return early for a slower one.
+#[pgrx::pg_extern(name = "wait_for_replication", schema = "koldstore", security_definer)]
+pub fn wait_for_replication_pg(table_name: pgrx::PgRelation, lsn: &str, timeout_ms: pgrx::default!(i32, 10000)) -> pgrx::JsonB {
+    authorize(Some(table_name.oid()), "wait for replication");
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
+    loop {
+        match replication_reached(lsn) {
+            Ok(true) => {
+                let waited = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                return pgrx::JsonB(json!({ "lsn": lsn, "waited_ms": waited }));
+            }
+            Ok(false) => {}
+            Err(error) => pgrx::error!("wait for replication failed: {error}"),
+        }
+        if started.elapsed() >= deadline {
+            pgrx::error!("timed out after {timeout_ms} ms waiting for replication to reach {lsn}");
         }
         pgrx::check_for_interrupts!();
         std::thread::sleep(std::time::Duration::from_millis(50));
