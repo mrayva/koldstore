@@ -7,8 +7,14 @@
 //! epoch object with a fresh heartbeat; the highest epoch is the current lease. A node enforces the
 //! lease only after it has acquired one (`options.lease_epoch`): flush, compaction, reaping and
 //! catalog publishing then require that the highest epoch is still its own and unexpired, which
-//! fences a deposed leader. Expiry compares the holder's heartbeat clock with the reader's, so keep
-//! the ttl well above clock skew.
+//! fences a deposed leader.
+//!
+//! Clocks: the holder judges its own lease by its own clock (heartbeat and check are on one
+//! machine). A node that wants to take a lease over never compares the holder's heartbeat with its
+//! own wall clock; it watches the lease object and counts the time (monotonic clock) during which
+//! the holder's heartbeat did not change, so a fast, slow or stepped clock on either side cannot
+//! make a live lease look dead or a dead one look alive. Only clock *rate* matters. A node that
+//! just started has seen nothing yet, so it needs one full ttl of observation before a takeover.
 
 use pgrx::datum::DatumWithOid;
 use serde_json::{Value, json};
@@ -41,6 +47,7 @@ fn epoch_key(prefix: &str, epoch: i64) -> String {
     format!("{prefix}{epoch:020}.json")
 }
 
+#[derive(Clone)]
 struct Lease {
     epoch: i64,
     holder: String,
@@ -65,13 +72,49 @@ impl Lease {
 struct Target {
     client: koldstore_storage::ObjectStoreClient,
     prefix: String,
+    /// Identifies the lease for the observation table (storage and prefix).
+    key: String,
+}
+
+/// Per process: the last (epoch, heartbeat) seen for each lease and when it was first seen.
+static OBSERVED: std::sync::Mutex<Vec<(String, i64, i64, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// Milliseconds this process has seen `lease` unchanged (0 the first time it is seen or after it moved).
+fn silent_ms(target: &Target, lease: &Lease) -> i64 {
+    let mut seen = OBSERVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    match seen.iter_mut().find(|entry| entry.0 == target.key) {
+        Some(entry) if entry.1 == lease.epoch && entry.2 == lease.heartbeat_ms => {
+            i64::try_from(now.duration_since(entry.3).as_millis()).unwrap_or(i64::MAX)
+        }
+        Some(entry) => {
+            *entry = (target.key.clone(), lease.epoch, lease.heartbeat_ms, now);
+            0
+        }
+        None => {
+            seen.push((target.key.clone(), lease.epoch, lease.heartbeat_ms, now));
+            0
+        }
+    }
+}
+
+/// Whether a lease held by another node may be taken over, and how long until it may be.
+/// Released leases (heartbeat 0) are free at once; otherwise the holder must have been silent
+/// for a full ttl on this process's monotonic clock.
+fn takeover_wait_ms(target: &Target, lease: &Lease) -> i64 {
+    if lease.heartbeat_ms == 0 {
+        return 0;
+    }
+    (lease.ttl_s.saturating_mul(1000) - silent_ms(target, lease)).max(0)
 }
 
 fn target(table_oid: pgrx::pg_sys::Oid) -> Result<Target, String> {
     let t = super::backup::table_target(table_oid)?;
+    let prefix = lease_prefix(&t.namespace, &t.name);
     Ok(Target {
         client: super::backup::storage_client(&t.storage.storage_id)?,
-        prefix: lease_prefix(&t.namespace, &t.name),
+        key: format!("{}|{prefix}", t.storage.storage_id),
+        prefix,
     })
 }
 
@@ -156,7 +199,7 @@ pub(crate) fn published_epoch(table_oid: pgrx::pg_sys::Oid) -> Result<Option<i64
     local_epoch(table_oid)
 }
 
-fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32) -> Result<Value, String> {
+fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32, wait: bool) -> Result<Value, String> {
     if ttl_s < 3 {
         return Err("ttl_seconds must be at least 3".into());
     }
@@ -165,26 +208,43 @@ fn acquire_value(table_oid: pgrx::pg_sys::Oid, ttl_s: i32) -> Result<Value, Stri
     }
     let me = node_id()?;
     let target = target(table_oid)?;
-    let now = now_ms();
-    let existing = current(&target)?;
-    let next = match existing {
-        Some(lease) if lease.holder == me && !lease.expired(now) => {
-            // Renewal of the lease this node already holds.
-            let renewed = Lease { heartbeat_ms: now, ttl_s: i64::from(ttl_s), ..lease };
-            write(&target, &renewed, PutPrecondition::Overwrite)?;
-            set_local_epoch(table_oid, Some(renewed.epoch))?;
-            return Ok(renewed.to_json(now, &me));
+    let mut now = now_ms();
+    let mut existing = current(&target)?;
+    // Waiting is for a lease that looks dead by the wall clock; the worker never waits (it keeps
+    // its observations between ticks), and a live-looking lease fails at once.
+    let patience = std::time::Instant::now();
+    let next = loop {
+        match &existing {
+            Some(lease) if lease.holder == me && !lease.expired(now) => {
+                // Renewal of the lease this node already holds.
+                let renewed = Lease { heartbeat_ms: now, ttl_s: i64::from(ttl_s), ..lease.clone() };
+                write(&target, &renewed, PutPrecondition::Overwrite)?;
+                set_local_epoch(table_oid, Some(renewed.epoch))?;
+                return Ok(renewed.to_json(now, &me));
+            }
+            // This node's own lease ran out: its clock judges its own heartbeat.
+            Some(lease) if lease.holder == me => break lease.epoch + 1,
+            Some(lease) => {
+                let remaining = takeover_wait_ms(&target, lease);
+                if remaining == 0 {
+                    break lease.epoch + 1;
+                }
+                let looks_dead = lease.expired(now);
+                if !(wait && looks_dead) || patience.elapsed() > std::time::Duration::from_millis(u64::try_from(lease.ttl_s.saturating_mul(1000)).unwrap_or(0) + 10_000) {
+                    return Err(format!(
+                        "the leader lease (epoch {}) is held by {} and was last seen alive {} ms ago by this node; it can be taken over in {remaining} ms",
+                        lease.epoch,
+                        lease.holder,
+                        lease.ttl_s * 1000 - remaining
+                    ));
+                }
+                pgrx::check_for_interrupts!();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                now = now_ms();
+                existing = current(&target)?;
+            }
+            None => break 1,
         }
-        Some(lease) if !lease.expired(now) => {
-            return Err(format!(
-                "the leader lease (epoch {}) is held by {} for another {} ms",
-                lease.epoch,
-                lease.holder,
-                lease.ttl_s * 1000 - (now - lease.heartbeat_ms)
-            ));
-        }
-        Some(lease) => lease.epoch + 1,
-        None => 1,
     };
     let claimed = Lease { epoch: next, holder: me.clone(), heartbeat_ms: now, ttl_s: i64::from(ttl_s) };
     write(&target, &claimed, PutPrecondition::CreateIfAbsent)
@@ -240,7 +300,7 @@ pub(crate) fn maintain_leader(table_oid: pgrx::pg_sys::Oid) -> Result<Maintained
     let lost = if error.starts_with(LOST) {
         error.clone()
     } else if error.starts_with(EXPIRED) {
-        match acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds()) {
+        match acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds(), false) {
             Ok(lease) => return Ok(Maintained::Reclaimed(lease["epoch"].as_i64().unwrap_or(0))),
             Err(error) if error.contains("is held by") || error.starts_with("lost the race") => error,
             Err(error) => return Err(error),
@@ -262,12 +322,16 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
 
     let t = super::backup::table_target(table_oid)?;
     let client = super::backup::storage_client(&t.storage.storage_id)?;
-    let tgt = Target { client, prefix: lease_prefix(&t.namespace, &t.name) };
+    let prefix = lease_prefix(&t.namespace, &t.name);
+    let tgt = Target { client, key: format!("{}|{prefix}", t.storage.storage_id), prefix };
     // Without a lease object the leader never enforced one, so nobody may be taken over.
     let Some(lease) = current(&tgt)? else {
         return Ok(None);
     };
-    if !lease.expired(now_ms()) {
+    if lease.holder != node_id()? && takeover_wait_ms(&tgt, &lease) > 0 {
+        return Ok(None);
+    }
+    if lease.holder == node_id()? && !lease.expired(now_ms()) {
         return Ok(None);
     }
     let bytes = tgt
@@ -296,7 +360,7 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
     super::table_metadata::set_follower_value(table_oid, false)?;
     super::table_metadata::set_leader_value(table_oid, true)?;
     // A lost create-if-absent race errors here, so the caller's transaction rolls the flags back.
-    acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds()).map(Some)
+    acquire_value(table_oid, crate::guc::leader_lease_ttl_seconds(), false).map(Some)
 }
 
 /// Claims the table's leader lease, or renews it when this node already holds it.
@@ -313,7 +377,7 @@ pub(crate) fn try_elect(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Value>, S
 pub fn acquire_leader_lease_pg(table_name: pgrx::PgRelation, ttl_seconds: pgrx::default!(i32, 30)) -> pgrx::JsonB {
     let oid = table_name.oid();
     authorize(Some(oid), "acquire the leader lease");
-    acquire_value(oid, ttl_seconds)
+    acquire_value(oid, ttl_seconds, true)
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("acquire leader lease failed: {error}"))
 }

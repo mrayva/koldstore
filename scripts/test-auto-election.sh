@@ -13,6 +13,8 @@ PG_OPTS="-c dynamic_library_path='$PKG/usr/lib/postgresql/18/lib:\$libdir' -c ex
 declare -A PORT=([a]=28971 [b]=28972 [c]=28973)
 W=$ROOT/data; SOCK=$ROOT/sock; SHARE=$ROOT/share
 TTL=8
+# Optional per-node wall-clock skew in seconds (see scripts/test-clock-skew.sh).
+declare -A SKEW=([a]=${SKEW_A:-0} [b]=${SKEW_B:-0} [c]=${SKEW_C:-0})
 q() { local port=$1 db=$2; shift 2; $PG_BIN/psql -X -q -At -h $SOCK -p $port -d $db "$@" 2>&1 | grep -v pg_circuit; }
 FAILS=0
 pass() { echo "PASS  $*"; }
@@ -23,6 +25,11 @@ cleanup() { for n in a b c; do $PG_BIN/pg_ctl -D $W/$n -m immediate stop >/dev/n
 trap cleanup EXIT
 cleanup
 rm -rf "$ROOT"; mkdir -p $W $SOCK $SHARE; chmod 777 $SHARE
+SHIM=
+if [ "${SKEW[a]}${SKEW[b]}${SKEW[c]}" != "000" ]; then
+  SHIM=$ROOT/clockskew.so
+  gcc -shared -fPIC -o $SHIM "$(dirname "$0")/lib/clock_skew.c" -ldl || exit 1
+fi
 for n in a b c; do
   $PG_BIN/initdb -D $W/$n -A trust >/dev/null
   cat >> $W/$n/postgresql.conf <<EOC
@@ -37,7 +44,7 @@ koldstore.auto_elect = on
 koldstore.leader_lease_ttl_seconds = $TTL
 EOC
 done
-start() { $PG_BIN/pg_ctl -D $W/$1 -l $W/$1.log -w -o "-p ${PORT[$1]} -k $SOCK $PG_OPTS" start >/dev/null || { tail $W/$1.log; exit 1; }; }
+start() { CLOCK_SKEW_SECONDS=${SKEW[$1]} LD_PRELOAD=$SHIM $PG_BIN/pg_ctl -D $W/$1 -l $W/$1.log -w -o "-p ${PORT[$1]} -k $SOCK $PG_OPTS" start >/dev/null || { tail $W/$1.log; exit 1; }; }
 stop() { $PG_BIN/pg_ctl -D $W/$1 -m immediate stop >/dev/null 2>&1; }
 for n in a b c; do start $n; q ${PORT[$n]} postgres -c "CREATE DATABASE spike" >/dev/null; stop $n; start $n; done
 REG="SELECT koldstore.register_storage('sh','filesystem','$SHARE','{}'::jsonb,'{}'::jsonb"
@@ -81,7 +88,11 @@ check "A's epoch is still 1" "$(role a)" "leader:1"
 
 say "kill the leader A"
 stop a
-for i in $(seq 1 $((TTL * 4))); do [ -n "$(leaders b c)" ] && break; sleep 1; done
+T0=$(date +%s)
+for i in $(seq 1 $((TTL * 6))); do [ -n "$(leaders b c)" ] && break; sleep 1; done
+TOOK=$(( $(date +%s) - T0 ))
+echo "election took ${TOOK}s (ttl ${TTL}s)"
+check "election within 3 x ttl of the kill" "$([ $TOOK -le $((TTL * 3)) ] && echo yes || echo no)" "yes"
 sleep 3
 NEW=$(leaders b c)
 echo "elected: '$NEW'"
@@ -109,8 +120,12 @@ check "A converges with the new leader" "$(snap a)" "$(snap $NEW)"
 
 say "kill the new leader $NEW: the election repeats (epoch 3)"
 stop $NEW
+T0=$(date +%s)
 SURV=$(echo a b c | tr -d "$NEW")
-for i in $(seq 1 $((TTL * 4))); do [ -n "$(leaders $SURV | tr -d ' ')" ] && break; sleep 1; done
+for i in $(seq 1 $((TTL * 6))); do [ -n "$(leaders $SURV | tr -d ' ')" ] && break; sleep 1; done
+TOOK=$(( $(date +%s) - T0 ))
+echo "election took ${TOOK}s (ttl ${TTL}s)"
+check "second election within 3 x ttl of the kill" "$([ $TOOK -le $((TTL * 3)) ] && echo yes || echo no)" "yes"
 sleep 3
 NEW2=$(leaders a b c | tr -d "$NEW")
 echo "elected: '$NEW2'"
