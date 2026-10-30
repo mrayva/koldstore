@@ -72,6 +72,7 @@ $DDL
 EOC
 q $PB spike -c "SET koldstore.min_max_rows_per_file=1; SELECT koldstore.import_table_metadata('t'::regclass, \$m\$$META\$m\$::jsonb) IS NOT NULL" >/dev/null
 q $PB spike -c "SELECT koldstore.set_table_follower('t'::regclass, true)" >/dev/null
+check "follower announced itself before its first sync" "$(acks)" "1"
 check "follower syncs to the published generation" "$(syncB)" "$G0"
 check "follower wrote one acknowledgement" "$(acks)" "1"
 
@@ -110,6 +111,25 @@ q $PA spike -c "SET koldstore.follower_ack_max_age_seconds=0; SELECT koldstore.r
 if grep -q ERROR $W/reap4.out; then fail "reap with the check off: $(cat $W/reap4.out)"; else pass "reap proceeds with follower_ack_max_age_seconds = 0"; fi
 syncB >/dev/null
 check "follower converges" "$(snap $PB)" "$(snap $PA)"
+
+say "5: a sync that rolls back does not acknowledge"
+ackgen() { python3 -I -c "import json,glob;print(json.load(open(glob.glob('$SHARE/_follower_acks/public/t/*.json')[0]))['generation'])"; }
+round 5
+G5=$(publish)
+BEFORE=$(ackgen)
+q $PB spike -c "BEGIN; SELECT koldstore.sync_from_leader('t'::regclass); ROLLBACK;" >/dev/null
+check "the rolled-back sync left the acknowledgement alone" "$(ackgen)" "$BEFORE"
+has "so the leader still waits for the follower" "$(reapA)" "has not caught up"
+syncB >/dev/null
+check "a committed sync acknowledges" "$(ackgen)" "$G5"
+
+say "6: a node that stops following no longer holds reaping back"
+round 6
+has "refused while the follower lags" "$(reapA)" "has not caught up"
+q $PB spike -c "SELECT koldstore.set_table_follower('t'::regclass, false)" >/dev/null
+check "turning follower mode off removed the acknowledgement" "$(acks)" "0"
+OUT=$(reapA)
+if echo "$OUT" | grep -q ERROR; then fail "reap after the follower left: $OUT"; else pass "reap proceeds once the follower left"; fi
 
 cleanup
 if [ "$FAILS" -eq 0 ]; then echo; echo "== done: all checks passed"; else echo; echo "== done: $FAILS check(s) FAILED"; exit 1; fi

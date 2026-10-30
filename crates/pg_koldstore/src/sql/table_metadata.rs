@@ -775,6 +775,17 @@ pub(crate) fn set_follower_value(table_oid: pgrx::pg_sys::Oid, enabled: bool) ->
     }
     if !enabled {
         super::flush::peer_prune::clear_synthetic_tombstones(table_oid)?;
+        super::follower_ack::forget(table_oid);
+    } else {
+        // Announce this follower at the generation it holds, so the leader's reaper waits for it
+        // before its first sync.
+        let held = count(
+            "SELECT COALESCE(max(generation), 0)::bigint FROM koldstore.manifest WHERE table_oid = $1",
+            &[DatumWithOid::from(table_oid)],
+        )?;
+        if let Err(error) = super::follower_ack::record(table_oid, held) {
+            pgrx::warning!("koldstore: could not record the follower acknowledgement: {error}");
+        }
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     Ok(true)

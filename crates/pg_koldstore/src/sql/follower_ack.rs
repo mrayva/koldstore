@@ -6,6 +6,11 @@
 //! lists them and defers while a live (younger than `koldstore.follower_ack_max_age_seconds`)
 //! acknowledgement is behind the leader's own generation. A follower that never acknowledged is not
 //! known to the leader, and one that went silent for longer than the max age is treated as gone.
+//!
+//! The acknowledgement is written after the follower's transaction commits, so a sync that rolled
+//! back never claims a generation the node does not hold. `set_table_follower(true)` records one at
+//! once, so the leader waits for a follower even before its first sync; `set_table_follower(false)`
+//! (promotion or decommissioning) removes it, so a node that left does not hold reaping back.
 
 use std::sync::Mutex;
 
@@ -29,7 +34,27 @@ fn prefix(namespace: &str, name: &str) -> String {
     format!("_follower_acks/{namespace}/{name}/")
 }
 
-/// Records that this follower holds leader generation `generation`.
+/// Removes this node's acknowledgement (best effort); it is rewritten at the next sync if the
+/// node is still a follower.
+pub(crate) fn forget(table_oid: pgrx::pg_sys::Oid) {
+    let result = (|| -> Result<(), String> {
+        let target = super::backup::table_target(table_oid)?;
+        let client = super::backup::storage_client(&target.storage.storage_id)?;
+        let node = super::leader_lease::node_id()?;
+        client
+            .delete(&format!("{}{node}.json", prefix(&target.namespace, &target.name)))
+            .map_err(|error| error.to_string())
+    })();
+    if let Err(error) = result {
+        pgrx::warning!("koldstore: could not remove the follower acknowledgement: {error}");
+    }
+    if let Ok(mut written) = WRITTEN.lock() {
+        written.retain(|(o, _, _)| *o != table_oid.to_u32());
+    }
+}
+
+/// Records that this follower holds leader generation `generation`, once the current
+/// transaction has committed.
 pub(crate) fn record(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<(), String> {
     let now = super::leader_lease::now_ms();
     let oid = table_oid.to_u32();
@@ -46,17 +71,20 @@ pub(crate) fn record(table_oid: pgrx::pg_sys::Oid, generation: i64) -> Result<()
     let node = super::leader_lease::node_id()?;
     let body = serde_json::to_vec(&json!({ "node": node, "generation": generation, "synced_ms": now }))
         .map_err(|error| error.to_string())?;
-    client
-        .put(
-            &format!("{}{node}.json", prefix(&target.namespace, &target.name)),
-            &body,
-            PutPrecondition::Overwrite,
-        )
-        .map_err(|error| error.to_string())?;
-    if let Ok(mut written) = WRITTEN.lock() {
-        written.retain(|(o, _, _)| *o != oid);
-        written.push((oid, generation, now));
-    }
+    let job = std::panic::AssertUnwindSafe((client, format!("{}{node}.json", prefix(&target.namespace, &target.name)), body));
+    pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::Commit, move || {
+        let job = job;
+        let std::panic::AssertUnwindSafe((client, key, body)) = job;
+        match client.put(&key, &body, PutPrecondition::Overwrite) {
+            Ok(_) => {
+                if let Ok(mut written) = WRITTEN.lock() {
+                    written.retain(|(o, _, _)| *o != oid);
+                    written.push((oid, generation, now));
+                }
+            }
+            Err(error) => pgrx::log!("koldstore: could not write the follower acknowledgement {key}: {error}"),
+        }
+    });
     Ok(())
 }
 
