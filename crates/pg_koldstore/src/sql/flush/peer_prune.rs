@@ -207,10 +207,15 @@ pub(crate) fn tombstone_fingerprint(table_oid: pgrx::pg_sys::Oid) -> Result<Stri
     .map_err(|error| error.to_string())
 }
 
-/// The leader's unflushed delete markers as `[{pk column: value}]`, capped, with a truncation flag.
-pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Value, bool), String> {
+/// Most unflushed delete markers a leader publishes at all: the inline limit times this many
+/// sidecar chunks. Beyond it the rest are hidden on followers only after the next flush.
+pub(crate) const TOMBSTONE_CHUNKS_MAX: usize = 100;
+
+/// The leader's unflushed delete markers as `[{pk column: value}]` (oldest first), capped at
+/// `koldstore.published_tombstone_limit` times `TOMBSTONE_CHUNKS_MAX`, with a truncation flag.
+pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Vec<Value>, bool), String> {
     let parts = mirror_parts(table_oid)?;
-    let limit = crate::guc::published_tombstone_limit();
+    let limit = crate::guc::published_tombstone_limit().saturating_mul(TOMBSTONE_CHUNKS_MAX);
     let object = parts
         .pk
         .iter()
@@ -232,7 +237,7 @@ pub(crate) fn leader_tombstones(table_oid: pgrx::pg_sys::Oid) -> Result<(Value, 
     };
     let truncated = keys.len() > limit;
     keys.truncate(limit);
-    Ok((Value::Array(keys), truncated))
+    Ok((keys, truncated))
 }
 
 /// Replaces this follower's synthetic delete markers (mirror rows with `op = 3` and a negative

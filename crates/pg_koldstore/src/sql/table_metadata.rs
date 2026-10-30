@@ -513,19 +513,40 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
         metadata["lease_epoch"] = json!(epoch);
     }
     // Unflushed delete markers: followers mask these keys until the marker reaches a segment.
-    if let Ok((keys, truncated)) = super::flush::peer_prune::leader_tombstones(table_oid) {
-        metadata["tombstones"] = keys;
+    // The first `koldstore.published_tombstone_limit` ride inline; the rest go to content-addressed
+    // sidecar objects the catalog lists with their checksums.
+    let target = super::backup::table_target(table_oid)?;
+    let client = super::backup::storage_client(&target.storage.storage_id)?;
+    let chunk_prefix = format!("_leader_tombstones/{}/{}/", target.namespace, target.name);
+    let mut chunk_keys = Vec::new();
+    if let Ok((mut keys, truncated)) = super::flush::peer_prune::leader_tombstones(table_oid) {
+        let limit = crate::guc::published_tombstone_limit();
+        let overflow = if keys.len() > limit { keys.split_off(limit) } else { Vec::new() };
+        let mut chunks = Vec::new();
+        for part in overflow.chunks(limit.max(1)) {
+            let body = serde_json::to_vec(part).map_err(|error| error.to_string())?;
+            let sha = koldstore_storage::content_checksum_sha256_hex(&body);
+            let chunk_key = format!("{chunk_prefix}{sha}.json");
+            client
+                .put(&chunk_key, &body, koldstore_storage::PutPrecondition::Overwrite)
+                .map_err(|error| format!("cannot write delete markers to {chunk_key}: {error}"))?;
+            chunks.push(json!({ "key": chunk_key, "sha256": sha, "count": part.len() }));
+            chunk_keys.push(chunk_key);
+        }
+        metadata["tombstones"] = Value::Array(keys);
+        if !chunks.is_empty() {
+            metadata["tombstone_chunks"] = Value::Array(chunks);
+        }
         if truncated {
             metadata["tombstones_truncated"] = json!(true);
             pgrx::warning!(
-                "koldstore: more unflushed delete markers than koldstore.published_tombstone_limit ({}); \
+                "koldstore: more unflushed delete markers than {} (koldstore.published_tombstone_limit x {}); \
                  followers see the rest only after the next flush",
-                crate::guc::published_tombstone_limit()
+                limit.saturating_mul(super::flush::peer_prune::TOMBSTONE_CHUNKS_MAX),
+                super::flush::peer_prune::TOMBSTONE_CHUNKS_MAX
             );
         }
     }
-    let target = super::backup::table_target(table_oid)?;
-    let client = super::backup::storage_client(&target.storage.storage_id)?;
     let key = leader_catalog_key(&target.namespace, &target.name);
     let generation = max_generation(&metadata);
     // Fencing floor: a node whose catalog is behind what is already published is not the leader
@@ -555,9 +576,16 @@ fn publish_leader_catalog_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, S
     koldstore_storage::publish_mutable_object(&client, &key, &bytes).map_err(|error| error.to_string())?;
     super::leader_lease::require_lease(table_oid, "publish the leader catalog")
         .map_err(|error| format!("{error} (the catalog was written just before the lease was lost; followers ignore it)"))?;
+    // Sidecars no longer listed by the catalog are garbage; a follower mid-read just retries.
+    if let Ok(objects) = client.list(&chunk_prefix) {
+        for object in objects.into_iter().filter(|object| !chunk_keys.contains(&object.key)) {
+            let _ = client.delete(&object.key);
+        }
+    }
     Ok(json!({
         "key": key, "bytes": bytes.len(), "generation": generation,
-        "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len),
+        "tombstones": metadata["tombstones"].as_array().map_or(0, Vec::len)
+            + metadata["tombstone_chunks"].as_array().map_or(0, |c| c.iter().filter_map(|c| c["count"].as_u64()).sum::<u64>() as usize),
         "tombstones_truncated": metadata["tombstones_truncated"].as_bool().unwrap_or(false),
     }))
 }
@@ -606,6 +634,23 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         )
         .map_err(|error| error.to_string())?;
     }
+    // Delete markers beyond the inline limit sit in checksummed sidecar objects.
+    let mut tombstones = metadata["tombstones"].clone();
+    if let (Some(chunks), Some(all)) = (metadata["tombstone_chunks"].as_array(), tombstones.as_array_mut()) {
+        for chunk in chunks {
+            let chunk_key = chunk["key"].as_str().ok_or("tombstone chunk has no key")?;
+            let body = client
+                .get(chunk_key)
+                .map_err(|error| format!("cannot read delete markers at {chunk_key} ({error}); the leader may have republished, retrying"))?;
+            if Some(koldstore_storage::content_checksum_sha256_hex(&body).as_str()) != chunk["sha256"].as_str() {
+                return Err(format!("delete markers at {chunk_key} do not match the catalog's checksum"));
+            }
+            match serde_json::from_slice::<Value>(&body) {
+                Ok(Value::Array(mut part)) => all.append(&mut part),
+                _ => return Err(format!("delete markers at {chunk_key} are not valid")),
+            }
+        }
+    }
     let mut result = sync_value(table_oid, &metadata)?;
     let added = take_added_ranges(&mut result);
     // Same transaction as the adoption: a failed prune rolls the sync back and the next tick
@@ -615,7 +660,7 @@ fn sync_from_leader_value(table_oid: pgrx::pg_sys::Oid) -> Result<Value, String>
         result["hot_pruned"] = pruned["hot_pruned"].clone();
     }
     if is_follower(table_oid)? && metadata.get("tombstones").is_some() {
-        let applied = super::flush::peer_prune::apply_leader_tombstones(table_oid, &metadata["tombstones"])?;
+        let applied = super::flush::peer_prune::apply_leader_tombstones(table_oid, &tombstones)?;
         result["tombstones_added"] = applied["tombstones_added"].clone();
         result["tombstones_removed"] = applied["tombstones_removed"].clone();
         result["tombstones_truncated"] = json!(metadata["tombstones_truncated"].as_bool().unwrap_or(false));

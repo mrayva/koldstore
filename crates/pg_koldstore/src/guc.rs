@@ -319,7 +319,7 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.published_tombstone_limit",
         c"Most unflushed delete markers a tiering leader publishes to its followers.",
-        c"The leader's published catalog carries its delete markers that have not reached a segment yet, so followers stop returning those keys at once. Beyond this many, the oldest are published and a warning is logged; the remainder is masked on followers only after the leader flushes (or the Spock reconciler replays the delete). Larger values make every republish bigger. 0 publishes none. Superuser-only.",
+        c"The leader's published catalog carries its delete markers that have not reached a segment yet, so followers stop returning those keys at once. This many ride inline in the catalog and any beyond it go to checksummed sidecar objects of this size, up to 100 times this many in all; past that the oldest are published and a warning is logged, and the remainder is masked on followers only after the leader flushes (or the Spock reconciler replays the delete). Larger values make every republish bigger. 0 publishes none. Superuser-only.",
         &PUBLISHED_TOMBSTONE_LIMIT,
         0,
         1_000_000,

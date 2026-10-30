@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Limits of the leader's published delete markers (two scratch clusters, shared filesystem
-# storage): koldstore.published_tombstone_limit truncation is reported and degrades safely, and a
-# key the follower writes itself is never re-masked. Pass/fail.
+# storage): markers beyond koldstore.published_tombstone_limit ride in checksummed sidecars, only
+# past limit x 100 does truncation degrade safely, and a key the follower writes itself is never
+# re-masked. Pass/fail.
 # Usage: KOLDSTORE_PKG=<cargo pgrx package output dir> [PG_BIN=...] [TLIM_TEST_DIR=...] scripts/test-tombstone-limits.sh
 set -uo pipefail
 PG_BIN=${PG_BIN:-/usr/lib/postgresql/18/bin}
@@ -62,26 +63,49 @@ ids() { q $1 spike -c "SELECT count(*) FROM t WHERE id IN ($2)" | tail -1; }
 publish 10000 >/dev/null; syncB >/dev/null
 check "follower starts equal to the leader" "$(cnt $PB)" "$(cnt $PA)"
 
-say "1: six unflushed leader deletes, limit 3"
+say "1: six unflushed leader deletes, inline limit 3: the rest ride in a checksummed sidecar"
 q $PA spike -c "SET koldstore.hydrate_on_write=on; DELETE FROM t WHERE id IN (10,11,12,13,14,15)" >/dev/null
 q $PA spike -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
 P=$(publish 3); echo "publish: $P"
-has "publish reports the cap" "$P" '"tombstones": 3'
-has "publish reports truncation" "$P" '"tombstones_truncated": true'
+has "publish reports all six" "$P" '"tombstones": 6'
+has "publish is not truncated" "$P" '"tombstones_truncated": false'
+check "one sidecar object written" "$(ls $SHARE/_leader_tombstones/public/t/ 2>/dev/null | wc -l)" "1"
 S=$(syncB); echo "sync: $S"
-has "follower sync reports truncation" "$S" '"tombstones_truncated": true'
-check "follower masks only the published markers" "$(cnt $PB)" "297"
+has "follower sync is not truncated" "$S" '"tombstones_truncated": false'
+check "follower masks all six at once" "$(cnt $PB)" "294"
 check "leader count" "$(cnt $PA)" "294"
 
-say "2: limit raised, republished"
+say "2: a corrupted sidecar is refused, and the follower keeps what it had"
+F=$(ls $SHARE/_leader_tombstones/public/t/*.json | head -1)
+cp "$F" $W/sidecar.bak; echo '[{"id": 200}]' > "$F"
+S=$(syncB); echo "sync: ${S:0:160}"
+has "follower refuses a sidecar that does not match its checksum" "$S" "checksum"
+check "follower data unchanged" "$(cnt $PB)" "294"
+cp $W/sidecar.bak "$F"
+syncB >/dev/null
+check "follower syncs again once the sidecar is intact" "$(cnt $PB)" "294"
+
+say "3: past the hard cap (limit x 100) the remainder waits for the leader's flush"
+q $PA spike -c "SET koldstore.hydrate_on_write=on; DELETE FROM t WHERE id BETWEEN 100 AND 249" >/dev/null
+q $PA spike -c "SELECT koldstore.wait_for_async_mirror() IS NOT NULL" >/dev/null
+P=$(publish 1); echo "publish: $P"
+has "publish reports 100 markers" "$P" '"tombstones": 100'
+has "publish reports truncation" "$P" '"tombstones_truncated": true'
+S=$(syncB)
+has "follower sync reports truncation" "$S" '"tombstones_truncated": true'
+check "follower masks only the published 100" "$(cnt $PB)" "200"
+check "leader count" "$(cnt $PA)" "144"
+
+say "4: limit raised, republished: everything inline, sidecars removed"
 P=$(publish 10000); echo "publish: $P"
-has "publish reports all six" "$P" '"tombstones": 6'
+has "publish reports all 156" "$P" '"tombstones": 156'
 has "publish clears the truncation flag" "$P" '"tombstones_truncated": false'
+check "stale sidecars deleted" "$(ls $SHARE/_leader_tombstones/public/t/ 2>/dev/null | wc -l)" "0"
 S=$(syncB)
 has "follower sync clears the flag" "$S" '"tombstones_truncated": false'
 check "follower agrees with the leader" "$(cnt $PB)" "$(cnt $PA)"
 
-say "3: a key the follower writes itself is not re-masked"
+say "5: a key the follower writes itself is not re-masked"
 check "ids 10-15 hidden on the follower" "$(ids $PB 10,11,12,13,14,15)" "0"
 OUT=$(q $PB spike -c "INSERT INTO t VALUES (10,'mine')")
 echo "follower insert of a masked key: ${OUT:-ok}"
