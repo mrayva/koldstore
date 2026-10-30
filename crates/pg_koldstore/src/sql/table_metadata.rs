@@ -638,12 +638,15 @@ pub fn publish_for_followers_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
         .map_err(|error| error.to_string())
         .and_then(|()| publish_leader_catalog_value(oid))
         .and_then(|mut result| {
-            result["spock_node_id"] = json!(crate::spi::select_one_sql::<String>(
-                "SELECT CASE WHEN to_regclass('spock.local_node') IS NOT NULL
-                        THEN (SELECT node_id::text FROM spock.local_node) END",
-                &[],
-            )
-            .map_err(|error| error.to_string())?);
+            let has_spock = crate::spi::select_one_sql::<bool>("SELECT to_regclass('spock.local_node') IS NOT NULL", &[])
+                .map_err(|error| error.to_string())?
+                .unwrap_or(false);
+            result["spock_node_id"] = if has_spock {
+                json!(crate::spi::select_one_sql::<String>("SELECT node_id::text FROM spock.local_node", &[])
+                    .map_err(|error| error.to_string())?)
+            } else {
+                Value::Null
+            };
             result["lsn"] = json!(if committed == 0 {
                 crate::spi::select_one_sql::<String>("SELECT pg_current_wal_lsn()::text", &[]).map_err(|error| error.to_string())?
             } else {
